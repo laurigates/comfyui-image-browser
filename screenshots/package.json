@@ -1,0 +1,9 @@
+{
+  "name": "comfyui-image-browser-screenshots",
+  "private": true,
+  "type": "module",
+  "description": "Playwright driver for generating README screenshots of comfyui-image-browser.",
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}

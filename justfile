@@ -42,3 +42,11 @@ test:
 # Typecheck + build + lint + test in one shot — the local CI gate.
 [group: "quality"]
 check: typecheck build lint test
+
+# Regenerate the README screenshot (docs/browser.png) via the containerized
+# Playwright pipeline. First build ~4 min; cached rebuild ~30 s. See
+# screenshots/README.md.
+[group: "quality"]
+screenshots:
+    docker build -f screenshots/Dockerfile -t comfyui-image-browser-screenshots .
+    docker run --rm -v "$(pwd)/docs:/out" comfyui-image-browser-screenshots
