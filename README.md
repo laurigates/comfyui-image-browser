@@ -8,6 +8,11 @@ Full-canvas file explorer for browsing and managing images across ComfyUI's inpu
 > touch-friendly HTML modals launched from the toolbar/command palette
 > that replace clunky native LiteGraph dialogs, additive and self-contained.
 
+![full-canvas image browser: Input/Output/Temp tabs, thumbnail grid, per-card open/rename/move/delete](docs/browser.png)
+
+*The full-canvas browser, opened from the top-bar button — thumbnails of the
+Output folder with per-card manage actions.*
+
 ## Install
 
 ```sh
