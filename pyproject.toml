@@ -1,0 +1,57 @@
+[project]
+name = "comfyui-image-browser"
+description = "Full-canvas file explorer for browsing and managing images across ComfyUI's input, output, temp and arbitrary paths — thumbnails plus delete, rename and move."
+version = "0.1.0"
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Lauri Gates" }]
+keywords = ["comfyui", "comfyui-nodes", "ui", "picker", "mobile", "touch"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: JavaScript",
+    "Topic :: Multimedia :: Graphics",
+]
+
+# Floor tied to the registerExtension action-bar/command API. Backend uses ComfyUI-bundled libs only (aiohttp, folder_paths, server).
+dependencies = [
+    "comfyui-frontend-package>=1.40.0",
+]
+
+[project.urls]
+Repository = "https://github.com/laurigates/comfyui-image-browser"
+Issues = "https://github.com/laurigates/comfyui-image-browser/issues"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11",
+    "pytest>=8",
+    "pre-commit>=4",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# importlib mode avoids pytest treating the pack-root __init__.py
+# (with its relative import) as a discovered package.
+addopts = "--import-mode=importlib"
+
+[tool.comfy]
+PublisherId = "laurigates"
+DisplayName = "Image Browser"
+Icon = ""
+# The built frontend (web/dist/) is committed (tracked) — emitted by `bun run build`.
+# publish-node-action honors [tool.comfy] includes to force-add otherwise-
+# ignored paths into the published tarball. See ADR-0001.
+includes = ["web/dist"]

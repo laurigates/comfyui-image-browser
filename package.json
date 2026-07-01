@@ -1,0 +1,25 @@
+{
+  "name": "comfyui-image-browser",
+  "private": true,
+  "type": "module",
+  "description": "Full-canvas file explorer for browsing and managing images across ComfyUI's input, output, temp and arbitrary paths — thumbnails plus delete, rename and move. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
+  "scripts": {
+    "build": "bun build ./src/index.ts --target browser --format esm --outdir web/dist --external '/scripts/*'",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check",
+    "knip": "knip"
+  },
+  "dependencies": {
+    "@laurigates/comfy-modal-kit": "^0.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@comfyorg/comfyui-frontend-types": "^1.43.0",
+    "@biomejs/biome": "^2.4.15",
+    "vitest": "^4.1.7",
+    "jsdom": "^29.0.0",
+    "knip": "^5.0.0"
+  }
+}

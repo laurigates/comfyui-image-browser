@@ -1,0 +1,97 @@
+name: Publish to Comfy Registry
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  publish-node:
+    name: Publish custom node to registry
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies and build frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Compute registry changelog from release notes
+        # `comfy node publish` now sends the per-version changelog natively via
+        # the COMFY_NODE_CHANGELOG env var (Comfy-Org/comfy-cli#467, released in
+        # comfy-cli 1.11+), so the registry "Updates" section is populated
+        # atomically at publish time — no post-publish PUT, no version-UUID
+        # lookup, and no TOML parsing on the runner. Flatten the release-please markdown to compact
+        # plain text (the registry renders Updates as plain text) and export it
+        # for the Publish step below, which reads COMFY_NODE_CHANGELOG from the
+        # job environment. No-op on workflow_dispatch.
+        if: github.event_name == 'release' && github.event.release.body != ''
+        env:
+          # Passed via env (not inline interpolation) so markdown/quotes in the
+          # release notes cannot inject into the shell.
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          changelog=$(python3 <<'PY'
+          import os, re
+
+          def clean(text):
+              text = re.sub(r"\(\[[0-9a-f]{6,40}\]\([^)]*\)\)", "", text)
+              text = re.sub(r"\[#([0-9]+)\]\([^)]*\)", r"#\1", text)
+              text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+              text = text.replace("**", "")
+              return re.sub(r"\s+", " ", text).strip().rstrip(".")
+
+          sections, items, current = [], [], None
+
+          def flush():
+              if items:
+                  prefix = current + ": " if current else ""
+                  sections.append(prefix + "; ".join(items) + ".")
+
+          for raw in os.environ.get("RELEASE_BODY", "").splitlines():
+              line = raw.strip()
+              if not line:
+                  continue
+              if re.match(r"^#+\s*\[?[0-9]+\.[0-9]+\.[0-9]+", line):
+                  continue
+              m = re.match(r"^#+\s+(.*)", line)
+              if m:
+                  flush()
+                  items, current = [], clean(m.group(1))
+                  continue
+              m = re.match(r"^[*-]\s+(.*)", line)
+              cleaned = clean(m.group(1) if m else line)
+              if cleaned:
+                  items.append(cleaned)
+
+          flush()
+          print("\n".join(sections))
+          PY
+          )
+          {
+            echo "COMFY_NODE_CHANGELOG<<__CHANGELOG_EOF__"
+            echo "$changelog"
+            echo "__CHANGELOG_EOF__"
+          } >> "$GITHUB_ENV"
+          if [ -n "$changelog" ]; then
+            echo "registry changelog computed (${#changelog} chars)"
+          else
+            echo "::warning::registry changelog empty after transform; Updates left empty"
+          fi
+      - name: Publish Custom Node
+        # Pinned to the main SHA that supports `skip_checkout`. web/dist is now
+        # tracked (committed), so a checkout would restore it — but the `@v1` and
+        # tagged releases run an unconditional actions/checkout that would discard
+        # the freshly built workspace and ship whatever bundle is committed.
+        # skip_checkout reuses the just-built web/dist directly.
+        uses: Comfy-Org/publish-node-action@d2366e7abb6ab16f3bb03e3520ae25c8cf749bc9 # main: skip_checkout support
+        with:
+          # PAT issued at https://registry.comfy.org/, stored as the
+          # REGISTRY_ACCESS_TOKEN repo secret.
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+          # Reuse the workspace the prior step already built (see pin comment).
+          skip_checkout: 'true'

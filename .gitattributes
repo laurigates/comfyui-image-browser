@@ -1,0 +1,13 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webp binary
+uv.lock linguist-generated=true
+bun.lock linguist-generated=true
+
+# Built frontend bundle — committed (not gitignored) so git clone / a
+# touch-manager git update carries the real served artifact, and force-shipped
+# to the Comfy Registry via [tool.comfy] includes in pyproject.toml. Treat as
+# generated: collapse/exclude in GitHub diffs+stats, suppress the noisy minified
+# textual diff, keep current-branch copy on merge (regenerated, never hand-merged).
+web/dist/** linguist-generated=true -diff -merge

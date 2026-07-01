@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-python:
+    name: Lint & format (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Ruff check
+        run: uvx ruff check .
+      - name: Ruff format check
+        run: uvx ruff format --check .
+
+  lint-js:
+    name: Lint & format (TypeScript/JSON)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Biome
+        uses: biomejs/setup-biome@v2
+        with:
+          # Pin to the schema version declared in biome.json. Bump in lockstep
+          # with a config migration via `biome migrate` when upgrading.
+          version: 2.4.15
+      - name: Biome check
+        run: biome check .
+
+  typecheck-build:
+    name: Typecheck & build (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Build
+        run: bun run build
+      - name: Verify committed web/dist is up to date
+        run: |
+          if ! git diff --exit-code -- web/dist; then
+            echo "::error::web/dist is stale vs src/. Run 'bun run build' and commit web/dist."
+            exit 1
+          fi
+
+  test:
+    name: Tests (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Run tests
+        run: uv run --group dev pytest -v
+
+  test-js:
+    name: Tests (JavaScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Run Vitest
+        run: bun run test
+
+  security:
+    name: Security scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # gitleaks scans <prev>^..<head>; the parent commit must be present
+          # locally, so a shallow clone fails with "stderr is not empty".
+          fetch-depth: 0
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

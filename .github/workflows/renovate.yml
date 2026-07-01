@@ -1,0 +1,41 @@
+name: Renovate
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: 'Dry run mode'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'full'
+          - 'lookup'
+      logLevel:
+        description: 'Log level'
+        required: false
+        default: 'info'
+        type: choice
+        options:
+          - info
+          - debug
+          - warn
+
+# Explicit grant so the run works even when the repo's default workflow
+# permissions are read-only (the reusable workflow needs write to open
+# dependency PRs and the Dependency Dashboard issue).
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  packages: read
+
+jobs:
+  renovate:
+    uses: laurigates/.github/.github/workflows/reusable-renovate.yml@main
+    with:
+      dry-run: ${{ inputs.dryRun || 'false' }}
+      log-level: ${{ inputs.logLevel || 'info' }}
