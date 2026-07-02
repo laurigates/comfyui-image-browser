@@ -10,6 +10,7 @@ const FILE_URL = "/image_browser/file";
 const DELETE_URL = "/image_browser/delete";
 const RENAME_URL = "/image_browser/rename";
 const MOVE_URL = "/image_browser/move";
+export const RATING_URL = "/image_browser/rating";
 
 export const IMG_EXTS = new Set([
   ".png",
@@ -61,6 +62,7 @@ export interface ListingFile {
   size?: number;
   width?: number;
   height?: number;
+  rating?: number;
 }
 
 interface ListResponse {

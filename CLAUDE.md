@@ -26,6 +26,7 @@ in the HTTP endpoints + the served bundle.
 | `/delete` | POST | `{type, subfolder, name}` — delete a file. |
 | `/rename` | POST | `{type, subfolder, name, new_name}` — rename in place. |
 | `/move` | POST | `{type, subfolder, name, dest_type, dest_subfolder}` — move between roots/subfolders. |
+| `/rating` | POST | `{type, subfolder, name, rating}` — persist a 0..5 star rating into the file's XMP (or sidecar). Sandboxed types only, like all writes. |
 
 ## File layout
 
@@ -38,6 +39,7 @@ in the HTTP endpoints + the served bundle.
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import (via the `paths` mapping in `tsconfig.json`). |
 | `__init__.py` | Loader stub. Imports (empty) node mappings from the backend module; exports `WEB_DIRECTORY = "./web/dist"`. |
 | `image_browser.py` | HTTP endpoints only (no node). Bundled libs + stdlib only; reads gate on an extension whitelist, writes are sandboxed to input/output/temp. |
+| `xmp_meta.py` | **Vendored verbatim** from its canonical home `comfyui-gallery-loader/xmp_meta.py` — do not edit here. Re-sync with `just sync-xmp`; CI fails on drift. Pure stdlib XMP rating read/write (in-file PNG/JPEG surgery + `.xmp` sidecar). |
 | `web/dist/` | **Generated** by `bun run build`, committed (tracked) so git clone/update carries it. ComfyUI serves it at `/extensions/comfyui-image-browser/`. |
 | `pyproject.toml` | Comfy Registry metadata. `PublisherId` + `version` are the fields you touch; `[tool.comfy] includes = ["web/dist"]` force-ships the built output. |
 | `tsconfig.json` / `biome.json` / `knip.json` | Strict TS config, Biome lint/format, knip dead-code. |
