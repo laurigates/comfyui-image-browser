@@ -82,6 +82,18 @@ jobs:
       - name: Run Vitest
         run: bun run test
 
+  vendored-drift:
+    name: Vendored xmp_meta.py matches canonical
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Diff against comfyui-gallery-loader@main
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/xmp_meta.py | diff -u - xmp_meta.py || {
+            echo "::error::xmp_meta.py drifted from its canonical home (comfyui-gallery-loader). Run 'just sync-xmp' — or land the fix upstream first."
+            exit 1
+          }
+
   security:
     name: Security scanning
     runs-on: ubuntu-latest

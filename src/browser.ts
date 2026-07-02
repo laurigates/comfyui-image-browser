@@ -6,8 +6,17 @@
 // per-widget modal — and it MANAGES files (delete / rename / move) instead of
 // committing a value to a node widget.
 
-import type { ModalShellController } from "@laurigates/comfy-modal-kit";
-import { fuzzyScore, notify, openModalShell } from "@laurigates/comfy-modal-kit";
+import type { ModalShellController, RatingAddress } from "@laurigates/comfy-modal-kit";
+import {
+  applyStars,
+  fuzzyScore,
+  nextRating,
+  notify,
+  openModalShell,
+  postRating,
+  ratingOf,
+  starsHTML,
+} from "@laurigates/comfy-modal-kit";
 import {
   type BrowseType,
   deleteFile,
@@ -20,6 +29,7 @@ import {
   joinAbs,
   type ListingFile,
   moveFile,
+  RATING_URL,
   renameFile,
   SANDBOXED_TYPES,
   VIDEO_EXTS,
@@ -36,6 +46,8 @@ const VALID_SORTS = new Set([
   "name:desc",
   "size:desc",
   "pixels:desc",
+  "rating:desc",
+  "rating:asc",
 ]);
 
 interface BrowserState {
@@ -142,7 +154,9 @@ export function openImageBrowser(): ModalShellController {
     <option value="name:asc">Name A→Z</option>
     <option value="name:desc">Name Z→A</option>
     <option value="size:desc">Largest file</option>
-    <option value="pixels:desc">Highest resolution</option>`;
+    <option value="pixels:desc">Highest resolution</option>
+    <option value="rating:desc">Highest rating</option>
+    <option value="rating:asc">Lowest rating</option>`;
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
 
   const refreshEl = document.createElement("button");
@@ -242,6 +256,17 @@ export function openImageBrowser(): ModalShellController {
     // File card.
     const name = card.dataset.name as string;
     const ext = card.dataset.ext || "";
+    const star = target.closest(".ib-star") as HTMLElement | null;
+    if (star) {
+      e.stopPropagation();
+      const row = star.closest(".ib-stars") as HTMLElement | null;
+      // Interactive stars only render for the sandboxed roots (canWrite);
+      // the defensive gate keeps a stale DOM from posting a path write.
+      if (!row || !SANDBOXED_TYPES.includes(state.type)) return;
+      const cur = Number(row.dataset.rating || "0");
+      setStarRating(name, row, nextRating(cur, Number(star.dataset.val)));
+      return;
+    }
     if (actionBtn) {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
@@ -255,6 +280,31 @@ export function openImageBrowser(): ModalShellController {
   });
 
   // ---- File actions ---------------------------------------------
+  function setStarRating(name: string, row: HTMLElement, next: number): void {
+    const prev = Number(row.dataset.rating || "0");
+    applyStars(row, next);
+    const f = state.files.find((x) => x.name === name);
+    if (f) f.rating = next;
+    const addr: RatingAddress = {
+      type: state.type,
+      subfolder: state.subfolder,
+      absDir: state.absPath,
+      name,
+    };
+    postRating(RATING_URL, addr, next)
+      .then((confirmed) => {
+        if (confirmed !== next) {
+          applyStars(row, confirmed);
+          if (f) f.rating = confirmed;
+        }
+      })
+      .catch((e) => {
+        reportError("Rating failed", e);
+        applyStars(row, prev);
+        if (f) f.rating = prev;
+      });
+  }
+
   function openFull(name: string, _ext: string): void {
     const url = fullSrcURL(state.type, state.subfolder, name, state.absPath);
     window.open(url, "_blank", "noopener");
@@ -460,10 +510,18 @@ export function openImageBrowser(): ModalShellController {
            ${moveBtn}
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">🗑</button>`
         : "";
+      // Rating writes are sandboxed like the other mutations, so path mode
+      // gets a read-only star display (when rated) instead of dead buttons.
+      const starsRow = canWrite
+        ? starsHTML("ib", ratingOf(f))
+        : ratingOf(f)
+          ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>`
+          : "";
       c.innerHTML = `
         <div class="ib-thumb">${thumbInner}</div>
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
+        ${starsRow}
         <div class="ib-actions">
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
           ${writeBtns}
@@ -690,6 +748,9 @@ function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[
     case "pixels":
       cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
       break;
+    case "rating":
+      cmp = numCmp((f) => f.rating);
+      break;
     default:
       cmp = numCmp((f) => f.mtime);
       break;
@@ -765,6 +826,13 @@ const BROWSER_CSS = `
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 .ib-meta { padding: 0 8px 4px; font-size: 10.5px; color: #888; }
+.ib-stars { display: flex; justify-content: center; gap: 1px; padding: 0 6px 4px; }
+.ib-star {
+    appearance: none; background: transparent; border: 0; padding: 0 1px;
+    font-size: 14px; line-height: 1; color: #555; cursor: pointer;
+}
+.ib-star.is-on, .ib-star:hover { color: #ffd866; }
+.ib-stars.is-ro { color: #ffd866; font-size: 12px; cursor: default; }
 .ib-actions { display: flex; gap: 2px; padding: 0 6px 6px; margin-top: auto; }
 .ib-act {
     flex: 1; background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;

@@ -5,7 +5,7 @@
     "": {
       "name": "comfyui-image-browser",
       "dependencies": {
-        "@laurigates/comfy-modal-kit": "^0.3.1",
+        "@laurigates/comfy-modal-kit": "^0.5.0",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.4.15",
@@ -80,7 +80,7 @@
 
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
-    "@laurigates/comfy-modal-kit": ["@laurigates/comfy-modal-kit@0.3.1", "", {}, "sha512-Rqbz5dS1bdfGC0YbWGJsAL1qrlxxrQevph5WeDh4UaDjdhNCO3iyQ+jGzq3/OF/Um78A6DcDDJ9cbH1JC6dPFg=="],
+    "@laurigates/comfy-modal-kit": ["@laurigates/comfy-modal-kit@0.5.0", "", {}, "sha512-zs6+tvso/sUHhOngie+9U6z0Z7f25S6JiOaDQGD1c9rIzIw7Sppw0Wj07Sieuw/37PmhcsY+acjZFRjLUtODWQ=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.6", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg=="],
 

@@ -18,14 +18,15 @@ Endpoint surface (all under /image_browser/):
     POST /delete   {type, subfolder, name}                      delete a file
     POST /rename   {type, subfolder, name, new_name}            rename in place
     POST /move     {type, subfolder, name, dest_type, dest_subfolder}   move
+    POST /rating   {type, subfolder, name, rating}              0..5 star rating
 
 Security posture:
 
   * Reads (list/thumb/file) accept the sandboxed types (input/output/temp) AND
     arbitrary absolute paths (``type=path``) — the same reach as gallery-loader.
     Arbitrary-path reads are gated on the extension whitelist below.
-  * Writes (delete/rename/move) are restricted to the **sandboxed** roots
-    (input/output/temp) only — ``type=path`` is rejected. Every write also
+  * Writes (delete/rename/move/rating) are restricted to the **sandboxed**
+    roots (input/output/temp) only — ``type=path`` is rejected. Every write also
     re-asserts a bare (traversal-free) filename, the extension whitelist, and
     containment within the resolved root. Arbitrary-path mutation is out of
     scope for v1 by design.
@@ -46,6 +47,16 @@ import folder_paths
 from aiohttp import web
 from PIL import Image
 from server import PromptServer
+
+try:
+    # ComfyUI imports custom_nodes as packages, so the sibling module must
+    # be pulled in relatively — a bare ``import xmp_meta`` raises
+    # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
+    from . import xmp_meta
+except ImportError:
+    # Pytest imports this module flat (pack root on sys.path via pyproject's
+    # ``pythonpath = ["."]``); fall back to the absolute import.
+    import xmp_meta
 
 log = logging.getLogger("comfyui-image-browser")
 
@@ -213,6 +224,10 @@ async def image_browser_list(request: web.Request) -> web.Response:
                                     width, height = im.size
                             except Exception:
                                 pass
+                        try:
+                            rating = xmp_meta.read_rating_cached(entry.path, st)
+                        except Exception:
+                            rating = 0
                         files.append(
                             {
                                 "name": entry.name,
@@ -221,6 +236,7 @@ async def image_browser_list(request: web.Request) -> web.Response:
                                 "width": width,
                                 "height": height,
                                 "ext": ext,
+                                "rating": rating,
                             }
                         )
                 except OSError:
@@ -425,6 +441,54 @@ async def image_browser_move(request: web.Request) -> web.Response:
     except OSError as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True})
+
+
+def _parse_rating(value: Any) -> int | None:
+    """Return the rating as an int 0..5, or None when invalid.
+
+    Rejects bool (a JSON ``true`` is an ``int`` subclass in Python) and
+    anything outside the star range — the endpoint 400s rather than clamps,
+    so a buggy client is surfaced instead of silently rounded.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not (0 <= value <= 5):
+        return None
+    return value
+
+
+@PromptServer.instance.routes.post("/image_browser/rating")
+async def image_browser_rating(request: web.Request) -> web.Response:
+    """Persist a 0..5 star rating into a file's XMP (or a sidecar).
+
+    Body: ``{type, subfolder, name, rating}``. Rating writes mutate the file,
+    so they go through the same sandbox gate as delete/rename/move —
+    ``type=path`` is rejected (ADR-0002: writes only in input/output/temp).
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+
+    rating = _parse_rating(body.get("rating"))
+    if rating is None:
+        return web.json_response(
+            {"ok": False, "error": "rating must be an integer 0..5"}, status=400
+        )
+
+    target, err = _resolve_sandboxed_file(
+        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+    )
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert target is not None
+    if not os.path.isfile(target):
+        return web.json_response({"ok": False, "error": "file not found"}, status=404)
+
+    ok, backend = xmp_meta.write_rating(target, rating)
+    if not ok:
+        return web.json_response({"ok": False, "error": backend}, status=500)
+    return web.json_response({"ok": True, "rating": rating, "backend": backend})
 
 
 # No custom node — this pack is a pure frontend view. Keeping the mappings empty

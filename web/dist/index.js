@@ -10,6 +10,7 @@ var FILE_URL = "/image_browser/file";
 var DELETE_URL = "/image_browser/delete";
 var RENAME_URL = "/image_browser/rename";
 var MOVE_URL = "/image_browser/move";
+var RATING_URL = "/image_browser/rating";
 var IMG_EXTS = new Set([
   ".png",
   ".jpg",
@@ -130,6 +131,56 @@ function moveFile(type, subfolder, name, destType, destSubfolder) {
 }
 
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+var KEY = Symbol.for("laurigates.comfyModalKit");
+function getKit() {
+  const g = globalThis;
+  let kit = g[KEY];
+  if (!kit) {
+    kit = { fieldProviders: [], activeModal: null, pointerClaim: null };
+    g[KEY] = kit;
+  }
+  return kit;
+}
+var guardInstalled = false;
+function setActiveModal(handle) {
+  installPointerGuard();
+  dismissActiveModal();
+  getKit().activeModal = handle;
+}
+function dismissActiveModal() {
+  const kit = getKit();
+  const active = kit.activeModal;
+  if (!active)
+    return;
+  kit.activeModal = null;
+  try {
+    active.close();
+  } catch (e) {
+    console.warn("[comfy-modal-kit] active modal close() threw", e);
+  }
+}
+function getActiveModal() {
+  return getKit().activeModal;
+}
+function installPointerGuard() {
+  if (guardInstalled)
+    return;
+  if (typeof window === "undefined")
+    return;
+  guardInstalled = true;
+  window.addEventListener("pointerdown", pointerGuard, true);
+}
+function pointerGuard(e) {
+  const active = getKit().activeModal;
+  if (!active)
+    return;
+  const target = e.target;
+  if (active.element && target && active.element.contains(target)) {
+    return;
+  }
+  e.stopImmediatePropagation();
+  dismissActiveModal();
+}
 function fuzzyScore(query, target) {
   if (!query)
     return { score: 0, matches: [] };
@@ -388,8 +439,50 @@ function notify(opts) {
   }
   return { close, el: toast };
 }
+var MAX_RATING = 5;
+function ratingOf(f) {
+  const r = f.rating;
+  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
+}
+function nextRating(cur, val) {
+  return val === cur ? 0 : val;
+}
+function ratingRequestBody(addr, rating) {
+  if (addr.type === "path") {
+    return { type: "path", path: addr.absDir, name: addr.name, rating };
+  }
+  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
+}
+async function postRating(url, addr, rating) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ratingRequestBody(addr, rating))
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok)
+    throw new Error(data.error || "rating failed");
+  return typeof data.rating === "number" ? data.rating : rating;
+}
+function starsHTML(prefix, rating) {
+  const r = ratingOf({ rating });
+  let buttons = "";
+  for (let i = 1;i <= MAX_RATING; i++) {
+    const on = i <= r ? " is-on" : "";
+    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
+  }
+  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
+}
+function applyStars(row, rating) {
+  const r = ratingOf({ rating });
+  row.dataset.rating = String(r);
+  for (const s of row.querySelectorAll("[data-val]")) {
+    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
+  }
+}
 var STYLE_ID2 = "cmp-shell-style";
-var ACTIVE = null;
 var CSS2 = `
 .cmp-backdrop {
     position: fixed;
@@ -547,29 +640,10 @@ function ensureStyle2() {
   s.textContent = CSS2;
   document.head.appendChild(s);
 }
-function dismissActive() {
-  if (!ACTIVE)
-    return;
-  const a = ACTIVE;
-  ACTIVE = null;
-  try {
-    a.backdrop.remove();
-    a.dialog.remove();
-    document.removeEventListener("keydown", a._onKey, true);
-  } finally {
-    try {
-      a.opts.onClose?.();
-    } catch (e) {
-      console.warn("[modal-shell] onClose threw", e);
-    }
-  }
-}
 function openModalShell(opts = {}) {
   ensureStyle2();
-  dismissActive();
   const backdrop = document.createElement("div");
   backdrop.className = "cmp-backdrop";
-  backdrop.addEventListener("pointerdown", dismissActive);
   const dialog = document.createElement("div");
   dialog.className = "cmp-dialog";
   if (opts.width)
@@ -596,7 +670,6 @@ function openModalShell(opts = {}) {
   closeBtn.type = "button";
   closeBtn.textContent = "×";
   closeBtn.title = "Close (Esc)";
-  closeBtn.addEventListener("click", dismissActive);
   headerEl.append(titleEl, closeBtn);
   const toolbarEl = document.createElement("div");
   toolbarEl.className = "cmp-toolbar";
@@ -629,11 +702,38 @@ function openModalShell(opts = {}) {
     footerEl.style.display = "none";
   }
   dialog.append(headerEl, toolbarEl, searchRow, bodyEl, footerEl);
+  let torn = false;
+  const teardown = () => {
+    if (torn)
+      return;
+    torn = true;
+    try {
+      backdrop.remove();
+      dialog.remove();
+      document.removeEventListener("keydown", onKey, true);
+    } finally {
+      try {
+        opts.onClose?.();
+      } catch (e) {
+        console.warn("[modal-shell] onClose threw", e);
+      }
+    }
+  };
+  const handle = { id: "modal-shell", element: dialog, close: teardown };
+  const requestClose = () => {
+    if (getActiveModal() === handle) {
+      dismissActiveModal();
+    } else {
+      teardown();
+    }
+  };
+  backdrop.addEventListener("pointerdown", requestClose);
+  closeBtn.addEventListener("click", requestClose);
   const onKey = (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      dismissActive();
+      requestClose();
       return;
     }
     try {
@@ -659,14 +759,14 @@ function openModalShell(opts = {}) {
     setStatus(s) {
       statusEl.textContent = s || "";
     },
-    close: dismissActive,
+    close: requestClose,
     _onKey: onKey,
     opts
   };
-  ACTIVE = controller;
+  setActiveModal(handle);
   if (opts.showSearch !== false) {
     requestAnimationFrame(() => {
-      if (ACTIVE === controller)
+      if (getActiveModal() === handle)
         searchEl.focus();
     });
   }
@@ -854,7 +954,9 @@ var VALID_SORTS = new Set([
   "name:asc",
   "name:desc",
   "size:desc",
-  "pixels:desc"
+  "pixels:desc",
+  "rating:desc",
+  "rating:asc"
 ]);
 function loadSavedSort() {
   try {
@@ -922,7 +1024,9 @@ function openImageBrowser() {
     <option value="name:asc">Name A→Z</option>
     <option value="name:desc">Name Z→A</option>
     <option value="size:desc">Largest file</option>
-    <option value="pixels:desc">Highest resolution</option>`;
+    <option value="pixels:desc">Highest resolution</option>
+    <option value="rating:desc">Highest rating</option>
+    <option value="rating:asc">Lowest rating</option>`;
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
   const refreshEl = document.createElement("button");
   refreshEl.type = "button";
@@ -1017,6 +1121,16 @@ function openImageBrowser() {
     }
     const name = card.dataset.name;
     const ext = card.dataset.ext || "";
+    const star = target.closest(".ib-star");
+    if (star) {
+      e.stopPropagation();
+      const row = star.closest(".ib-stars");
+      if (!row || !SANDBOXED_TYPES.includes(state.type))
+        return;
+      const cur = Number(row.dataset.rating || "0");
+      setStarRating(name, row, nextRating(cur, Number(star.dataset.val)));
+      return;
+    }
     if (actionBtn) {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
@@ -1032,6 +1146,31 @@ function openImageBrowser() {
     }
     openFull(name, ext);
   });
+  function setStarRating(name, row, next) {
+    const prev = Number(row.dataset.rating || "0");
+    applyStars(row, next);
+    const f = state.files.find((x) => x.name === name);
+    if (f)
+      f.rating = next;
+    const addr = {
+      type: state.type,
+      subfolder: state.subfolder,
+      absDir: state.absPath,
+      name
+    };
+    postRating(RATING_URL, addr, next).then((confirmed) => {
+      if (confirmed !== next) {
+        applyStars(row, confirmed);
+        if (f)
+          f.rating = confirmed;
+      }
+    }).catch((e) => {
+      reportError("Rating failed", e);
+      applyStars(row, prev);
+      if (f)
+        f.rating = prev;
+    });
+  }
   function openFull(name, _ext) {
     const url = fullSrcURL(state.type, state.subfolder, name, state.absPath);
     window.open(url, "_blank", "noopener");
@@ -1226,10 +1365,12 @@ ${when}`;
       const writeBtns = canWrite ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
            ${moveBtn}
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
+      const starsRow = canWrite ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
       c.innerHTML = `
         <div class="ib-thumb">${thumbInner}</div>
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
+        ${starsRow}
         <div class="ib-actions">
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
           ${writeBtns}
@@ -1425,6 +1566,9 @@ function sortFiles(files, key, dir) {
     case "pixels":
       cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
       break;
+    case "rating":
+      cmp = numCmp((f) => f.rating);
+      break;
     default:
       cmp = numCmp((f) => f.mtime);
       break;
@@ -1485,6 +1629,13 @@ var BROWSER_CSS = `
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 .ib-meta { padding: 0 8px 4px; font-size: 10.5px; color: #888; }
+.ib-stars { display: flex; justify-content: center; gap: 1px; padding: 0 6px 4px; }
+.ib-star {
+    appearance: none; background: transparent; border: 0; padding: 0 1px;
+    font-size: 14px; line-height: 1; color: #555; cursor: pointer;
+}
+.ib-star.is-on, .ib-star:hover { color: #ffd866; }
+.ib-stars.is-ro { color: #ffd866; font-size: 12px; cursor: default; }
 .ib-actions { display: flex; gap: 2px; padding: 0 6px 6px; margin-top: auto; }
 .ib-act {
     flex: 1; background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;

@@ -60,3 +60,21 @@ class TestResolveSandboxedFileRejections:
         target, err = ib._resolve_sandboxed_file("output", "", "payload.exe")
         assert target is None
         assert err == "unsupported file type"
+
+
+class TestParseRating:
+    def test_accepts_star_range(self):
+        for r in range(6):
+            assert ib._parse_rating(r) == r
+
+    def test_rejects_out_of_range(self):
+        assert ib._parse_rating(-1) is None
+        assert ib._parse_rating(6) is None
+
+    def test_rejects_bool_and_non_int(self):
+        # bool is an int subclass — JSON true must not read as rating 1.
+        assert ib._parse_rating(True) is None
+        assert ib._parse_rating(False) is None
+        assert ib._parse_rating("3") is None
+        assert ib._parse_rating(3.0) is None
+        assert ib._parse_rating(None) is None
