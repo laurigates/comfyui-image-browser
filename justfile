@@ -70,3 +70,24 @@ check-xmp-drift:
 screenshots:
     docker build -f screenshots/Dockerfile -t comfyui-image-browser-screenshots .
     docker run --rm -v "$(pwd)/docs:/out" comfyui-image-browser-screenshots
+
+##########
+# Live smoke
+##########
+
+# Pinned CPU ComfyUI + this pack + seeded input/output/temp media — the
+# CLAUDE.md live-smoke target without touching a real install.
+# Run the screenshots image as a local ComfyUI server on :8188 (Ctrl+C stops).
+[group: "smoke"]
+smoke-server:
+    docker build -f screenshots/Dockerfile -t comfyui-image-browser-smoke .
+    docker run --rm -it --name ib-smoke -p 8188:8188 --entrypoint bash comfyui-image-browser-smoke -c 'cd /opt/ComfyUI && exec python main.py --cpu --listen 0.0.0.0 --port 8188 --disable-auto-launch'
+
+# Backend .py changes still need a fresh smoke-server (baked into the image);
+# after the swap, hard-refresh the browser — no container rebuild or restart.
+# Rebuild the frontend bundle and hot-swap it into the running smoke server.
+[group: "smoke"]
+smoke-sync:
+    bun run build
+    docker cp web/dist/index.js ib-smoke:/opt/ComfyUI/custom_nodes/comfyui-image-browser/web/dist/index.js
+    @echo "bundle swapped — hard-refresh the browser (Cmd+Shift+R)"
