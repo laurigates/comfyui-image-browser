@@ -828,10 +828,14 @@ const BROWSER_CSS = `
 .ib-meta { padding: 0 8px 4px; font-size: 10.5px; color: #888; }
 .ib-stars { display: flex; justify-content: center; gap: 1px; padding: 0 6px 4px; }
 .ib-star {
-    appearance: none; background: transparent; border: 0; padding: 0 1px;
-    font-size: 14px; line-height: 1; color: #555; cursor: pointer;
+    appearance: none; background: transparent; border: 0; padding: 5px 4px;
+    font-size: 15px; line-height: 1; color: #555; cursor: pointer;
+    min-width: 26px; min-height: 26px;
 }
 .ib-star.is-on, .ib-star:hover { color: #ffd866; }
+@media (max-width: 600px) {
+    .ib-star { font-size: 18px; padding: 7px 5px; min-width: 30px; min-height: 32px; }
+}
 .ib-stars.is-ro { color: #ffd866; font-size: 12px; cursor: default; }
 .ib-actions { display: flex; gap: 2px; padding: 0 6px 6px; margin-top: auto; }
 .ib-act {
