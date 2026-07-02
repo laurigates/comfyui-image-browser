@@ -95,6 +95,12 @@ Backend `.py` changes need a ComfyUI restart; frontend needs `bun run build` +
 hard-refresh. See `comfyui-pack-live-smoke.md` — `just check` cannot catch
 frontend↔backend contract bugs (route names, JSON shapes, the write-gate mirror).
 
+No install handy? **`just smoke-server`** runs the screenshots image as a
+disposable local ComfyUI on `localhost:8188` (pinned CPU build, this pack baked
+in, input/output/temp pre-seeded). While it runs, **`just smoke-sync`**
+rebuilds the bundle and hot-swaps it into the container — hard-refresh, no
+restart. Backend `.py` edits need a fresh `smoke-server` (baked into the image).
+
 | Action | Expected |
 |---|---|
 | Toolbar **Image Browser** button | Opens a full-viewport gallery; Output tab shows newest-first thumbnails. |
