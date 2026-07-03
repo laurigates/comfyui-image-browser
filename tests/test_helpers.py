@@ -133,16 +133,12 @@ class TestBatchEndpointsRegistered:
     def test_delete_many_route_present(self):
         registered = PromptServer.instance.routes.registered
         assert any(
-            r.method == "POST" and r.path == "/image_browser/delete_many"
-            for r in registered
+            r.method == "POST" and r.path == "/image_browser/delete_many" for r in registered
         )
 
     def test_move_many_route_present(self):
         registered = PromptServer.instance.routes.registered
-        assert any(
-            r.method == "POST" and r.path == "/image_browser/move_many"
-            for r in registered
-        )
+        assert any(r.method == "POST" and r.path == "/image_browser/move_many" for r in registered)
 
 
 # Imported at the bottom so the class above can reference the stubbed server

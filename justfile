@@ -20,10 +20,11 @@ build:
 typecheck:
     bun run typecheck
 
-# Lint Python + TS/JSON (no changes).
+# Lint Python + TS/JSON (no changes). Mirrors CI, which also format-checks.
 [group: "quality"]
 lint:
     uv run ruff check .
+    uv run ruff format --check .
     bunx @biomejs/biome@2.4.15 check
 
 # Auto-format Python + TS/JSON.

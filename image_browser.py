@@ -535,9 +535,7 @@ async def image_browser_move_many(request: web.Request) -> web.Response:
     errors: list[dict[str, str]] = []
     for item in items:
         name = item.get("name", "")
-        src, err = _resolve_sandboxed_file(
-            item.get("type", ""), item.get("subfolder") or "", name
-        )
+        src, err = _resolve_sandboxed_file(item.get("type", ""), item.get("subfolder") or "", name)
         if err:
             errors.append({"name": name, "error": err})
             continue
