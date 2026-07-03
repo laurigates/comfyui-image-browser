@@ -15,10 +15,12 @@ Endpoint surface (all under /image_browser/):
     GET  /list?type=&subfolder=&path=&…     directory listing (dirs + files)
     GET  /thumb?path=                       WebP thumbnail for an absolute path
     GET  /file?path=                        stream a file at an absolute path
-    POST /delete   {type, subfolder, name}                      delete a file
-    POST /rename   {type, subfolder, name, new_name}            rename in place
-    POST /move     {type, subfolder, name, dest_type, dest_subfolder}   move
-    POST /rating   {type, subfolder, name, rating}              0..5 star rating
+    POST /delete       {type, subfolder, name}                      delete a file
+    POST /delete_many  {items:[{type,subfolder,name}, …]}           batch delete
+    POST /rename       {type, subfolder, name, new_name}            rename in place
+    POST /move         {type, subfolder, name, dest_type, dest_subfolder}   move
+    POST /move_many    {items:[{type,subfolder,name}, …], dest_type, dest_subfolder} batch move
+    POST /rating       {type, subfolder, name, rating}              0..5 star rating
 
 Security posture:
 
@@ -441,6 +443,131 @@ async def image_browser_move(request: web.Request) -> web.Response:
     except OSError as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True})
+
+
+def _validate_batch_items(
+    body: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, web.Response | None]:
+    """Validate the ``items`` list of a batch body. Returns (items, None) or (None, resp).
+
+    Each item's per-field shape (type/subfolder/name) is enforced downstream
+    by ``_resolve_sandboxed_file`` — here we only assert the body is a
+    non-empty list of objects, so a malformed top-level request 400s before
+    any disk touch.
+    """
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return None, web.json_response(
+            {"ok": False, "error": "items must be a non-empty list"}, status=400
+        )
+    for item in items:
+        if not isinstance(item, dict):
+            return None, web.json_response(
+                {"ok": False, "error": "items must be objects"}, status=400
+            )
+    return items, None
+
+
+@PromptServer.instance.routes.post("/image_browser/delete_many")
+async def image_browser_delete_many(request: web.Request) -> web.Response:
+    """Delete multiple files in one request (batch delete).
+
+    Body: ``{items: [{type, subfolder, name}, ...]}``. Each item goes through
+    ``_resolve_sandboxed_file`` (rejects ``type=path``, traversal, non-media),
+    so the security perimeter is identical to single delete. Per-item errors
+    are collected so partial successes surface to the caller instead of
+    short-circuiting the whole batch.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+    items, err_resp = _validate_batch_items(body)
+    if err_resp:
+        return err_resp
+    assert items is not None
+
+    deleted = 0
+    errors: list[dict[str, str]] = []
+    for item in items:
+        name = item.get("name", "")
+        target, err = _resolve_sandboxed_file(
+            item.get("type", ""), item.get("subfolder") or "", name
+        )
+        if err:
+            errors.append({"name": name, "error": err})
+            continue
+        assert target is not None
+        if not os.path.isfile(target):
+            errors.append({"name": name, "error": "file not found"})
+            continue
+        try:
+            os.remove(target)
+            deleted += 1
+        except OSError as exc:
+            errors.append({"name": name, "error": str(exc)})
+    return web.json_response({"ok": True, "deleted": deleted, "errors": errors})
+
+
+@PromptServer.instance.routes.post("/image_browser/move_many")
+async def image_browser_move_many(request: web.Request) -> web.Response:
+    """Move multiple files into one destination folder in one request.
+
+    Body: ``{items: [{type, subfolder, name}, ...], dest_type, dest_subfolder}``.
+    Each item's source AND destination go through ``_resolve_sandboxed_file``
+    (rejects ``type=path``, traversal, non-media). Basename is kept; the
+    destination folder is resolved per item so a bad dest surfaces per-file.
+    Per-item errors are collected so partial successes surface to the caller.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+    items, err_resp = _validate_batch_items(body)
+    if err_resp:
+        return err_resp
+    assert items is not None
+
+    dest_type = body.get("dest_type", "")
+    dest_subfolder = body.get("dest_subfolder") or ""
+
+    moved = 0
+    errors: list[dict[str, str]] = []
+    for item in items:
+        name = item.get("name", "")
+        src, err = _resolve_sandboxed_file(
+            item.get("type", ""), item.get("subfolder") or "", name
+        )
+        if err:
+            errors.append({"name": name, "error": err})
+            continue
+        assert src is not None
+        dst, err = _resolve_sandboxed_file(dest_type, dest_subfolder, name)
+        if err:
+            errors.append({"name": name, "error": f"destination: {err}"})
+            continue
+        assert dst is not None
+        if not os.path.isfile(src):
+            errors.append({"name": name, "error": "file not found"})
+            continue
+        if os.path.abspath(src) == os.path.abspath(dst):
+            errors.append({"name": name, "error": "source and destination are the same"})
+            continue
+        if os.path.exists(dst):
+            errors.append(
+                {"name": name, "error": "a file with that name already exists at the destination"}
+            )
+            continue
+        dst_dir = os.path.dirname(dst)
+        if not os.path.isdir(dst_dir):
+            errors.append({"name": name, "error": "destination folder does not exist"})
+            continue
+        try:
+            shutil.move(src, dst)
+            moved += 1
+        except OSError as exc:
+            errors.append({"name": name, "error": str(exc)})
+    return web.json_response({"ok": True, "moved": moved, "errors": errors})
 
 
 def _parse_rating(value: Any) -> int | None:

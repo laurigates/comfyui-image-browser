@@ -8,8 +8,10 @@ const LIST_URL = "/image_browser/list";
 const THUMB_URL = "/image_browser/thumb";
 const FILE_URL = "/image_browser/file";
 const DELETE_URL = "/image_browser/delete";
+const DELETE_MANY_URL = "/image_browser/delete_many";
 const RENAME_URL = "/image_browser/rename";
 const MOVE_URL = "/image_browser/move";
+const MOVE_MANY_URL = "/image_browser/move_many";
 export const RATING_URL = "/image_browser/rating";
 
 export const IMG_EXTS = new Set([
@@ -214,6 +216,76 @@ export function moveFile(
     type,
     subfolder,
     name,
+    dest_type: destType,
+    dest_subfolder: destSubfolder,
+  });
+}
+
+// ---- Batch mutations (sandboxed roots only) ---------------------------
+//
+// Batch endpoints return ok:true with per-item errors in an errors[] array —
+// a partial success is NOT a throw. The wrapper only throws on a top-level
+// failure (non-2xx or ok:false), so the caller can surface per-item failures
+// after re-listing the directory.
+
+export interface BatchItem {
+  type: BrowseType;
+  subfolder: string;
+  name: string;
+}
+
+export interface BatchError {
+  name: string;
+  error: string;
+}
+
+export interface DeleteManyResult {
+  ok: boolean;
+  deleted: number;
+  errors?: BatchError[];
+}
+
+export interface MoveManyResult {
+  ok: boolean;
+  moved: number;
+  errors?: BatchError[];
+}
+
+async function postJSONBatch<T extends { ok: boolean; errors?: BatchError[] }>(
+  url: string,
+  body: unknown,
+): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data: T;
+  try {
+    data = (await r.json()) as T;
+  } catch {
+    throw new Error(`HTTP ${r.status}`);
+  }
+  // Batch endpoints return ok:true even when some items failed (the errors
+  // list carries per-item detail). Only throw on a top-level failure.
+  if (!r.ok || !data?.ok) {
+    const msg = (data as { error?: string })?.error || `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+export function deleteMany(items: BatchItem[]): Promise<DeleteManyResult> {
+  return postJSONBatch<DeleteManyResult>(DELETE_MANY_URL, { items });
+}
+
+export function moveMany(
+  items: BatchItem[],
+  destType: BrowseType,
+  destSubfolder: string,
+): Promise<MoveManyResult> {
+  return postJSONBatch<MoveManyResult>(MOVE_MANY_URL, {
+    items,
     dest_type: destType,
     dest_subfolder: destSubfolder,
   });
