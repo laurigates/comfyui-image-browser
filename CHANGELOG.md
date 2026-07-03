@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.1...comfyui-image-browser-v0.1.2) (2026-07-03)
+
+
+### Features
+
+* **browser:** vim-style keyboard navigation ([#9](https://github.com/laurigates/comfyui-image-browser/issues/9)) ([cc6a8bb](https://github.com/laurigates/comfyui-image-browser/commit/cc6a8bbce316a34342f4a3c1e0659d79362b8a35))
+
 ## [0.1.1](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.0...comfyui-image-browser-v0.1.1) (2026-07-02)
 
 
