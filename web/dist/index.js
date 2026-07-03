@@ -76,17 +76,20 @@ function joinAbs(dir, name) {
   const d = (dir || "/").replace(/\/+$/, "");
   return d === "" ? `/${name}` : `${d}/${name}`;
 }
-function imageThumbURL(type, subfolder, name, absDir) {
+function thumbVersion(mtime, size) {
+  return `${mtime}-${size ?? 0}`;
+}
+function imageThumbURL(type, subfolder, name, absDir, v) {
   if (type === "path") {
-    return `${THUMB_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}`;
+    return `${THUMB_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}&v=${encodeURIComponent(v)}`;
   }
   const p = new URLSearchParams({
-    filename: name,
     type,
     subfolder: subfolder || "",
-    preview: "webp;75"
+    name,
+    v
   });
-  return `/api/view?${p.toString()}`;
+  return `${THUMB_URL}?${p.toString()}`;
 }
 function videoSrcURL(type, subfolder, name, absDir) {
   if (type === "path") {
@@ -1350,7 +1353,7 @@ function openImageBrowser() {
     if (IMG_EXTS.has(ext)) {
       return {
         kind: "img",
-        src: imageThumbURL(state.type, state.subfolder, f.name, state.absPath)
+        src: imageThumbURL(state.type, state.subfolder, f.name, state.absPath, thumbVersion(f.mtime, f.size))
       };
     }
     if (VIDEO_EXTS.has(ext)) {

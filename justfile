@@ -42,7 +42,7 @@ test:
 
 # Typecheck + build + lint + test in one shot — the local CI gate.
 [group: "quality"]
-check: typecheck build lint test check-xmp-drift
+check: typecheck build lint test check-xmp-drift check-thumb-cache-drift
 
 ##########
 # Vendored code
@@ -51,11 +51,20 @@ check: typecheck build lint test check-xmp-drift
 # Canonical home of the shared XMP rating module (vendored verbatim here).
 xmp-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/xmp_meta.py"
 
+# Canonical home of the shared thumbnail-cache module (vendored verbatim here).
+thumb-cache-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/thumb_cache.py"
+
 # Re-sync the vendored xmp_meta.py from its canonical home.
 [group: "vendored"]
 sync-xmp:
     curl -fsSL {{xmp-upstream}} -o xmp_meta.py
     @echo "xmp_meta.py synced from comfyui-gallery-loader@main"
+
+# Re-sync the vendored thumb_cache.py from its canonical home.
+[group: "vendored"]
+sync-thumb-cache:
+    curl -fsSL {{thumb-cache-upstream}} -o thumb_cache.py
+    @echo "thumb_cache.py synced from comfyui-gallery-loader@main"
 
 # Fail if the vendored xmp_meta.py has drifted from the canonical copy.
 [group: "vendored"]
@@ -63,6 +72,13 @@ check-xmp-drift:
     @curl -fsSL {{xmp-upstream}} | diff -u - xmp_meta.py \
         && echo "xmp_meta.py matches canonical" \
         || { echo "DRIFT: xmp_meta.py differs from comfyui-gallery-loader@main — run 'just sync-xmp' (or land the fix upstream first)"; exit 1; }
+
+# Fail if the vendored thumb_cache.py has drifted from the canonical copy.
+[group: "vendored"]
+check-thumb-cache-drift:
+    @curl -fsSL {{thumb-cache-upstream}} | diff -u - thumb_cache.py \
+        && echo "thumb_cache.py matches canonical" \
+        || { echo "DRIFT: thumb_cache.py differs from comfyui-gallery-loader@main — run 'just sync-thumb-cache' (or land the fix upstream first)"; exit 1; }
 
 # Regenerate the README screenshot (docs/browser.png) via the containerized
 # Playwright pipeline. First build ~4 min; cached rebuild ~30 s. See

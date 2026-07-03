@@ -35,6 +35,7 @@ import {
   RATING_URL,
   renameFile,
   SANDBOXED_TYPES,
+  thumbVersion,
   VIDEO_EXTS,
   videoSrcURL,
 } from "./api.js";
@@ -465,7 +466,13 @@ export function openImageBrowser(): ModalShellController {
     if (IMG_EXTS.has(ext)) {
       return {
         kind: "img",
-        src: imageThumbURL(state.type, state.subfolder, f.name, state.absPath),
+        src: imageThumbURL(
+          state.type,
+          state.subfolder,
+          f.name,
+          state.absPath,
+          thumbVersion(f.mtime, f.size),
+        ),
       };
     }
     if (VIDEO_EXTS.has(ext)) {
