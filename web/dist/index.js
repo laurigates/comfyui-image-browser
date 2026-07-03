@@ -8,8 +8,10 @@ var LIST_URL = "/image_browser/list";
 var THUMB_URL = "/image_browser/thumb";
 var FILE_URL = "/image_browser/file";
 var DELETE_URL = "/image_browser/delete";
+var DELETE_MANY_URL = "/image_browser/delete_many";
 var RENAME_URL = "/image_browser/rename";
 var MOVE_URL = "/image_browser/move";
+var MOVE_MANY_URL = "/image_browser/move_many";
 var RATING_URL = "/image_browser/rating";
 var IMG_EXTS = new Set([
   ".png",
@@ -125,6 +127,34 @@ function moveFile(type, subfolder, name, destType, destSubfolder) {
     type,
     subfolder,
     name,
+    dest_type: destType,
+    dest_subfolder: destSubfolder
+  });
+}
+async function postJSONBatch(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  let data;
+  try {
+    data = await r.json();
+  } catch {
+    throw new Error(`HTTP ${r.status}`);
+  }
+  if (!r.ok || !data?.ok) {
+    const msg = data?.error || `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+function deleteMany(items) {
+  return postJSONBatch(DELETE_MANY_URL, { items });
+}
+function moveMany(items, destType, destSubfolder) {
+  return postJSONBatch(MOVE_MANY_URL, {
+    items,
     dest_type: destType,
     dest_subfolder: destSubfolder
   });
@@ -996,8 +1026,9 @@ function openImageBrowser() {
     placeholder: "Filter by filename…",
     width: "100vw",
     height: "100vh",
-    footerLeftHTML: "<kbd>Esc</kbd> close · tap a card to open · tap a folder to descend",
-    footerRightHTML: '<span class="ib-count"></span>'
+    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+    footerRightHTML: '<span class="ib-count"></span>',
+    onClose: () => window.removeEventListener("keydown", onWindowKey, true)
   });
   modal.dialog.classList.add("ib-dialog");
   const root = document.createElement("div");
@@ -1042,6 +1073,18 @@ function openImageBrowser() {
     if (countEl)
       countEl.textContent = `${visible} / ${total}`;
   }
+  const selected = new Map;
+  let focusIndex = -1;
+  let visualMode = false;
+  let visualAnchor = 0;
+  let pendingOp = null;
+  let pendingTimer = null;
+  let yanked = null;
+  let renderedFiles = [];
+  const selectedBadge = document.createElement("span");
+  selectedBadge.className = "ib-selected-badge";
+  selectedBadge.style.display = "none";
+  modal.headerEl.appendChild(selectedBadge);
   function navigateUp() {
     if (state.type === "path") {
       const p = (state.absPath || "/").replace(/\/+$/, "");
@@ -1276,6 +1319,10 @@ function openImageBrowser() {
     }
   }
   async function loadAndRender() {
+    focusIndex = 0;
+    visualMode = false;
+    modal.dialog.classList.remove("is-visual");
+    clearPending();
     renderTabs();
     renderCrumbs();
     modal.setBusy(true);
@@ -1347,10 +1394,24 @@ function openImageBrowser() {
     } else {
       files = sortFiles(files, state.sortKey, state.sortDir);
     }
+    renderedFiles = files;
+    if (files.length === 0)
+      focusIndex = -1;
+    else if (focusIndex < 0)
+      focusIndex = 0;
+    else if (focusIndex >= files.length)
+      focusIndex = files.length - 1;
     let visible = 0;
-    for (const f of files) {
+    for (let fi = 0;fi < files.length; fi++) {
+      const f = files[fi];
+      if (!f)
+        continue;
       const c = document.createElement("div");
       c.className = "ib-card is-file";
+      if (fi === focusIndex)
+        c.classList.add("is-focused");
+      if (isSelected(f))
+        c.classList.add("is-selected");
       c.dataset.name = f.name;
       c.dataset.ext = (f.ext || "").toLowerCase();
       const t = thumbForFile(f);
@@ -1386,6 +1447,8 @@ ${when}`;
     }
     setCount(visible, state.files.length);
     installLazyThumbs(gridEl);
+    const focusedCard = gridEl.querySelector(".ib-card.is-focused");
+    focusedCard?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   function installLazyThumbs(rootEl) {
     if (typeof IntersectionObserver === "undefined")
@@ -1416,6 +1479,516 @@ ${when}`;
     console.warn(`[${EXT_NAME}] ${summary}:`, e);
     notify({ severity: "error", summary, detail });
   }
+  function isInInput() {
+    const el = document.activeElement;
+    if (!el)
+      return false;
+    const tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+  }
+  function selectionKey(type, subfolder, name) {
+    return `${type}:${subfolder}:${name}`;
+  }
+  function isSelected(f) {
+    if (state.type === "path")
+      return false;
+    return selected.has(selectionKey(state.type, state.subfolder, f.name));
+  }
+  function fileCards() {
+    return Array.from(gridEl.querySelectorAll(".ib-card.is-file"));
+  }
+  function gridColumns() {
+    const cards = fileCards();
+    if (cards.length < 2)
+      return 1;
+    const top = cards[0]?.offsetTop ?? 0;
+    let n = 0;
+    for (const c of cards) {
+      if (c.offsetTop !== top)
+        break;
+      n++;
+    }
+    return Math.max(1, n);
+  }
+  function applyFocus() {
+    for (const [i, c] of fileCards().entries()) {
+      c.classList.toggle("is-focused", i === focusIndex);
+    }
+    const focused = gridEl.querySelector(".ib-card.is-focused");
+    focused?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  function refreshSelectionClasses() {
+    for (const [i, c] of fileCards().entries()) {
+      const f = renderedFiles[i];
+      c.classList.toggle("is-selected", !!f && isSelected(f));
+    }
+  }
+  function moveFocus(delta) {
+    const n = renderedFiles.length;
+    if (n === 0)
+      return;
+    focusIndex = Math.max(0, Math.min(n - 1, focusIndex + delta));
+    if (visualMode)
+      extendSelectionTo(focusIndex);
+    applyFocus();
+  }
+  function focusFirst() {
+    const n = renderedFiles.length;
+    if (n === 0)
+      return;
+    focusIndex = 0;
+    if (visualMode)
+      extendSelectionTo(focusIndex);
+    applyFocus();
+  }
+  function focusLast() {
+    const n = renderedFiles.length;
+    if (n === 0)
+      return;
+    focusIndex = n - 1;
+    if (visualMode)
+      extendSelectionTo(focusIndex);
+    applyFocus();
+  }
+  function updateSelectedCount() {
+    const n = selected.size;
+    selectedBadge.style.display = n > 0 ? "inline" : "none";
+    selectedBadge.textContent = n > 0 ? `${n} selected` : "";
+  }
+  function toggleSelectionAt(i) {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const f = renderedFiles[i];
+    if (!f)
+      return;
+    const key = selectionKey(state.type, state.subfolder, f.name);
+    if (selected.has(key))
+      selected.delete(key);
+    else
+      selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+    refreshSelectionClasses();
+    updateSelectedCount();
+  }
+  function extendSelectionTo(i) {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const lo = Math.min(visualAnchor, i);
+    const hi = Math.max(visualAnchor, i);
+    for (let k = lo;k <= hi; k++) {
+      const f = renderedFiles[k];
+      if (!f)
+        continue;
+      const key = selectionKey(state.type, state.subfolder, f.name);
+      if (!selected.has(key))
+        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+    }
+    refreshSelectionClasses();
+    updateSelectedCount();
+  }
+  function selectAllVisible() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    for (const f of renderedFiles) {
+      const key = selectionKey(state.type, state.subfolder, f.name);
+      if (!selected.has(key))
+        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+    }
+    refreshSelectionClasses();
+    updateSelectedCount();
+  }
+  function clearSelection() {
+    selected.clear();
+    refreshSelectionClasses();
+    updateSelectedCount();
+  }
+  function toggleVisualMode() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    if (renderedFiles.length === 0)
+      return;
+    visualMode = !visualMode;
+    if (visualMode) {
+      if (focusIndex < 0)
+        focusIndex = 0;
+      visualAnchor = focusIndex;
+      extendSelectionTo(focusIndex);
+    }
+    modal.dialog.classList.toggle("is-visual", visualMode);
+  }
+  function collectSelectedOrFocused() {
+    if (selected.size > 0) {
+      return Array.from(selected.values()).map((v) => ({
+        type: v.type,
+        subfolder: v.subfolder,
+        name: v.file.name
+      }));
+    }
+    const f = renderedFiles[focusIndex];
+    if (!f || state.type === "path")
+      return [];
+    return [{ type: state.type, subfolder: state.subfolder, name: f.name }];
+  }
+  function setPending(op) {
+    clearPending();
+    pendingOp = op;
+    pendingTimer = setTimeout(clearPending, 1500);
+    const hint = op === "d" ? "d… (d/y=delete, n=cancel)" : op === "y" ? "y… (y=yank)" : "g… (g=top)";
+    modal.setStatus(hint);
+  }
+  function clearPending() {
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+    pendingOp = null;
+    modal.setStatus("");
+  }
+  async function doDelete() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const items = collectSelectedOrFocused();
+    if (items.length === 0)
+      return;
+    const count = items.length;
+    const ok = await confirmAction(modal, {
+      title: count === 1 ? "Delete file?" : `Delete ${count} files?`,
+      message: count === 1 ? `Permanently delete "${items[0]?.name}"? This cannot be undone.` : `Permanently delete ${count} selected files? This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true
+    });
+    if (!ok)
+      return;
+    try {
+      const result = await deleteMany(items);
+      const errored = new Set((result.errors ?? []).map((e) => e.name));
+      const removedHere = new Set(items.filter((it) => it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name)).map((it) => it.name));
+      state.files = state.files.filter((f) => !removedHere.has(f.name));
+      for (const it of items) {
+        if (!errored.has(it.name))
+          selected.delete(selectionKey(it.type, it.subfolder, it.name));
+      }
+      updateSelectedCount();
+      renderGrid();
+      if (result.errors && result.errors.length > 0) {
+        const names = result.errors.map((e) => e.name).join(", ");
+        reportError(`Deleted ${result.deleted}, ${result.errors.length} failed`, new Error(names));
+      } else {
+        notify({ severity: "success", summary: "Deleted", detail: `${result.deleted} file(s)` });
+      }
+    } catch (e) {
+      reportError("Delete failed", e);
+    }
+  }
+  function doYank() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const items = collectSelectedOrFocused();
+    if (items.length === 0)
+      return;
+    yanked = items;
+    notify({
+      severity: "info",
+      summary: "Yanked",
+      detail: `${items.length} file(s) — press p to move here`
+    });
+  }
+  async function doPaste() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    if (!yanked || yanked.length === 0) {
+      notify({ severity: "info", summary: "Nothing to paste", detail: "Yank files first with yy" });
+      return;
+    }
+    try {
+      const result = await moveMany(yanked, state.type, state.subfolder);
+      for (const it of yanked) {
+        const errored = result.errors?.some((e) => e.name === it.name);
+        if (!errored)
+          selected.delete(selectionKey(it.type, it.subfolder, it.name));
+      }
+      yanked = null;
+      updateSelectedCount();
+      await loadAndRender();
+      if (result.errors && result.errors.length > 0) {
+        const names = result.errors.map((e) => e.name).join(", ");
+        reportError(`Moved ${result.moved}, ${result.errors.length} failed`, new Error(names));
+      } else {
+        notify({ severity: "success", summary: "Moved", detail: `${result.moved} file(s)` });
+      }
+    } catch (e) {
+      reportError("Paste (move) failed", e);
+    }
+  }
+  async function siblingNav(dir) {
+    let parentType;
+    let parentSub;
+    let parentPath;
+    let currentName;
+    if (state.type === "path") {
+      const p = (state.absPath || "/").replace(/\/+$/, "");
+      if (p === "" || p === "/")
+        return;
+      const i = p.lastIndexOf("/");
+      parentPath = i <= 0 ? "/" : p.slice(0, i);
+      parentType = "path";
+      parentSub = "";
+      currentName = p.slice(i + 1);
+    } else {
+      const p = state.subfolder.replace(/\/+$/, "");
+      if (!p)
+        return;
+      const i = p.lastIndexOf("/");
+      parentSub = i <= 0 ? "" : p.slice(0, i);
+      parentType = state.type;
+      parentPath = "";
+      currentName = p.slice(i + 1);
+    }
+    try {
+      const data = await fetchListing({
+        type: parentType,
+        subfolder: parentSub,
+        path: parentPath
+      });
+      const dirs = (data.dirs || []).map((d) => d.name).sort();
+      const idx = dirs.indexOf(currentName);
+      if (idx < 0)
+        return;
+      const next = idx + dir;
+      if (next < 0 || next >= dirs.length)
+        return;
+      const target = dirs[next];
+      if (!target)
+        return;
+      if (state.type === "path") {
+        state.absPath = parentPath === "/" ? `/${target}` : `${parentPath}/${target}`;
+      } else {
+        state.subfolder = parentSub ? `${parentSub}/${target}` : target;
+      }
+      focusIndex = 0;
+      await loadAndRender();
+    } catch (e) {
+      reportError("Sibling navigation failed", e);
+    }
+  }
+  function showHelp() {
+    const ov = openOverlay(modal, () => {});
+    ov.card.classList.add("ib-help-card");
+    ov.card.innerHTML = `
+      <div class="ib-ov-title">Keyboard shortcuts</div>
+      <div class="ib-help-body">
+        <div class="ib-help-col">
+          <div class="ib-help-h">Navigate</div>
+          <dl>
+            <dt>j / k</dt><dd>down / up row</dd>
+            <dt>h / l</dt><dd>left / right</dd>
+            <dt>g g</dt><dd>first file</dd>
+            <dt>G</dt><dd>last file</dd>
+            <dt>K</dt><dd>parent dir</dd>
+            <dt>H / L</dt><dd>prev / next sibling</dd>
+          </dl>
+        </div>
+        <div class="ib-help-col">
+          <div class="ib-help-h">Select</div>
+          <dl>
+            <dt>Space</dt><dd>toggle focused</dd>
+            <dt>v</dt><dd>visual mode</dd>
+            <dt>Ctrl+A</dt><dd>select all visible</dd>
+            <dt>Esc</dt><dd>clear selection</dd>
+          </dl>
+        </div>
+        <div class="ib-help-col">
+          <div class="ib-help-h">Act</div>
+          <dl>
+            <dt>d d</dt><dd>delete selected</dd>
+            <dt>d y</dt><dd>confirm delete</dd>
+            <dt>y y</dt><dd>yank (cut) selected</dd>
+            <dt>p</dt><dd>paste (move) here</dd>
+            <dt>r</dt><dd>rename focused</dd>
+            <dt>m</dt><dd>move focused…</dd>
+          </dl>
+        </div>
+        <div class="ib-help-col">
+          <div class="ib-help-h">Other</div>
+          <dl>
+            <dt>Enter / o</dt><dd>open preview</dd>
+            <dt>/</dt><dd>focus search</dd>
+            <dt>?</dt><dd>this help</dd>
+            <dt>Esc</dt><dd>close (priority)</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="ib-ov-actions">
+        <button type="button" class="ib-ov-btn ib-ov-primary" data-help-close>Close</button>
+      </div>`;
+    const closeBtn = ov.card.querySelector("[data-help-close]");
+    closeBtn?.addEventListener("click", () => ov.close());
+  }
+  function onWindowKey(e) {
+    if (modal.dialog.querySelector(".ib-ov-backdrop"))
+      return;
+    const inInput = isInInput();
+    if (e.key === "Escape") {
+      if (inInput) {
+        document.activeElement?.blur();
+      } else if (pendingOp) {
+        clearPending();
+      } else if (visualMode) {
+        visualMode = false;
+        modal.dialog.classList.remove("is-visual");
+      } else if (selected.size > 0) {
+        clearSelection();
+      } else {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (inInput)
+      return;
+    if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "a" || e.key === "A")) {
+      e.preventDefault();
+      e.stopPropagation();
+      selectAllVisible();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey)
+      return;
+    if (pendingOp) {
+      const op = pendingOp;
+      clearPending();
+      if (op === "d" && (e.key === "d" || e.key === "y" || e.key === "Enter")) {
+        e.preventDefault();
+        e.stopPropagation();
+        doDelete();
+        return;
+      }
+      if (op === "d" && (e.key === "n" || e.key === "Escape")) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (op === "y" && e.key === "y") {
+        e.preventDefault();
+        e.stopPropagation();
+        doYank();
+        return;
+      }
+      if (op === "g" && e.key === "g") {
+        e.preventDefault();
+        e.stopPropagation();
+        focusFirst();
+        return;
+      }
+    }
+    const f = renderedFiles[focusIndex];
+    switch (e.key) {
+      case "j":
+        e.preventDefault();
+        e.stopPropagation();
+        moveFocus(gridColumns());
+        break;
+      case "k":
+        e.preventDefault();
+        e.stopPropagation();
+        moveFocus(-gridColumns());
+        break;
+      case "h":
+        e.preventDefault();
+        e.stopPropagation();
+        moveFocus(-1);
+        break;
+      case "l":
+        e.preventDefault();
+        e.stopPropagation();
+        moveFocus(1);
+        break;
+      case "G":
+        e.preventDefault();
+        e.stopPropagation();
+        focusLast();
+        break;
+      case "K":
+        e.preventDefault();
+        e.stopPropagation();
+        navigateUp();
+        break;
+      case "H":
+        e.preventDefault();
+        e.stopPropagation();
+        siblingNav(-1);
+        break;
+      case "L":
+        e.preventDefault();
+        e.stopPropagation();
+        siblingNav(1);
+        break;
+      case "g":
+        e.preventDefault();
+        e.stopPropagation();
+        setPending("g");
+        break;
+      case "d":
+        e.preventDefault();
+        e.stopPropagation();
+        setPending("d");
+        break;
+      case "y":
+        e.preventDefault();
+        e.stopPropagation();
+        setPending("y");
+        break;
+      case "p":
+        e.preventDefault();
+        e.stopPropagation();
+        doPaste();
+        break;
+      case " ":
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSelectionAt(focusIndex);
+        break;
+      case "v":
+        e.preventDefault();
+        e.stopPropagation();
+        toggleVisualMode();
+        break;
+      case "Enter":
+      case "o":
+        e.preventDefault();
+        e.stopPropagation();
+        if (f)
+          openFull(f.name, f.ext || "");
+        break;
+      case "r":
+        if (SANDBOXED_TYPES.includes(state.type) && f) {
+          e.preventDefault();
+          e.stopPropagation();
+          onRename(f.name);
+        }
+        break;
+      case "m":
+        if (SANDBOXED_TYPES.includes(state.type) && f) {
+          e.preventDefault();
+          e.stopPropagation();
+          onMove(f.name);
+        }
+        break;
+      case "/":
+        e.preventDefault();
+        e.stopPropagation();
+        modal.searchEl.focus();
+        break;
+      case "?":
+        e.preventDefault();
+        e.stopPropagation();
+        showHelp();
+        break;
+      default:
+        break;
+    }
+  }
+  window.addEventListener("keydown", onWindowKey, true);
   loadAndRender();
   return modal;
 }
@@ -1661,6 +2234,27 @@ var BROWSER_CSS = `
 }
 .ib-move-row:hover { background: #2a2a3a; color: #fff; }
 .cmp-match { color: #ffd866; font-weight: 700; }
+.ib-card.is-focused { outline: 2px solid #6ba6ff; outline-offset: -2px; z-index: 1; }
+.ib-card.is-selected { border-color: #ffd866; background: #2a2a1f; }
+.ib-card.is-selected.is-focused { outline-color: #ffd866; }
+.ib-dialog.is-visual .ib-grid { outline: 2px solid #ffd866; outline-offset: -2px; }
+.ib-selected-badge {
+    background: #2f3a52; color: #9ec6ff; border: 1px solid #4a5878; border-radius: 10px;
+    padding: 2px 8px; font-size: 11px; margin-left: 8px; display: inline;
+}
+.ib-help-card { width: min(640px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ib-help-body {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; overflow-y: auto; padding: 8px 0;
+}
+.ib-help-col { display: flex; flex-direction: column; gap: 4px; }
+.ib-help-h { font-size: 12px; font-weight: 600; color: #9ec6ff; text-transform: uppercase; letter-spacing: 0.5px; }
+.ib-help-body dl { margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.ib-help-body dt {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px; color: #ffd866;
+}
+.ib-help-body dd { margin: 0 0 4px 0; font-size: 11.5px; color: #b8b8c0; }
 `;
 function ensureStyle3() {
   if (document.getElementById(STYLE_ID3))

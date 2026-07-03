@@ -78,3 +78,69 @@ class TestParseRating:
         assert ib._parse_rating("3") is None
         assert ib._parse_rating(3.0) is None
         assert ib._parse_rating(None) is None
+
+
+class TestValidateBatchItems:
+    """Top-level shape gate for /delete_many and /move_many bodies.
+
+    Per-item field validation (type/path/name) is enforced downstream by
+    ``_resolve_sandboxed_file`` — see TestResolveSandboxedFileRejections.
+    Here we only assert the body's items-list shape 400s before disk touch.
+    """
+
+    def test_rejects_missing_items(self):
+        items, err_resp = ib._validate_batch_items({})
+        assert items is None
+        assert err_resp is not None
+        assert err_resp.status == 400
+
+    def test_rejects_non_list_items(self):
+        items, err_resp = ib._validate_batch_items({"items": "not-a-list"})
+        assert items is None
+        assert err_resp is not None
+        assert err_resp.status == 400
+
+    def test_rejects_empty_list(self):
+        items, err_resp = ib._validate_batch_items({"items": []})
+        assert items is None
+        assert err_resp is not None
+        assert err_resp.status == 400
+
+    def test_rejects_non_object_items(self):
+        items, err_resp = ib._validate_batch_items({"items": ["str", 5]})
+        assert items is None
+        assert err_resp is not None
+        assert err_resp.status == 400
+
+    def test_accepts_list_of_objects(self):
+        items, err_resp = ib._validate_batch_items(
+            {"items": [{"type": "output", "subfolder": "", "name": "a.png"}]}
+        )
+        assert err_resp is None
+        assert items is not None
+        assert len(items) == 1
+
+
+class TestBatchEndpointsRegistered:
+    """Sanity: the batch routes are wired on the PromptServer routes table.
+
+    conftest's _NoopRoutes records (method, path) pairs at import time when
+    the @decorator runs, so we can assert a route is registered without
+    invoking the handler against a real aiohttp Request. Catches a future
+    refactor that drops the route by mistake.
+    """
+
+    def test_delete_many_route_present(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(
+            r.method == "POST" and r.path == "/image_browser/delete_many" for r in registered
+        )
+
+    def test_move_many_route_present(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(r.method == "POST" and r.path == "/image_browser/move_many" for r in registered)
+
+
+# Imported at the bottom so the class above can reference the stubbed server
+# without leaking the import into the pure-helper tests above.
+from server import PromptServer  # noqa: E402

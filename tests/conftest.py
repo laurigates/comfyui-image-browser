@@ -34,6 +34,16 @@ def _ensure_stub(name: str) -> ModuleType:
 _aiohttp = _ensure_stub("aiohttp")
 _aiohttp.web = _ensure_stub("aiohttp.web")
 
+
+# web.json_response is called by validation helpers and endpoints; make it
+# return a real object so tests can assert on .status and the body payload
+# without a live aiohttp server. Other web.* attrs stay MagicMocks.
+def _stub_json_response(body, status: int = 200, **kwargs):
+    return SimpleNamespace(status=status, _body=body)
+
+
+_aiohttp.web.json_response = _stub_json_response
+
 # PIL is a package with submodules — the backend does `from PIL import Image`.
 _pil = _ensure_stub("PIL")
 _pil.Image = _ensure_stub("PIL.Image")
@@ -46,16 +56,29 @@ _server = _ensure_stub("server")
 
 
 class _NoopRoutes:
-    """Decorator-shaped no-op for @PromptServer.instance.routes.get(path)."""
+    """Decorator-shaped no-op for @PromptServer.instance.routes.{get,post}(path).
 
-    def get(self, path):
+    Records registered (method, path) pairs so tests can assert a route is
+    wired without invoking the handler against a real aiohttp Request — the
+    stubbed server has no real routes table to introspect.
+    """
+
+    def __init__(self):
+        self.registered: list[SimpleNamespace] = []
+
+    def _register(self, method, path):
+        self.registered.append(SimpleNamespace(method=method, path=path))
+
         def deco(fn):
             return fn
 
         return deco
 
+    def get(self, path):
+        return self._register("GET", path)
+
     def post(self, path):
-        return self.get(path)
+        return self._register("POST", path)
 
 
 # PromptServer.instance.routes is read at module load; supply a real object so
