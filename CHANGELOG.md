@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.3...comfyui-image-browser-v0.1.4) (2026-07-03)
+
+
+### Bug Fixes
+
+* Android modal position, back-button navigation, and toolbar overlap ([#13](https://github.com/laurigates/comfyui-image-browser/issues/13)) ([f81474c](https://github.com/laurigates/comfyui-image-browser/commit/f81474c91d93187c03986f20e2126c339ba9196b))
+
 ## [0.1.3](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.2...comfyui-image-browser-v0.1.3) (2026-07-03)
 
 
