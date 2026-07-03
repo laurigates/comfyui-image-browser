@@ -13,7 +13,7 @@ Endpoint surface (all under /image_browser/):
 
     GET  /base                              well-known dirs (input/output/temp/base)
     GET  /list?type=&subfolder=&path=&…     directory listing (dirs + files)
-    GET  /thumb?path=                       WebP thumbnail for an absolute path
+    GET  /thumb?path= | ?type=&subfolder=&name=   cached WebP thumbnail
     GET  /file?path=                        stream a file at an absolute path
     POST /delete       {type, subfolder, name}                      delete a file
     POST /delete_many  {items:[{type,subfolder,name}, …]}           batch delete
@@ -36,13 +36,11 @@ Security posture:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import mimetypes
 import os
 import shutil
 from email.utils import formatdate
-from io import BytesIO
 from typing import Any
 
 import folder_paths
@@ -54,10 +52,11 @@ try:
     # ComfyUI imports custom_nodes as packages, so the sibling module must
     # be pulled in relatively — a bare ``import xmp_meta`` raises
     # ModuleNotFoundError at load time because the pack dir isn't on sys.path.
-    from . import xmp_meta
+    from . import thumb_cache, xmp_meta
 except ImportError:
     # Pytest imports this module flat (pack root on sys.path via pyproject's
     # ``pythonpath = ["."]``); fall back to the absolute import.
+    import thumb_cache
     import xmp_meta
 
 log = logging.getLogger("comfyui-image-browser")
@@ -290,19 +289,53 @@ async def image_browser_file(request: web.Request) -> web.Response:
     )
 
 
-@PromptServer.instance.routes.get("/image_browser/thumb")
-async def image_browser_thumb(request: web.Request) -> web.Response:
-    """WebP thumbnail for type=path (absolute) image listings.
+def _resolve_thumb_target(q: Any) -> tuple[str | None, str]:
+    """Resolve /thumb query params to an absolute file path.
 
-    For input/output/temp the frontend uses core /api/view (subfolder + preview
-    scaling built in). Arbitrary absolute paths are served here — small,
-    image-only, with cache validators so re-scrolls reuse the cached copy.
+    Two addressing modes, mirroring /list:
+      ?type=input|output|temp&subfolder=&name=   (sandboxed roots)
+      ?path=/abs/file.png                        (arbitrary read, image-gated)
     """
-    q = request.rel_url.query
+    type_name = q.get("type", "path")
+    if type_name in SANDBOXED_TYPES:
+        name = q.get("name", "")
+        if not _is_bare_name(name):
+            return None, "invalid name"
+        base, err = _resolve_listing_base(type_name, q.get("subfolder", ""), "")
+        if err:
+            return None, err
+        assert base is not None
+        target = os.path.abspath(os.path.join(base, name))
+        if os.path.commonpath([target, base]) != base:
+            return None, "name escapes root"
+        return target, ""
     abs_path = q.get("path", "")
     if not abs_path:
+        return None, "missing path"
+    return os.path.abspath(os.path.expanduser(abs_path)), ""
+
+
+def _thumb_cache_dir() -> str:
+    # Resolved lazily (not at import) so test stubs of folder_paths don't
+    # break module load. The same <user_dir>/comfy-thumb-cache is used by
+    # comfyui-gallery-loader — the packs share encoded thumbnails.
+    return os.path.join(str(folder_paths.get_user_directory()), thumb_cache.CACHE_DIR_NAME)
+
+
+@PromptServer.instance.routes.get("/image_browser/thumb")
+async def image_browser_thumb(request: web.Request) -> web.Response:
+    """WebP thumbnail for any listed image — sandboxed roots AND type=path.
+
+    Core /api/view re-encodes previews on every request with no cache
+    headers, so sandboxed thumbnails are served here instead: through the
+    shared on-disk cache (thumb_cache.py) with an ETag and a long max-age.
+    The frontend embeds ?v=<mtime>-<size> in the URL, so a changed file
+    keys a new URL and a stale cached copy can never be shown.
+    """
+    path, err = _resolve_thumb_target(request.rel_url.query)
+    if err:
         return web.Response(status=400)
-    path = os.path.abspath(os.path.expanduser(abs_path))
+    assert path is not None
     if not os.path.isfile(path) or not _is_image_file(path):
         return web.Response(status=404)
 
@@ -311,28 +344,19 @@ async def image_browser_thumb(request: web.Request) -> web.Response:
     except OSError as exc:
         log.warning("thumb stat failed for %s: %s", path, exc)
         return web.Response(status=404)
-    etag = '"{}"'.format(
-        hashlib.sha1(f"{path}:{st.st_mtime_ns}:{st.st_size}".encode()).hexdigest()
-    )
+    etag = thumb_cache.etag_for(path, st)
     cache_headers = {
         "ETag": etag,
         "Last-Modified": formatdate(st.st_mtime, usegmt=True),
-        "Cache-Control": "private, max-age=300",
+        "Cache-Control": "private, max-age=604800, immutable",
     }
     if request.headers.get("If-None-Match") == etag:
         return web.Response(status=304, headers=cache_headers)
 
-    try:
-        with Image.open(path) as im:
-            im.thumbnail((512, 512))
-            im = im.convert("RGB") if im.mode not in ("RGB", "RGBA") else im
-            buf = BytesIO()
-            im.save(buf, format="webp", quality=80)
-            buf.seek(0)
-            return web.Response(body=buf.read(), content_type="image/webp", headers=cache_headers)
-    except Exception as exc:
-        log.warning("thumb failed for %s: %s", path, exc)
+    data = thumb_cache.get_thumb(path, st, _thumb_cache_dir())
+    if data is None:
         return web.Response(status=500)
+    return web.Response(body=data, content_type="image/webp", headers=cache_headers)
 
 
 # ---------------------------------------------------------------------------

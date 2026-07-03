@@ -21,7 +21,7 @@ in the HTTP endpoints + the served bundle.
 |---|---|---|
 | `/base` | GET | ComfyUI well-known dirs (base/input/output/temp/user). Frontend hard-codes no paths. |
 | `/list` | GET | Directory listing (`type=input\|output\|temp\|path`, `subfolder`/`path`, `extensions`). Returns `{dirs, files}`; each file carries `mtime/size/width/height/ext`. |
-| `/thumb` | GET | WebP thumbnail for an arbitrary absolute-path image (path-mode only; sandboxed types use core `/api/view`). |
+| `/thumb` | GET | Cached WebP thumbnail for **all** image listings — `?type=&subfolder=&name=` (sandboxed) or `?path=` (absolute). Served through the shared on-disk cache (`thumb_cache.py`) with ETag + long `max-age`; URLs embed `?v=<mtime>-<size>`. Never use core `/api/view` for thumbnails (it re-encodes every request, no cache headers). |
 | `/file` | GET | Stream an absolute-path file (image/video), extension-gated. |
 | `/delete` | POST | `{type, subfolder, name}` — delete a file. |
 | `/rename` | POST | `{type, subfolder, name, new_name}` — rename in place. |
@@ -40,6 +40,7 @@ in the HTTP endpoints + the served bundle.
 | `__init__.py` | Loader stub. Imports (empty) node mappings from the backend module; exports `WEB_DIRECTORY = "./web/dist"`. |
 | `image_browser.py` | HTTP endpoints only (no node). Bundled libs + stdlib only; reads gate on an extension whitelist, writes are sandboxed to input/output/temp. |
 | `xmp_meta.py` | **Vendored verbatim** from its canonical home `comfyui-gallery-loader/xmp_meta.py` — do not edit here. Re-sync with `just sync-xmp`; CI fails on drift. Pure stdlib XMP rating read/write (in-file PNG/JPEG surgery + `.xmp` sidecar). |
+| `thumb_cache.py` | **Vendored verbatim** from its canonical home `comfyui-gallery-loader/thumb_cache.py` — do not edit here. Re-sync with `just sync-thumb-cache`; CI fails on drift. Shared on-disk thumbnail cache under `<user_dir>/comfy-thumb-cache`, keyed by path+mtime+size — the same dir gallery-loader uses, so encoded thumbnails are shared between the packs. |
 | `web/dist/` | **Generated** by `bun run build`, committed (tracked) so git clone/update carries it. ComfyUI serves it at `/extensions/comfyui-image-browser/`. |
 | `pyproject.toml` | Comfy Registry metadata. `PublisherId` + `version` are the fields you touch; `[tool.comfy] includes = ["web/dist"]` force-ships the built output. |
 | `tsconfig.json` / `biome.json` / `knip.json` | Strict TS config, Biome lint/format, knip dead-code. |

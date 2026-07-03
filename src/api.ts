@@ -126,24 +126,31 @@ export function joinAbs(dir: string, name: string): string {
   return d === "" ? `/${name}` : `${d}/${name}`;
 }
 
-// input/output/temp use core /api/view (subfolder + preview scaling built in);
-// arbitrary paths fall back to our own /thumb + /file endpoints.
+// All image thumbnails go through the pack's own /thumb endpoint (never core
+// /api/view, which re-encodes on every request with no cache headers). The
+// ?v= cache key (mtime + size from /list) pairs with the backend's long
+// max-age: a changed file keys a new URL, an unchanged one never re-fetches.
+export function thumbVersion(mtime: number, size?: number): string {
+  return `${mtime}-${size ?? 0}`;
+}
+
 export function imageThumbURL(
   type: BrowseType,
   subfolder: string,
   name: string,
   absDir: string,
+  v: string,
 ): string {
   if (type === "path") {
-    return `${THUMB_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}`;
+    return `${THUMB_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}&v=${encodeURIComponent(v)}`;
   }
   const p = new URLSearchParams({
-    filename: name,
     type,
     subfolder: subfolder || "",
-    preview: "webp;75",
+    name,
+    v,
   });
-  return `/api/view?${p.toString()}`;
+  return `${THUMB_URL}?${p.toString()}`;
 }
 
 export function videoSrcURL(
