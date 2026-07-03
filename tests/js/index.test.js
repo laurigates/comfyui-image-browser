@@ -51,6 +51,27 @@ describe("comfyui-image-browser standalone modal", () => {
     modal.close();
   });
 
+  it("back button (popstate) closes the browser when already at a root", () => {
+    const modal = openShell();
+    expect(document.querySelector(".ib-dialog")).not.toBeNull();
+    // Opens at output root (no subfolder) — back has nowhere to ascend, so it
+    // closes the browser instead of leaving the page.
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(document.querySelector(".ib-dialog")).toBeNull();
+    expect(modal.dialog.isConnected).toBe(false);
+  });
+
+  it("back button dismisses an open overlay instead of closing the browser", () => {
+    const modal = openShell();
+    pressKey("?");
+    expect(modal.dialog.querySelector(".ib-help-card")).not.toBeNull();
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    // The overlay is gone but the browser survived the back press.
+    expect(modal.dialog.querySelector(".ib-ov-backdrop")).toBeNull();
+    expect(document.querySelector(".ib-dialog")).not.toBeNull();
+    modal.close();
+  });
+
   it("removes the global key listener when closed via the shell's real path", () => {
     const modal = openShell();
     // While open, '?' is intercepted (preventDefault) to open the help overlay.

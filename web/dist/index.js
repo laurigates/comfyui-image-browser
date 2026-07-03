@@ -1024,6 +1024,7 @@ function openImageBrowser() {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
   }
+  let closedByBack = false;
   const modal = openModalShell({
     title: "Image Browser",
     placeholder: "Filter by filename…",
@@ -1031,7 +1032,12 @@ function openImageBrowser() {
     height: "100vh",
     footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
-    onClose: () => window.removeEventListener("keydown", onWindowKey, true)
+    onClose: () => {
+      window.removeEventListener("keydown", onWindowKey, true);
+      window.removeEventListener("popstate", onPopState);
+      if (!closedByBack)
+        history.back();
+    }
   });
   modal.dialog.classList.add("ib-dialog");
   const root = document.createElement("div");
@@ -1120,6 +1126,25 @@ function openImageBrowser() {
     }
     loadAndRender();
   }
+  function canGoUp() {
+    return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
+  }
+  function onPopState() {
+    const hasOverlay = !!modal.dialog.querySelector(".ib-ov-backdrop");
+    if (hasOverlay || canGoUp()) {
+      history.pushState({ modal: EXT_NAME }, "");
+      if (hasOverlay) {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      } else {
+        navigateUp();
+      }
+      return;
+    }
+    closedByBack = true;
+    modal.close();
+  }
+  history.pushState({ modal: EXT_NAME }, "");
+  window.addEventListener("popstate", onPopState);
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
     renderGrid();
@@ -1368,7 +1393,7 @@ function openImageBrowser() {
     const q = state.query;
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
-    const showUp = state.type === "path" ? state.absPath && state.absPath !== "/" : !!state.subfolder;
+    const showUp = canGoUp();
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ib-card is-up";
@@ -2155,10 +2180,25 @@ function escHTML(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 var BROWSER_CSS = `
-.ib-dialog { width: 100vw !important; height: 100vh !important; max-height: 100vh !important; border-radius: 0; }
+.ib-dialog {
+    width: 100vw !important; height: 100vh !important; max-height: 100vh !important;
+    /* Full-bleed: pin to the top-left instead of the shell's 50%/-50% centering.
+       On Android, 100vh is the LARGE viewport (URL bar hidden) — while the URL
+       bar is visible the dialog is taller than the visible area and centering
+       shoves the header off the top of the screen. */
+    top: 0 !important; left: 0 !important; transform: none !important;
+    border-radius: 0;
+    /* Keep the header/footer clear of notches + gesture bars in fullscreen. */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+}
+@supports (height: 100dvh) {
+    /* Track the dynamic viewport (URL bar show/hide) where supported. */
+    .ib-dialog { height: 100dvh !important; max-height: 100dvh !important; }
+}
 .image-browser-body { display: block; }
 .ib-tabs {
-    display: flex; gap: 2px; align-items: center;
+    display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
     background: #1a1a22; border: 1px solid #2a2a32; border-radius: 4px; padding: 2px;
 }
 .ib-tab {
@@ -2169,6 +2209,12 @@ var BROWSER_CSS = `
 .ib-tab:hover { background: #2a2a36; color: #e0e0e4; }
 .ib-tab.is-active { background: #2f3a52; color: #9ec6ff; }
 .ib-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1; min-width: 0; }
+@media (max-width: 700px) {
+    /* Narrow screens: crumbs get their own full-width toolbar row. Squeezed to
+       the flex leftovers, the crumb buttons overflow their container and paint
+       underneath the sort dropdown. */
+    .ib-crumbs { order: 9; flex-basis: 100%; }
+}
 .ib-crumb {
     background: #2a2a36; color: #b8b8c0; border: 1px solid #3a3a44; border-radius: 4px;
     padding: 6px 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;

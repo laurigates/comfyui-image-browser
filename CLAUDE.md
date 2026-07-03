@@ -111,7 +111,8 @@ restart. Backend `.py` edits need a fresh `smoke-server` (baked into the image).
 | Rename | Overlay input (extension enforced) → card renames; a name collision returns a 409 error toast. |
 | Move | Destination picker (tabs + folder nav) → file leaves the source grid; appears under the destination. |
 | Error path | Kill the server mid-action → a **copyable** `notify()` error toast (not a silent console log). |
-| Phone width (~400px) | Resize; grid reflows, tap targets ≥34px, modal is full-bleed. |
+| Phone width (~400px) | Resize; grid reflows, tap targets ≥34px, modal is full-bleed (header stays visible with the URL bar shown — 100dvh), breadcrumbs on their own toolbar row (never painted under the sort dropdown). |
+| Android back (or browser back) | Overlay open → dismisses it; else goes up one directory; at a root → closes the modal without leaving ComfyUI. |
 
 ## Verify the frontend API against the sourcemap
 
