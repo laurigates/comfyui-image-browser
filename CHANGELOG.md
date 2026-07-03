@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.2...comfyui-image-browser-v0.1.3) (2026-07-03)
+
+
+### Features
+
+* **thumb:** shared on-disk thumbnail cache + sandboxed /thumb addressing ([#11](https://github.com/laurigates/comfyui-image-browser/issues/11)) ([2b2127c](https://github.com/laurigates/comfyui-image-browser/commit/2b2127c24c2b82651827c75d556ec68c0d3910da))
+
 ## [0.1.2](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.1...comfyui-image-browser-v0.1.2) (2026-07-03)
 
 
