@@ -15,7 +15,7 @@
 // The shared modal primitives (openModalShell, fuzzyScore, notify) come from
 // @laurigates/comfy-modal-kit — imported, not copied; `bun build` inlines them.
 
-import type { ModalShellController } from "@laurigates/comfy-modal-kit";
+import { type ModalShellController, notify } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { EXT_NAME } from "./api.js";
 import { openImageBrowser } from "./browser.js";
@@ -33,6 +33,11 @@ function openShellSafe(): void {
     openImageBrowser();
   } catch (e) {
     console.warn(`[${EXT_NAME}] open failed`, e);
+    notify({
+      severity: "error",
+      summary: "Image Browser failed to open",
+      detail: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 

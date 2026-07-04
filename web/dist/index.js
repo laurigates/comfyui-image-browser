@@ -1,168 +1,3 @@
-// src/index.ts
-import { app } from "/scripts/app.js";
-
-// src/api.ts
-var EXT_NAME = "comfyui-image-browser";
-var BASE_URL = "/image_browser/base";
-var LIST_URL = "/image_browser/list";
-var THUMB_URL = "/image_browser/thumb";
-var FILE_URL = "/image_browser/file";
-var DELETE_URL = "/image_browser/delete";
-var DELETE_MANY_URL = "/image_browser/delete_many";
-var RENAME_URL = "/image_browser/rename";
-var MOVE_URL = "/image_browser/move";
-var MOVE_MANY_URL = "/image_browser/move_many";
-var RATING_URL = "/image_browser/rating";
-var IMG_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".bmp",
-  ".tiff",
-  ".tif",
-  ".avif"
-]);
-var VIDEO_EXTS = new Set([
-  ".mp4",
-  ".webm",
-  ".mov",
-  ".mkv",
-  ".avi",
-  ".m4v",
-  ".mpg",
-  ".mpeg"
-]);
-var SANDBOXED_TYPES = ["input", "output", "temp"];
-var BASE_PATHS = null;
-async function fetchBasePaths() {
-  if (BASE_PATHS)
-    return BASE_PATHS;
-  let resolved;
-  try {
-    const r = await fetch(BASE_URL, { cache: "no-cache" });
-    if (!r.ok)
-      throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (!data.ok)
-      throw new Error(data.error || "base paths fetch failed");
-    resolved = data;
-  } catch (e) {
-    console.warn(`[${EXT_NAME}] ${BASE_URL} failed`, e);
-    resolved = { base_path: "/", input_dir: "", output_dir: "", temp_dir: "" };
-  }
-  BASE_PATHS = resolved;
-  return resolved;
-}
-async function fetchListing(p) {
-  const params = new URLSearchParams;
-  if (p.type === "path") {
-    params.set("type", "path");
-    params.set("path", p.path || "/");
-  } else {
-    params.set("type", p.type);
-    params.set("subfolder", p.subfolder || "");
-  }
-  const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
-  if (!r.ok)
-    throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
-  if (!data.ok)
-    throw new Error(data.error || "listing failed");
-  return data;
-}
-function joinAbs(dir, name) {
-  const d = (dir || "/").replace(/\/+$/, "");
-  return d === "" ? `/${name}` : `${d}/${name}`;
-}
-function thumbVersion(mtime, size) {
-  return `${mtime}-${size ?? 0}`;
-}
-function imageThumbURL(type, subfolder, name, absDir, v) {
-  if (type === "path") {
-    return `${THUMB_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}&v=${encodeURIComponent(v)}`;
-  }
-  const p = new URLSearchParams({
-    type,
-    subfolder: subfolder || "",
-    name,
-    v
-  });
-  return `${THUMB_URL}?${p.toString()}`;
-}
-function videoSrcURL(type, subfolder, name, absDir) {
-  if (type === "path") {
-    return `${FILE_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}`;
-  }
-  const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
-  return `/api/view?${p.toString()}`;
-}
-function fullSrcURL(type, subfolder, name, absDir) {
-  if (type === "path") {
-    return `${FILE_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}`;
-  }
-  const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
-  return `/api/view?${p.toString()}`;
-}
-async function postJSON(url, body) {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  let data = {};
-  try {
-    data = await r.json();
-  } catch {}
-  if (!r.ok || !data.ok) {
-    throw new Error(data.error || `HTTP ${r.status}`);
-  }
-}
-function deleteFile(type, subfolder, name) {
-  return postJSON(DELETE_URL, { type, subfolder, name });
-}
-function renameFile(type, subfolder, name, newName) {
-  return postJSON(RENAME_URL, { type, subfolder, name, new_name: newName });
-}
-function moveFile(type, subfolder, name, destType, destSubfolder) {
-  return postJSON(MOVE_URL, {
-    type,
-    subfolder,
-    name,
-    dest_type: destType,
-    dest_subfolder: destSubfolder
-  });
-}
-async function postJSONBatch(url, body) {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  let data;
-  try {
-    data = await r.json();
-  } catch {
-    throw new Error(`HTTP ${r.status}`);
-  }
-  if (!r.ok || !data?.ok) {
-    const msg = data?.error || `HTTP ${r.status}`;
-    throw new Error(msg);
-  }
-  return data;
-}
-function deleteMany(items) {
-  return postJSONBatch(DELETE_MANY_URL, { items });
-}
-function moveMany(items, destType, destSubfolder) {
-  return postJSONBatch(MOVE_MANY_URL, {
-    items,
-    dest_type: destType,
-    dest_subfolder: destSubfolder
-  });
-}
-
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
 var KEY = Symbol.for("laurigates.comfyModalKit");
 function getKit() {
@@ -806,6 +641,171 @@ function openModalShell(opts = {}) {
   return controller;
 }
 
+// src/index.ts
+import { app } from "/scripts/app.js";
+
+// src/api.ts
+var EXT_NAME = "comfyui-image-browser";
+var BASE_URL = "/image_browser/base";
+var LIST_URL = "/image_browser/list";
+var THUMB_URL = "/image_browser/thumb";
+var FILE_URL = "/image_browser/file";
+var DELETE_URL = "/image_browser/delete";
+var DELETE_MANY_URL = "/image_browser/delete_many";
+var RENAME_URL = "/image_browser/rename";
+var MOVE_URL = "/image_browser/move";
+var MOVE_MANY_URL = "/image_browser/move_many";
+var RATING_URL = "/image_browser/rating";
+var IMG_EXTS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".bmp",
+  ".tiff",
+  ".tif",
+  ".avif"
+]);
+var VIDEO_EXTS = new Set([
+  ".mp4",
+  ".webm",
+  ".mov",
+  ".mkv",
+  ".avi",
+  ".m4v",
+  ".mpg",
+  ".mpeg"
+]);
+var SANDBOXED_TYPES = ["input", "output", "temp"];
+var BASE_PATHS = null;
+async function fetchBasePaths() {
+  if (BASE_PATHS)
+    return BASE_PATHS;
+  let resolved;
+  try {
+    const r = await fetch(BASE_URL, { cache: "no-cache" });
+    if (!r.ok)
+      throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!data.ok)
+      throw new Error(data.error || "base paths fetch failed");
+    resolved = data;
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] ${BASE_URL} failed`, e);
+    resolved = { base_path: "/", input_dir: "", output_dir: "", temp_dir: "" };
+  }
+  BASE_PATHS = resolved;
+  return resolved;
+}
+async function fetchListing(p) {
+  const params = new URLSearchParams;
+  if (p.type === "path") {
+    params.set("type", "path");
+    params.set("path", p.path || "/");
+  } else {
+    params.set("type", p.type);
+    params.set("subfolder", p.subfolder || "");
+  }
+  const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
+  if (!r.ok)
+    throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  if (!data.ok)
+    throw new Error(data.error || "listing failed");
+  return data;
+}
+function joinAbs(dir, name) {
+  const d = (dir || "/").replace(/\/+$/, "");
+  return d === "" ? `/${name}` : `${d}/${name}`;
+}
+function thumbVersion(mtime, size) {
+  return `${mtime}-${size ?? 0}`;
+}
+function imageThumbURL(type, subfolder, name, absDir, v) {
+  if (type === "path") {
+    return `${THUMB_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}&v=${encodeURIComponent(v)}`;
+  }
+  const p = new URLSearchParams({
+    type,
+    subfolder: subfolder || "",
+    name,
+    v
+  });
+  return `${THUMB_URL}?${p.toString()}`;
+}
+function videoSrcURL(type, subfolder, name, absDir) {
+  if (type === "path") {
+    return `${FILE_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}`;
+  }
+  const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
+  return `/api/view?${p.toString()}`;
+}
+function fullSrcURL(type, subfolder, name, absDir) {
+  if (type === "path") {
+    return `${FILE_URL}?path=${encodeURIComponent(joinAbs(absDir, name))}`;
+  }
+  const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
+  return `/api/view?${p.toString()}`;
+}
+async function postJSON(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+}
+function deleteFile(type, subfolder, name) {
+  return postJSON(DELETE_URL, { type, subfolder, name });
+}
+function renameFile(type, subfolder, name, newName) {
+  return postJSON(RENAME_URL, { type, subfolder, name, new_name: newName });
+}
+function moveFile(type, subfolder, name, destType, destSubfolder) {
+  return postJSON(MOVE_URL, {
+    type,
+    subfolder,
+    name,
+    dest_type: destType,
+    dest_subfolder: destSubfolder
+  });
+}
+async function postJSONBatch(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  let data;
+  try {
+    data = await r.json();
+  } catch {
+    throw new Error(`HTTP ${r.status}`);
+  }
+  if (!r.ok || !data?.ok) {
+    const msg = data?.error || `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+function deleteMany(items) {
+  return postJSONBatch(DELETE_MANY_URL, { items });
+}
+function moveMany(items, destType, destSubfolder) {
+  return postJSONBatch(MOVE_MANY_URL, {
+    items,
+    dest_type: destType,
+    dest_subfolder: destSubfolder
+  });
+}
+
 // src/overlay.ts
 function openOverlay(modal, onDismiss) {
   const host = modal.dialog;
@@ -1365,7 +1365,7 @@ function openImageBrowser() {
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
     } catch (e) {
-      console.error(`[${EXT_NAME}] list failed:`, e);
+      reportError("Failed to load directory", e);
       modal.setStatus(`Error: ${e.message}`);
       state.dirs = [];
       state.files = [];
@@ -2324,6 +2324,11 @@ function openShellSafe() {
     openImageBrowser();
   } catch (e) {
     console.warn(`[${EXT_NAME}] open failed`, e);
+    notify({
+      severity: "error",
+      summary: "Image Browser failed to open",
+      detail: e instanceof Error ? e.message : String(e)
+    });
   }
 }
 app.registerExtension({

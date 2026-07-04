@@ -489,7 +489,10 @@ export function openImageBrowser(): ModalShellController {
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
     } catch (e) {
-      console.error(`[${EXT_NAME}] list failed:`, e);
+      // Surface via the copyable notify() popup (reportError) in addition to
+      // the inline status text — a list-load failure was previously
+      // console-only from the user's perspective.
+      reportError("Failed to load directory", e);
       modal.setStatus(`Error: ${(e as Error).message}`);
       state.dirs = [];
       state.files = [];
