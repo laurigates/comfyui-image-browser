@@ -150,6 +150,16 @@ def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[
     return target, ""
 
 
+def _err(message: str, status: int) -> web.Response:
+    """Uniform JSON error response: ``{"ok": false, "error": <message>}``.
+
+    Every endpoint (reads and writes) returns errors through this shape so a
+    client gets a machine-readable reason on any status, never a bodyless
+    ``web.Response(status=...)``.
+    """
+    return web.json_response({"ok": False, "error": message}, status=status)
+
+
 # ---------------------------------------------------------------------------
 # Read endpoints
 # ---------------------------------------------------------------------------
@@ -223,11 +233,16 @@ async def image_browser_list(request: web.Request) -> web.Response:
                                 # until pixel access, so .size is cheap.
                                 with Image.open(entry.path) as im:
                                     width, height = im.size
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                # Corrupt/unreadable image header — omit
+                                # dimensions but keep listing the file.
+                                log.debug("size probe failed for %s: %s", entry.path, exc)
                         try:
                             rating = xmp_meta.read_rating_cached(entry.path, st)
-                        except Exception:
+                        except Exception as exc:
+                            # Bad/absent XMP packet — treat as unrated (0) but
+                            # record why the probe failed.
+                            log.debug("rating probe failed for %s: %s", entry.path, exc)
                             rating = 0
                         files.append(
                             {
@@ -273,12 +288,12 @@ async def image_browser_file(request: web.Request) -> web.Response:
     q = request.rel_url.query
     abs_path = q.get("path", "")
     if not abs_path:
-        return web.Response(status=400)
+        return _err("missing path", 400)
     path = os.path.abspath(os.path.expanduser(abs_path))
     if not os.path.isfile(path):
-        return web.Response(status=404)
+        return _err("file not found", 404)
     if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:
-        return web.Response(status=403)
+        return _err("unsupported file type", 403)
     mime, _ = mimetypes.guess_type(path)
     return web.FileResponse(
         path,
@@ -334,16 +349,16 @@ async def image_browser_thumb(request: web.Request) -> web.Response:
     """
     path, err = _resolve_thumb_target(request.rel_url.query)
     if err:
-        return web.Response(status=400)
+        return _err(err, 400)
     assert path is not None
     if not os.path.isfile(path) or not _is_image_file(path):
-        return web.Response(status=404)
+        return _err("not found", 404)
 
     try:
         st = os.stat(path)
     except OSError as exc:
         log.warning("thumb stat failed for %s: %s", path, exc)
-        return web.Response(status=404)
+        return _err("not found", 404)
     etag = thumb_cache.etag_for(path, st)
     cache_headers = {
         "ETag": etag,
@@ -355,7 +370,8 @@ async def image_browser_thumb(request: web.Request) -> web.Response:
 
     data = thumb_cache.get_thumb(path, st, _thumb_cache_dir())
     if data is None:
-        return web.Response(status=500)
+        log.warning("thumbnail encode failed for %s", path)
+        return _err("thumbnail encode failed", 500)
     return web.Response(body=data, content_type="image/webp", headers=cache_headers)
 
 
@@ -392,6 +408,7 @@ async def image_browser_delete(request: web.Request) -> web.Response:
     try:
         os.remove(target)
     except OSError as exc:
+        log.exception("delete failed for %s", target)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True})
 
@@ -421,6 +438,7 @@ async def image_browser_rename(request: web.Request) -> web.Response:
     try:
         os.rename(src, dst)
     except OSError as exc:
+        log.exception("rename failed for %s -> %s", src, dst)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True, "name": os.path.basename(dst)})
 
@@ -465,6 +483,7 @@ async def image_browser_move(request: web.Request) -> web.Response:
     try:
         shutil.move(src, dst)
     except OSError as exc:
+        log.exception("move failed for %s -> %s", src, dst)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True})
 
@@ -529,6 +548,7 @@ async def image_browser_delete_many(request: web.Request) -> web.Response:
             os.remove(target)
             deleted += 1
         except OSError as exc:
+            log.exception("batch delete failed for %s", target)
             errors.append({"name": name, "error": str(exc)})
     return web.json_response({"ok": True, "deleted": deleted, "errors": errors})
 
@@ -588,6 +608,7 @@ async def image_browser_move_many(request: web.Request) -> web.Response:
             shutil.move(src, dst)
             moved += 1
         except OSError as exc:
+            log.exception("batch move failed for %s -> %s", src, dst)
             errors.append({"name": name, "error": str(exc)})
     return web.json_response({"ok": True, "moved": moved, "errors": errors})
 
@@ -636,6 +657,7 @@ async def image_browser_rating(request: web.Request) -> web.Response:
 
     ok, backend = xmp_meta.write_rating(target, rating)
     if not ok:
+        log.error("rating write failed for %s: %s", target, backend)
         return web.json_response({"ok": False, "error": backend}, status=500)
     return web.json_response({"ok": True, "rating": rating, "backend": backend})
 

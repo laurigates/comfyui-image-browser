@@ -50,7 +50,7 @@ addopts = "--import-mode=importlib"
 [tool.comfy]
 PublisherId = "laurigates"
 DisplayName = "Image Browser"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/laurigates/comfyui-image-browser/main/icon.png"
 # The built frontend (web/dist/) is committed (tracked) — emitted by `bun run build`.
 # publish-node-action honors [tool.comfy] includes to force-add otherwise-
 # ignored paths into the published tarball. See ADR-0001.
