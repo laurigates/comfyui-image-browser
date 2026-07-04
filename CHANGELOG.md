@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.4...comfyui-image-browser-v0.1.5) (2026-07-04)
+
+
+### Bug Fixes
+
+* **instrumentation:** log write-endpoint failures, copyable notify(), + registry icon ([#15](https://github.com/laurigates/comfyui-image-browser/issues/15)) ([32d74ec](https://github.com/laurigates/comfyui-image-browser/commit/32d74ec9ceb8b693d33883369bc88c2f6d63402c))
+
 ## [0.1.4](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.3...comfyui-image-browser-v0.1.4) (2026-07-03)
 
 
