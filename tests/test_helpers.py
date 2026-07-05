@@ -8,6 +8,8 @@ folder_paths and is covered by the live smoke matrix.
 
 from __future__ import annotations
 
+import asyncio
+
 import image_browser as ib
 
 
@@ -60,6 +62,142 @@ class TestResolveSandboxedFileRejections:
         target, err = ib._resolve_sandboxed_file("output", "", "payload.exe")
         assert target is None
         assert err == "unsupported file type"
+
+
+class TestResolveSandboxedDir:
+    """Folder-deletion resolver: same write perimeter as files, no extension gate."""
+
+    def test_rejects_path_type(self):
+        target, err = ib._resolve_sandboxed_dir("path", "", "subdir")
+        assert target is None
+        assert "input/output/temp" in err
+
+    def test_rejects_unknown_type(self):
+        target, err = ib._resolve_sandboxed_dir("models", "", "subdir")
+        assert target is None
+        assert "input/output/temp" in err
+
+    def test_rejects_traversal_name(self):
+        target, err = ib._resolve_sandboxed_dir("output", "", "../outside")
+        assert target is None
+        assert err == "invalid name"
+
+    def test_rejects_empty_name(self):
+        # An empty name would resolve to the root itself — must never delete it.
+        target, err = ib._resolve_sandboxed_dir("output", "", "")
+        assert target is None
+        assert err == "invalid name"
+
+    def test_accepts_extensionless_dir_name(self, tmp_path, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(tmp_path), raising=False
+        )
+        target, err = ib._resolve_sandboxed_dir("output", "sub", "myfolder")
+        assert err == ""
+        assert target == str(tmp_path / "sub" / "myfolder")
+
+
+class TestCountDirContents:
+    def test_empty_dir(self, tmp_path):
+        assert ib._count_dir_contents(str(tmp_path)) == (0, 0)
+
+    def test_counts_nested_files_and_dirs(self, tmp_path):
+        (tmp_path / "a.png").write_bytes(b"x")
+        sub = tmp_path / "sub"
+        deep = sub / "deep"
+        deep.mkdir(parents=True)
+        (sub / "b.png").write_bytes(b"x")
+        (deep / "c.txt").write_bytes(b"x")
+        assert ib._count_dir_contents(str(tmp_path)) == (3, 2)
+
+    def test_symlinked_dir_not_followed(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.png").write_bytes(b"x")
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        (inner / "link").symlink_to(outside, target_is_directory=True)
+        # The link counts as a single dir entry; its contents are not traversed.
+        assert ib._count_dir_contents(str(inner)) == (0, 1)
+
+
+class _FakeRequest:
+    """Minimal stand-in for aiohttp.web.Request — /rmdir only reads .json()."""
+
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+class TestRmdirEndpoint:
+    """Drive the real /rmdir handler against a tmp dir (folder_paths stubbed).
+
+    conftest's json_response stub returns SimpleNamespace(status, _body), so
+    the two-step contract (409 + nested counts, then recursive:true) is
+    assertable without a live aiohttp server.
+    """
+
+    def _call(self, body):
+        return asyncio.run(ib.image_browser_rmdir(_FakeRequest(body)))
+
+    def _sandbox(self, tmp_path, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(tmp_path), raising=False
+        )
+
+    def test_empty_dir_deletes_outright(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "empty").mkdir()
+        resp = self._call({"type": "output", "subfolder": "", "name": "empty"})
+        assert resp._body["ok"] is True
+        assert not (tmp_path / "empty").exists()
+
+    def test_non_empty_answers_409_with_nested_counts(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        d = tmp_path / "full"
+        (d / "nested").mkdir(parents=True)
+        (d / "a.png").write_bytes(b"x")
+        (d / "nested" / "b.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "name": "full"})
+        assert resp.status == 409
+        assert resp._body["ok"] is False
+        assert resp._body["files"] == 2
+        assert resp._body["dirs"] == 1
+        assert d.is_dir()  # nothing deleted without recursive:true
+
+    def test_recursive_true_deletes_subtree(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        d = tmp_path / "full"
+        (d / "nested").mkdir(parents=True)
+        (d / "nested" / "b.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "name": "full", "recursive": True})
+        assert resp._body["ok"] is True
+        assert not d.exists()
+
+    def test_rejects_symlinked_dir(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        outside = tmp_path / "real"
+        outside.mkdir()
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+        resp = self._call({"type": "output", "subfolder": "", "name": "link"})
+        assert resp.status == 400
+        assert outside.is_dir()
+
+    def test_missing_dir_404s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"type": "output", "subfolder": "", "name": "nope"})
+        assert resp.status == 404
+
+    def test_path_type_rejected(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"type": "path", "subfolder": "", "name": "x"})
+        assert resp.status == 400
 
 
 class TestParseRating:
@@ -139,6 +277,10 @@ class TestBatchEndpointsRegistered:
     def test_move_many_route_present(self):
         registered = PromptServer.instance.routes.registered
         assert any(r.method == "POST" and r.path == "/image_browser/move_many" for r in registered)
+
+    def test_rmdir_route_present(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(r.method == "POST" and r.path == "/image_browser/rmdir" for r in registered)
 
 
 # Imported at the bottom so the class above can reference the stubbed server

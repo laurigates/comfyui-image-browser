@@ -20,6 +20,7 @@ Endpoint surface (all under /image_browser/):
     POST /rename       {type, subfolder, name, new_name}            rename in place
     POST /move         {type, subfolder, name, dest_type, dest_subfolder}   move
     POST /move_many    {items:[{type,subfolder,name}, …], dest_type, dest_subfolder} batch move
+    POST /rmdir        {type, subfolder, name, recursive}           delete a folder
     POST /rating       {type, subfolder, name, rating}              0..5 star rating
 
 Security posture:
@@ -148,6 +149,42 @@ def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[
     if os.path.commonpath([target, base]) != base:
         return None, "name escapes root"
     return target, ""
+
+
+def _resolve_sandboxed_dir(type_name: str, subfolder: str, name: str) -> tuple[str | None, str]:
+    """Resolve a directory mutation target inside a sandboxed root.
+
+    Same perimeter as ``_resolve_sandboxed_file`` (sandboxed type only, bare
+    name, containment) minus the media-extension gate — directories have no
+    extension. The bare-name check guarantees the target is strictly below the
+    root, so the root itself can never be the target.
+    """
+    if type_name not in SANDBOXED_TYPES:
+        return None, "writes are only allowed in input/output/temp"
+    if not _is_bare_name(name):
+        return None, "invalid name"
+    base, err = _resolve_listing_base(type_name, subfolder, "")
+    if err:
+        return None, err
+    assert base is not None
+    target = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([target, base]) != base:
+        return None, "name escapes root"
+    return target, ""
+
+
+def _count_dir_contents(target: str) -> tuple[int, int]:
+    """Return (files, dirs) nested anywhere under ``target`` (target excluded).
+
+    Symlinks are not followed, so a link inside the tree counts as one file
+    and its destination is never traversed.
+    """
+    n_files = 0
+    n_dirs = 0
+    for _root, dirnames, filenames in os.walk(target, followlinks=False):
+        n_dirs += len(dirnames)
+        n_files += len(filenames)
+    return n_files, n_dirs
 
 
 def _err(message: str, status: int) -> web.Response:
@@ -611,6 +648,55 @@ async def image_browser_move_many(request: web.Request) -> web.Response:
             log.exception("batch move failed for %s -> %s", src, dst)
             errors.append({"name": name, "error": str(exc)})
     return web.json_response({"ok": True, "moved": moved, "errors": errors})
+
+
+@PromptServer.instance.routes.post("/image_browser/rmdir")
+async def image_browser_rmdir(request: web.Request) -> web.Response:
+    """Delete a folder inside a sandboxed root.
+
+    Body: ``{type, subfolder, name, recursive?}``. An empty folder is removed
+    outright. A non-empty folder without ``recursive: true`` returns 409 with
+    the nested ``files``/``dirs`` counts so the client can surface a confirm
+    ("contains N files") and re-post with ``recursive: true``, which rmtree-s
+    the whole subtree. Same write perimeter as the file mutations: sandboxed
+    types only, bare traversal-free name, containment (ADR-0002). Symlinked
+    directories are rejected — deleting through a link could reach outside
+    the sandbox.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+
+    target, err = _resolve_sandboxed_dir(
+        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+    )
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert target is not None
+    if os.path.islink(target):
+        return web.json_response(
+            {"ok": False, "error": "refusing to delete a symlink"}, status=400
+        )
+    if not os.path.isdir(target):
+        return web.json_response({"ok": False, "error": "folder not found"}, status=404)
+
+    n_files, n_dirs = _count_dir_contents(target)
+    recursive = body.get("recursive") is True
+    if (n_files or n_dirs) and not recursive:
+        return web.json_response(
+            {"ok": False, "error": "folder is not empty", "files": n_files, "dirs": n_dirs},
+            status=409,
+        )
+    try:
+        if n_files or n_dirs:
+            shutil.rmtree(target)
+        else:
+            os.rmdir(target)
+    except OSError as exc:
+        log.exception("rmdir failed for %s", target)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    return web.json_response({"ok": True, "files": n_files, "dirs": n_dirs})
 
 
 def _parse_rating(value: Any) -> int | None:

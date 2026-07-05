@@ -33,6 +33,7 @@ import {
   moveFile,
   moveMany,
   RATING_URL,
+  removeDir,
   renameFile,
   SANDBOXED_TYPES,
   thumbVersion,
@@ -84,6 +85,32 @@ function loadSavedSort(): SavedSort | null {
 function saveSort(key: string, dir: string): void {
   try {
     localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch {
+    /* private-mode / disabled storage — non-fatal */
+  }
+}
+
+// Last successful move destination — the picker opens there next time, so
+// sorting a batch of files into the same folder is one tap per file.
+const MOVE_DEST_STORAGE_KEY = "comfyui-image-browser:move-dest";
+
+function loadSavedDest(): Destination | null {
+  try {
+    const raw = localStorage.getItem(MOVE_DEST_STORAGE_KEY);
+    if (!raw) return null;
+    const i = raw.indexOf(":");
+    if (i < 0) return null;
+    const type = raw.slice(0, i) as BrowseType;
+    if (!SANDBOXED_TYPES.includes(type)) return null;
+    return { type, subfolder: raw.slice(i + 1) };
+  } catch {
+    return null;
+  }
+}
+
+function saveDest(d: Destination): void {
+  try {
+    localStorage.setItem(MOVE_DEST_STORAGE_KEY, `${d.type}:${d.subfolder}`);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -182,12 +209,36 @@ export function openImageBrowser(): ModalShellController {
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
 
-  modal.toolbarEl.append(tabsEl, crumbsEl, sortEl, refreshEl);
+  // Touch entry point into multi-select — the keyboard path (Space / v) has no
+  // affordance on a phone. Hidden on the browse-only path tab (renderTabs).
+  const selectToggleEl = document.createElement("button");
+  selectToggleEl.type = "button";
+  selectToggleEl.className = "ib-control ib-icon ib-select-toggle";
+  selectToggleEl.title = "Select multiple";
+  selectToggleEl.textContent = "☑";
+
+  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, sortEl, refreshEl);
 
   // ---- Grid ------------------------------------------------------
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
+
+  // The modal shell's body (.cmp-body) is the overflow-y:auto container the
+  // grid scrolls in — renderGrid saves/restores its scrollTop so deletes,
+  // moves, renames and rating changes don't fling the view back to the top.
+  const scrollHost = modal.bodyEl;
+
+  // ---- Floating batch-action bar (visible while a selection exists) ----
+  const selBar = document.createElement("div");
+  selBar.className = "ib-selbar";
+  selBar.innerHTML = `
+    <span class="ib-selbar-count"></span>
+    <button type="button" class="ib-selbar-btn" data-selbar="move">⇄ Move…</button>
+    <button type="button" class="ib-selbar-btn ib-selbar-danger" data-selbar="delete">🗑 Delete</button>
+    <button type="button" class="ib-selbar-btn" data-selbar="clear">✕</button>`;
+  const selBarCount = selBar.querySelector(".ib-selbar-count") as HTMLElement;
+  modal.dialog.appendChild(selBar);
 
   const countEl = modal.footerEl.querySelector(".ib-count") as HTMLElement | null;
   function setCount(visible: number, total: number): void {
@@ -198,6 +249,9 @@ export function openImageBrowser(): ModalShellController {
   // Selection persists across tabs/dirs; key `${type}:${subfolder}:${name}`.
   // `type=path` is never selectable (backend rejects path writes).
   const selected = new Map<string, { file: ListingFile; type: BrowseType; subfolder: string }>();
+  // Touch select mode: while on, tapping a card toggles selection instead of
+  // opening it. Entered via the ☑ toolbar toggle or a long-press on a card.
+  let selectMode = false;
   let focusIndex = -1;
   let visualMode = false;
   let visualAnchor = 0;
@@ -278,6 +332,9 @@ export function openImageBrowser(): ModalShellController {
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
     renderGrid();
+    // New filter → read results from the top (renderGrid otherwise restores
+    // the previous scroll position, which is for in-place mutations).
+    scrollHost.scrollTop = 0;
   });
   sortEl.addEventListener("change", () => {
     const [k, d] = sortEl.value.split(":");
@@ -285,8 +342,21 @@ export function openImageBrowser(): ModalShellController {
     state.sortDir = d as string;
     saveSort(k as string, d as string);
     renderGrid();
+    scrollHost.scrollTop = 0;
   });
-  refreshEl.addEventListener("click", () => loadAndRender());
+  refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
+  selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
+  selBar.addEventListener("click", (e) => {
+    const b = (e.target as HTMLElement).closest("[data-selbar]") as HTMLElement | null;
+    if (!b) return;
+    const action = b.dataset.selbar;
+    if (action === "move") void doMoveSelected();
+    else if (action === "delete") void doDelete();
+    else if (action === "clear") {
+      setSelectMode(false);
+      clearSelection();
+    }
+  });
   tabsEl.addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest("[data-type]") as HTMLElement | null;
     if (!b) return;
@@ -303,6 +373,13 @@ export function openImageBrowser(): ModalShellController {
   });
 
   gridEl.addEventListener("click", (e) => {
+    // A completed long-press or drag-select already consumed this gesture —
+    // the trailing click must not also open/toggle.
+    if (suppressClick) {
+      suppressClick = false;
+      e.stopPropagation();
+      return;
+    }
     const target = e.target as HTMLElement;
     const actionBtn = target.closest("[data-action]") as HTMLElement | null;
     const card = target.closest(".ib-card") as HTMLElement | null;
@@ -312,12 +389,25 @@ export function openImageBrowser(): ModalShellController {
       return;
     }
     if (card.classList.contains("is-dir")) {
+      if (actionBtn?.dataset.action === "rmdir") {
+        e.stopPropagation();
+        void onDeleteDir(card.dataset.name as string);
+        return;
+      }
       navigateInto(card.dataset.name as string);
       return;
     }
     // File card.
     const name = card.dataset.name as string;
     const ext = card.dataset.ext || "";
+    const idx = Number(card.dataset.idx);
+    // Checkbox tap — toggle selection (drag-selects are handled on pointermove
+    // and suppress this click).
+    if (target.closest("[data-check]")) {
+      e.stopPropagation();
+      toggleSelectionAt(idx);
+      return;
+    }
     const star = target.closest(".ib-star") as HTMLElement | null;
     if (star) {
       e.stopPropagation();
@@ -338,7 +428,113 @@ export function openImageBrowser(): ModalShellController {
       else if (action === "move") onMove(name);
       return;
     }
+    // In select mode a card tap toggles selection instead of opening.
+    if (selectMode && SANDBOXED_TYPES.includes(state.type)) {
+      toggleSelectionAt(idx);
+      return;
+    }
     openFull(name, ext);
+  });
+
+  // ---- Touch gestures: long-press → select mode; drag over ☑ → range select
+  let suppressClick = false;
+  let dragSel: { on: boolean; last: number; moved: boolean } | null = null;
+  let lpTimer: ReturnType<typeof setTimeout> | null = null;
+  let lpX = 0;
+  let lpY = 0;
+
+  function cancelLongPress(): void {
+    if (lpTimer) {
+      clearTimeout(lpTimer);
+      lpTimer = null;
+    }
+  }
+
+  gridEl.addEventListener("pointerdown", (e) => {
+    // A suppress flag can go stale when its gesture never produces a click
+    // (long-press followed by a scroll) — a new gesture always starts clean.
+    suppressClick = false;
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    // Secondary mouse buttons never select — and must not arm the long-press,
+    // or the contextmenu guard below would eat desktop right-click.
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    const card = target.closest(".ib-card.is-file") as HTMLElement | null;
+    if (!card) return;
+    const idx = Number(card.dataset.idx);
+    if (!Number.isFinite(idx)) return;
+    if (target.closest("[data-check]")) {
+      // Drag starting on a checkbox sweeps a range; the checkbox has
+      // touch-action:none so the gesture selects instead of scrolling.
+      const f = renderedFiles[idx];
+      dragSel = { on: !(f && isSelected(f)), last: idx, moved: false };
+      try {
+        gridEl.setPointerCapture(e.pointerId);
+      } catch {
+        /* jsdom / detached node — capture is an optimization only */
+      }
+      return;
+    }
+    // Long-press anywhere on the card enters select mode (Google-Photos
+    // style). Touch/pen only — desktop has hover checkboxes and a slow mouse
+    // click must stay a click.
+    if (e.pointerType === "mouse") return;
+    lpX = e.clientX;
+    lpY = e.clientY;
+    cancelLongPress();
+    lpTimer = setTimeout(() => {
+      lpTimer = null;
+      suppressClick = true;
+      if (!selectMode) setSelectMode(true);
+      toggleSelectionAt(idx);
+    }, 450);
+  });
+
+  gridEl.addEventListener("pointermove", (e) => {
+    if (dragSel) {
+      if (!dragSel.moved) {
+        dragSel.moved = true;
+        setSelectedRange(dragSel.last, dragSel.last, dragSel.on);
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const card =
+        el instanceof Element ? (el.closest(".ib-card.is-file") as HTMLElement | null) : null;
+      if (card) {
+        const idx = Number(card.dataset.idx);
+        if (Number.isFinite(idx) && idx !== dragSel.last) {
+          // Cover the whole span since the last event so a fast swipe can't
+          // skip cards between two pointermove samples.
+          setSelectedRange(dragSel.last, idx, dragSel.on);
+          dragSel.last = idx;
+        }
+      }
+      return;
+    }
+    // A real scroll/pan cancels the pending long-press.
+    if (lpTimer && (Math.abs(e.clientX - lpX) > 8 || Math.abs(e.clientY - lpY) > 8)) {
+      cancelLongPress();
+    }
+  });
+
+  function endPointerGesture(e: PointerEvent): void {
+    if (dragSel) {
+      // A swept range already applied — the trailing click must not re-toggle.
+      if (dragSel.moved) suppressClick = true;
+      dragSel = null;
+      try {
+        gridEl.releasePointerCapture(e.pointerId);
+      } catch {
+        /* capture may never have been taken */
+      }
+    }
+    cancelLongPress();
+  }
+  gridEl.addEventListener("pointerup", endPointerGesture);
+  gridEl.addEventListener("pointercancel", endPointerGesture);
+  // Long-press on a thumbnail also raises the native context menu (esp. on
+  // Android over <img>) — swallow it while it would fight the selection UX.
+  gridEl.addEventListener("contextmenu", (e) => {
+    if (selectMode || suppressClick || lpTimer) e.preventDefault();
   });
 
   // ---- File actions ---------------------------------------------
@@ -424,6 +620,7 @@ export function openImageBrowser(): ModalShellController {
     if (!dest) return;
     try {
       await moveFile(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      saveDest(dest);
       state.files = state.files.filter((f) => f.name !== name);
       renderGrid();
       notify({
@@ -441,6 +638,8 @@ export function openImageBrowser(): ModalShellController {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
       b.classList.toggle("is-active", (b as HTMLElement).dataset.type === state.type);
     }
+    // The browse…/path tab is read-only — no selection to toggle there.
+    selectToggleEl.style.display = SANDBOXED_TYPES.includes(state.type) ? "" : "none";
   }
 
   function renderCrumbs(): void {
@@ -470,7 +669,7 @@ export function openImageBrowser(): ModalShellController {
     }
   }
 
-  async function loadAndRender(): Promise<void> {
+  async function loadAndRender(opts?: { preserveScroll?: boolean }): Promise<void> {
     focusIndex = 0;
     visualMode = false;
     modal.dialog.classList.remove("is-visual");
@@ -499,6 +698,10 @@ export function openImageBrowser(): ModalShellController {
     }
     modal.setBusy(false);
     renderGrid();
+    // Navigating to a different directory starts at the top; refresh-in-place
+    // (refresh button, paste/move re-list) keeps the scroll position that
+    // renderGrid restored.
+    if (!opts?.preserveScroll) scrollHost.scrollTop = 0;
   }
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
@@ -526,6 +729,10 @@ export function openImageBrowser(): ModalShellController {
 
   function renderGrid(): void {
     const q = state.query;
+    // Re-renders happen after delete/move/rename/sort — wiping innerHTML
+    // resets the body's scrollTop, so capture and restore it. Keyboard focus
+    // moves scroll separately via applyFocus.
+    const savedScrollTop = scrollHost.scrollTop;
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
 
@@ -542,7 +749,13 @@ export function openImageBrowser(): ModalShellController {
       const c = document.createElement("div");
       c.className = "ib-card is-dir";
       c.dataset.name = d.name;
-      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">📁</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>`;
+      // Folder delete rides the same write gate as the file mutations. An
+      // empty folder deletes outright; a non-empty one confirms with the
+      // nested file count (see onDeleteDir).
+      const dirDelBtn = canWrite
+        ? `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">🗑</button>`
+        : "";
+      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">📁</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirDelBtn}`;
       gridEl.appendChild(c);
     }
 
@@ -573,6 +786,7 @@ export function openImageBrowser(): ModalShellController {
       if (isSelected(f)) c.classList.add("is-selected");
       c.dataset.name = f.name;
       c.dataset.ext = (f.ext || "").toLowerCase();
+      c.dataset.idx = String(fi);
       const t = thumbForFile(f);
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
       const when = new Date(f.mtime * 1000).toLocaleString();
@@ -599,7 +813,14 @@ export function openImageBrowser(): ModalShellController {
         : ratingOf(f)
           ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>`
           : "";
+      // The selection checkbox is the touch affordance for multi-select: it
+      // has touch-action:none, so a drag starting on it sweeps a range
+      // instead of scrolling. Only where writes are allowed.
+      const checkBtn = canWrite
+        ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>`
+        : "";
       c.innerHTML = `
+        ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
@@ -621,8 +842,7 @@ export function openImageBrowser(): ModalShellController {
 
     setCount(visible, state.files.length);
     installLazyThumbs(gridEl);
-    const focusedCard = gridEl.querySelector(".ib-card.is-focused") as HTMLElement | null;
-    focusedCard?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    scrollHost.scrollTop = savedScrollTop;
   }
 
   function installLazyThumbs(rootEl: HTMLElement): void {
@@ -735,6 +955,15 @@ export function openImageBrowser(): ModalShellController {
     const n = selected.size;
     selectedBadge.style.display = n > 0 ? "inline" : "none";
     selectedBadge.textContent = n > 0 ? `${n} selected` : "";
+    selBar.classList.toggle("is-visible", n > 0);
+    selBarCount.textContent = `${n} selected`;
+  }
+
+  function setSelectMode(on: boolean): void {
+    if (on && !SANDBOXED_TYPES.includes(state.type)) return;
+    selectMode = on;
+    selectToggleEl.classList.toggle("is-active", on);
+    modal.dialog.classList.toggle("is-selecting", on);
   }
 
   function toggleSelectionAt(i: number): void {
@@ -744,6 +973,21 @@ export function openImageBrowser(): ModalShellController {
     const key = selectionKey(state.type, state.subfolder, f.name);
     if (selected.has(key)) selected.delete(key);
     else selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+    refreshSelectionClasses();
+    updateSelectedCount();
+  }
+
+  function setSelectedRange(a: number, b: number, on: boolean): void {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    for (let i = lo; i <= hi; i++) {
+      const f = renderedFiles[i];
+      if (!f) continue;
+      const key = selectionKey(state.type, state.subfolder, f.name);
+      if (on) selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+      else selected.delete(key);
+    }
     refreshSelectionClasses();
     updateSelectedCount();
   }
@@ -824,7 +1068,9 @@ export function openImageBrowser(): ModalShellController {
   }
 
   async function doDelete(): Promise<void> {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    // No tab gate: selected items carry their own sandboxed type/subfolder,
+    // so acting on a selection is valid even while viewing the path tab
+    // (collectSelectedOrFocused never yields a path-tab item).
     const items = collectSelectedOrFocused();
     if (items.length === 0) return;
     const count = items.length;
@@ -869,6 +1115,83 @@ export function openImageBrowser(): ModalShellController {
     }
   }
 
+  async function doMoveSelected(): Promise<void> {
+    // Batch move: the selection if there is one, else the focused file.
+    const items = collectSelectedOrFocused();
+    if (items.length === 0) return;
+    const dest = await pickDestination(modal, {
+      type: state.type,
+      subfolder: state.subfolder,
+    });
+    if (!dest) return;
+    try {
+      const result = await moveMany(items, dest.type, dest.subfolder);
+      const errored = new Set((result.errors ?? []).map((er) => er.name));
+      for (const it of items) {
+        if (!errored.has(it.name)) selected.delete(selectionKey(it.type, it.subfolder, it.name));
+      }
+      updateSelectedCount();
+      if (result.moved > 0) saveDest(dest);
+      if (dest.type === state.type && dest.subfolder === state.subfolder) {
+        // Files may have arrived INTO the current folder — re-list it.
+        await loadAndRender({ preserveScroll: true });
+      } else {
+        const removedHere = new Set(
+          items
+            .filter(
+              (it) =>
+                it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name),
+            )
+            .map((it) => it.name),
+        );
+        state.files = state.files.filter((f) => !removedHere.has(f.name));
+        renderGrid();
+      }
+      if (result.errors && result.errors.length > 0) {
+        const names = result.errors.map((er) => er.name).join(", ");
+        reportError(`Moved ${result.moved}, ${result.errors.length} failed`, new Error(names));
+      } else {
+        notify({
+          severity: "success",
+          summary: "Moved",
+          detail: `${result.moved} file(s) → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`,
+        });
+      }
+    } catch (e) {
+      reportError("Move failed", e);
+    }
+  }
+
+  async function onDeleteDir(name: string): Promise<void> {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    try {
+      // First attempt is non-recursive: an empty folder deletes outright; a
+      // non-empty one answers with the nested counts for the confirm below.
+      const res = await removeDir(state.type, state.subfolder, name, false);
+      if (res.status === "not_empty") {
+        const parts = [`${res.files} file${res.files === 1 ? "" : "s"}`];
+        if (res.dirs > 0) parts.push(`${res.dirs} subfolder${res.dirs === 1 ? "" : "s"}`);
+        const ok = await confirmAction(modal, {
+          title: "Delete folder and contents?",
+          message: `"${name}" contains ${parts.join(" and ")}. Permanently delete everything inside? This cannot be undone.`,
+          confirmLabel: `Delete ${res.files} file${res.files === 1 ? "" : "s"}`,
+          danger: true,
+        });
+        if (!ok) return;
+        await removeDir(state.type, state.subfolder, name, true);
+      }
+      state.dirs = state.dirs.filter((d) => d.name !== name);
+      renderGrid();
+      notify({
+        severity: "success",
+        summary: "Folder deleted",
+        detail: res.status === "not_empty" ? `"${name}" (${res.files} files)` : `"${name}" (empty)`,
+      });
+    } catch (e) {
+      reportError("Delete folder failed", e);
+    }
+  }
+
   function doYank(): void {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     const items = collectSelectedOrFocused();
@@ -895,7 +1218,8 @@ export function openImageBrowser(): ModalShellController {
       }
       yanked = null;
       updateSelectedCount();
-      await loadAndRender();
+      if (result.moved > 0) saveDest({ type: state.type, subfolder: state.subfolder });
+      await loadAndRender({ preserveScroll: true });
       if (result.errors && result.errors.length > 0) {
         const names = result.errors.map((e) => e.name).join(", ");
         reportError(`Moved ${result.moved}, ${result.errors.length} failed`, new Error(names));
@@ -979,6 +1303,8 @@ export function openImageBrowser(): ModalShellController {
             <dt>v</dt><dd>visual mode</dd>
             <dt>Ctrl+A</dt><dd>select all visible</dd>
             <dt>Esc</dt><dd>clear selection</dd>
+            <dt>long-press</dt><dd>select mode (touch)</dd>
+            <dt>drag ✓</dt><dd>range select (touch)</dd>
           </dl>
         </div>
         <div class="ib-help-col">
@@ -989,7 +1315,7 @@ export function openImageBrowser(): ModalShellController {
             <dt>y y</dt><dd>yank (cut) selected</dd>
             <dt>p</dt><dd>paste (move) here</dd>
             <dt>r</dt><dd>rename focused</dd>
-            <dt>m</dt><dd>move focused…</dd>
+            <dt>m</dt><dd>move selected…</dd>
           </dl>
         </div>
         <div class="ib-help-col">
@@ -1023,7 +1349,8 @@ export function openImageBrowser(): ModalShellController {
       } else if (visualMode) {
         visualMode = false;
         modal.dialog.classList.remove("is-visual");
-      } else if (selected.size > 0) {
+      } else if (selectMode || selected.size > 0) {
+        setSelectMode(false);
         clearSelection();
       } else {
         return; // let the modal shell close the browser
@@ -1163,10 +1490,11 @@ export function openImageBrowser(): ModalShellController {
         }
         break;
       case "m":
-        if (SANDBOXED_TYPES.includes(state.type) && f) {
+        // Moves the selection when one exists, else the focused file.
+        if (selected.size > 0 || (SANDBOXED_TYPES.includes(state.type) && f)) {
           e.preventDefault();
           e.stopPropagation();
-          void onMove(f.name);
+          void doMoveSelected();
         }
         break;
       case "/":
@@ -1212,7 +1540,10 @@ function pickDestination(
     const ov = openOverlay(modal, () => resolve(null));
     ov.card.classList.add("ib-move-card");
 
-    const cur: Destination = {
+    // Open at the last successful move destination (sorting a batch into the
+    // same folder is the common case); fall back to the current location.
+    const remembered = loadSavedDest();
+    const cur: Destination = remembered ?? {
       type: SANDBOXED_TYPES.includes(start.type) ? start.type : "output",
       subfolder: start.subfolder,
     };
@@ -1287,6 +1618,12 @@ function pickDestination(
       status.textContent = "Loading…";
       try {
         const data = await fetchListing({ type: cur.type, subfolder: cur.subfolder });
+        // A remembered destination may have been deleted since — climb to the
+        // root of the same tab (which always exists) instead of a dead end.
+        if (!data.exists && cur.subfolder) {
+          cur.subfolder = "";
+          return load();
+        }
         status.textContent = "";
         if (cur.subfolder) {
           const up = document.createElement("button");
@@ -1451,6 +1788,10 @@ const BROWSER_CSS = `
     background: #21212a; border: 1px solid #2a2a32; border-radius: 6px; overflow: hidden;
     cursor: pointer; display: flex; flex-direction: column;
     transition: transform 0.06s ease, border-color 0.1s ease;
+    /* Anchor for the corner overlays (selection check / folder delete); the
+       text-selection + touch-callout suppression keeps long-press clean. */
+    position: relative;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .ib-card:hover { border-color: #6ba6ff; transform: translateY(-1px); }
 .ib-card.is-up, .ib-card.is-dir { background: #1f1f26; }
@@ -1503,6 +1844,51 @@ const BROWSER_CSS = `
 .ib-card.is-focused { outline: 2px solid #6ba6ff; outline-offset: -2px; z-index: 1; }
 .ib-card.is-selected { border-color: #ffd866; background: #2a2a1f; }
 .ib-card.is-selected.is-focused { outline-color: #ffd866; }
+/* Selection checkbox — the touch affordance for multi-select. Hidden until
+   hover on fine pointers; always visible on touch, in select mode, and on
+   already-selected cards. touch-action:none makes a drag starting here a
+   range-select instead of a scroll. */
+.ib-check {
+    position: absolute; top: 4px; left: 4px; z-index: 2;
+    width: 34px; height: 34px; padding: 0; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45);
+    color: transparent; font-size: 16px; line-height: 1; cursor: pointer;
+    display: none; align-items: center; justify-content: center;
+    touch-action: none;
+}
+.ib-card:hover .ib-check,
+.ib-card.is-selected .ib-check,
+.ib-dialog.is-selecting .ib-check { display: flex; }
+@media (pointer: coarse) { .ib-check { display: flex; } }
+.ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
+.ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
+.ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+/* Folder delete — corner overlay on dir cards (write-gated). */
+.ib-dir-del {
+    position: absolute; top: 4px; right: 4px; z-index: 2;
+    width: 34px; height: 34px; padding: 0; border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(0, 0, 0, 0.45);
+    color: #b8b8c0; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.ib-dir-del:hover { background: #5c2a3c; color: #ff9eb0; }
+/* Floating batch-action bar — appears while a selection exists. */
+.ib-selbar {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: calc(52px + env(safe-area-inset-bottom, 0px));
+    z-index: 4; display: none; align-items: center; gap: 8px;
+    max-width: calc(100% - 16px); white-space: nowrap;
+    background: #1c1c24; border: 1px solid #3a3a44; border-radius: 24px;
+    padding: 8px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.ib-selbar.is-visible { display: flex; }
+.ib-selbar-count { font-size: 12.5px; font-weight: 600; color: #9ec6ff; padding: 0 4px; }
+.ib-selbar-btn {
+    background: #2a2a36; color: #d8d8dc; border: 1px solid #3a3a44; border-radius: 16px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer; font-family: inherit; min-height: 38px;
+}
+.ib-selbar-btn:hover { background: #3a3a4a; color: #fff; }
+.ib-selbar-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.ib-selbar-danger:hover { background: #5c2a3c; color: #fff; }
 .ib-dialog.is-visual .ib-grid { outline: 2px solid #ffd866; outline-offset: -2px; }
 .ib-selected-badge {
     background: #2f3a52; color: #9ec6ff; border: 1px solid #4a5878; border-radius: 10px;

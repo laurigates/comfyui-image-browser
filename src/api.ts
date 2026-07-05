@@ -12,6 +12,7 @@ const DELETE_MANY_URL = "/image_browser/delete_many";
 const RENAME_URL = "/image_browser/rename";
 const MOVE_URL = "/image_browser/move";
 const MOVE_MANY_URL = "/image_browser/move_many";
+const RMDIR_URL = "/image_browser/rmdir";
 export const RATING_URL = "/image_browser/rating";
 
 export const IMG_EXTS = new Set([
@@ -284,6 +285,43 @@ async function postJSONBatch<T extends { ok: boolean; errors?: BatchError[] }>(
 
 export function deleteMany(items: BatchItem[]): Promise<DeleteManyResult> {
   return postJSONBatch<DeleteManyResult>(DELETE_MANY_URL, { items });
+}
+
+// ---- Folder deletion (sandboxed roots only) ----------------------------
+//
+// /rmdir is a two-step contract: a non-empty folder without recursive:true
+// answers 409 with the nested file/dir counts, so the UI can surface a
+// "contains N files" confirm and re-post with recursive:true. An empty
+// folder deletes on the first call.
+
+type RmdirResult =
+  | { status: "deleted"; files: number; dirs: number }
+  | { status: "not_empty"; files: number; dirs: number };
+
+export async function removeDir(
+  type: BrowseType,
+  subfolder: string,
+  name: string,
+  recursive = false,
+): Promise<RmdirResult> {
+  const r = await fetch(RMDIR_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, subfolder, name, recursive }),
+  });
+  let data: { ok?: boolean; error?: string; files?: number; dirs?: number } = {};
+  try {
+    data = await r.json();
+  } catch {
+    // fall through to status-based error below
+  }
+  if (r.ok && data.ok) {
+    return { status: "deleted", files: data.files ?? 0, dirs: data.dirs ?? 0 };
+  }
+  if (r.status === 409 && typeof data.files === "number") {
+    return { status: "not_empty", files: data.files, dirs: data.dirs ?? 0 };
+  }
+  throw new Error(data.error || `HTTP ${r.status}`);
 }
 
 export function moveMany(
