@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.6...comfyui-image-browser-v0.1.7) (2026-07-05)
+
+
+### Features
+
+* per-directory scroll memory + pinned folders ([#19](https://github.com/laurigates/comfyui-image-browser/issues/19)) ([6ab96e1](https://github.com/laurigates/comfyui-image-browser/commit/6ab96e105321f0f51451537eeb786df4c198e9e7))
+
 ## [0.1.6](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.5...comfyui-image-browser-v0.1.6) (2026-07-05)
 
 
