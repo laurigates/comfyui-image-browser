@@ -655,6 +655,7 @@ var DELETE_MANY_URL = "/image_browser/delete_many";
 var RENAME_URL = "/image_browser/rename";
 var MOVE_URL = "/image_browser/move";
 var MOVE_MANY_URL = "/image_browser/move_many";
+var RMDIR_URL = "/image_browser/rmdir";
 var RATING_URL = "/image_browser/rating";
 var IMG_EXTS = new Set([
   ".png",
@@ -797,6 +798,24 @@ async function postJSONBatch(url, body) {
 }
 function deleteMany(items) {
   return postJSONBatch(DELETE_MANY_URL, { items });
+}
+async function removeDir(type, subfolder, name, recursive = false) {
+  const r = await fetch(RMDIR_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, subfolder, name, recursive })
+  });
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  if (r.ok && data.ok) {
+    return { status: "deleted", files: data.files ?? 0, dirs: data.dirs ?? 0 };
+  }
+  if (r.status === 409 && typeof data.files === "number") {
+    return { status: "not_empty", files: data.files, dirs: data.dirs ?? 0 };
+  }
+  throw new Error(data.error || `HTTP ${r.status}`);
 }
 function moveMany(items, destType, destSubfolder) {
   return postJSONBatch(MOVE_MANY_URL, {
@@ -1007,6 +1026,28 @@ function saveSort(key, dir) {
     localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
   } catch {}
 }
+var MOVE_DEST_STORAGE_KEY = "comfyui-image-browser:move-dest";
+function loadSavedDest() {
+  try {
+    const raw = localStorage.getItem(MOVE_DEST_STORAGE_KEY);
+    if (!raw)
+      return null;
+    const i = raw.indexOf(":");
+    if (i < 0)
+      return null;
+    const type = raw.slice(0, i);
+    if (!SANDBOXED_TYPES.includes(type))
+      return null;
+    return { type, subfolder: raw.slice(i + 1) };
+  } catch {
+    return null;
+  }
+}
+function saveDest(d) {
+  try {
+    localStorage.setItem(MOVE_DEST_STORAGE_KEY, `${d.type}:${d.subfolder}`);
+  } catch {}
+}
 function openImageBrowser() {
   ensureStyle3();
   const state = {
@@ -1073,16 +1114,32 @@ function openImageBrowser() {
   refreshEl.className = "ib-control ib-icon";
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
-  modal.toolbarEl.append(tabsEl, crumbsEl, sortEl, refreshEl);
+  const selectToggleEl = document.createElement("button");
+  selectToggleEl.type = "button";
+  selectToggleEl.className = "ib-control ib-icon ib-select-toggle";
+  selectToggleEl.title = "Select multiple";
+  selectToggleEl.textContent = "☑";
+  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, sortEl, refreshEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
+  const scrollHost = modal.bodyEl;
+  const selBar = document.createElement("div");
+  selBar.className = "ib-selbar";
+  selBar.innerHTML = `
+    <span class="ib-selbar-count"></span>
+    <button type="button" class="ib-selbar-btn" data-selbar="move">⇄ Move…</button>
+    <button type="button" class="ib-selbar-btn ib-selbar-danger" data-selbar="delete">\uD83D\uDDD1 Delete</button>
+    <button type="button" class="ib-selbar-btn" data-selbar="clear">✕</button>`;
+  const selBarCount = selBar.querySelector(".ib-selbar-count");
+  modal.dialog.appendChild(selBar);
   const countEl = modal.footerEl.querySelector(".ib-count");
   function setCount(visible, total) {
     if (countEl)
       countEl.textContent = `${visible} / ${total}`;
   }
   const selected = new Map;
+  let selectMode = false;
   let focusIndex = -1;
   let visualMode = false;
   let visualAnchor = 0;
@@ -1148,6 +1205,7 @@ function openImageBrowser() {
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
     renderGrid();
+    scrollHost.scrollTop = 0;
   });
   sortEl.addEventListener("change", () => {
     const [k, d] = sortEl.value.split(":");
@@ -1155,8 +1213,24 @@ function openImageBrowser() {
     state.sortDir = d;
     saveSort(k, d);
     renderGrid();
+    scrollHost.scrollTop = 0;
   });
-  refreshEl.addEventListener("click", () => loadAndRender());
+  refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
+  selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
+  selBar.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-selbar]");
+    if (!b)
+      return;
+    const action = b.dataset.selbar;
+    if (action === "move")
+      doMoveSelected();
+    else if (action === "delete")
+      doDelete();
+    else if (action === "clear") {
+      setSelectMode(false);
+      clearSelection();
+    }
+  });
   tabsEl.addEventListener("click", (e) => {
     const b = e.target.closest("[data-type]");
     if (!b)
@@ -1177,6 +1251,11 @@ function openImageBrowser() {
     loadAndRender();
   });
   gridEl.addEventListener("click", (e) => {
+    if (suppressClick) {
+      suppressClick = false;
+      e.stopPropagation();
+      return;
+    }
     const target = e.target;
     const actionBtn = target.closest("[data-action]");
     const card = target.closest(".ib-card");
@@ -1187,11 +1266,22 @@ function openImageBrowser() {
       return;
     }
     if (card.classList.contains("is-dir")) {
+      if (actionBtn?.dataset.action === "rmdir") {
+        e.stopPropagation();
+        onDeleteDir(card.dataset.name);
+        return;
+      }
       navigateInto(card.dataset.name);
       return;
     }
     const name = card.dataset.name;
     const ext = card.dataset.ext || "";
+    const idx = Number(card.dataset.idx);
+    if (target.closest("[data-check]")) {
+      e.stopPropagation();
+      toggleSelectionAt(idx);
+      return;
+    }
     const star = target.closest(".ib-star");
     if (star) {
       e.stopPropagation();
@@ -1215,7 +1305,94 @@ function openImageBrowser() {
         onMove(name);
       return;
     }
+    if (selectMode && SANDBOXED_TYPES.includes(state.type)) {
+      toggleSelectionAt(idx);
+      return;
+    }
     openFull(name, ext);
+  });
+  let suppressClick = false;
+  let dragSel = null;
+  let lpTimer = null;
+  let lpX = 0;
+  let lpY = 0;
+  function cancelLongPress() {
+    if (lpTimer) {
+      clearTimeout(lpTimer);
+      lpTimer = null;
+    }
+  }
+  gridEl.addEventListener("pointerdown", (e) => {
+    suppressClick = false;
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    if (e.pointerType === "mouse" && e.button !== 0)
+      return;
+    const target = e.target;
+    const card = target.closest(".ib-card.is-file");
+    if (!card)
+      return;
+    const idx = Number(card.dataset.idx);
+    if (!Number.isFinite(idx))
+      return;
+    if (target.closest("[data-check]")) {
+      const f = renderedFiles[idx];
+      dragSel = { on: !(f && isSelected(f)), last: idx, moved: false };
+      try {
+        gridEl.setPointerCapture(e.pointerId);
+      } catch {}
+      return;
+    }
+    if (e.pointerType === "mouse")
+      return;
+    lpX = e.clientX;
+    lpY = e.clientY;
+    cancelLongPress();
+    lpTimer = setTimeout(() => {
+      lpTimer = null;
+      suppressClick = true;
+      if (!selectMode)
+        setSelectMode(true);
+      toggleSelectionAt(idx);
+    }, 450);
+  });
+  gridEl.addEventListener("pointermove", (e) => {
+    if (dragSel) {
+      if (!dragSel.moved) {
+        dragSel.moved = true;
+        setSelectedRange(dragSel.last, dragSel.last, dragSel.on);
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const card = el instanceof Element ? el.closest(".ib-card.is-file") : null;
+      if (card) {
+        const idx = Number(card.dataset.idx);
+        if (Number.isFinite(idx) && idx !== dragSel.last) {
+          setSelectedRange(dragSel.last, idx, dragSel.on);
+          dragSel.last = idx;
+        }
+      }
+      return;
+    }
+    if (lpTimer && (Math.abs(e.clientX - lpX) > 8 || Math.abs(e.clientY - lpY) > 8)) {
+      cancelLongPress();
+    }
+  });
+  function endPointerGesture(e) {
+    if (dragSel) {
+      if (dragSel.moved)
+        suppressClick = true;
+      dragSel = null;
+      try {
+        gridEl.releasePointerCapture(e.pointerId);
+      } catch {}
+    }
+    cancelLongPress();
+  }
+  gridEl.addEventListener("pointerup", endPointerGesture);
+  gridEl.addEventListener("pointercancel", endPointerGesture);
+  gridEl.addEventListener("contextmenu", (e) => {
+    if (selectMode || suppressClick || lpTimer)
+      e.preventDefault();
   });
   function setStarRating(name, row, next) {
     const prev = Number(row.dataset.rating || "0");
@@ -1304,6 +1481,7 @@ function openImageBrowser() {
       return;
     try {
       await moveFile(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      saveDest(dest);
       state.files = state.files.filter((f) => f.name !== name);
       renderGrid();
       notify({
@@ -1319,6 +1497,7 @@ function openImageBrowser() {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
       b.classList.toggle("is-active", b.dataset.type === state.type);
     }
+    selectToggleEl.style.display = SANDBOXED_TYPES.includes(state.type) ? "" : "none";
   }
   function renderCrumbs() {
     crumbsEl.innerHTML = "";
@@ -1346,7 +1525,7 @@ function openImageBrowser() {
       }
     }
   }
-  async function loadAndRender() {
+  async function loadAndRender(opts) {
     focusIndex = 0;
     visualMode = false;
     modal.dialog.classList.remove("is-visual");
@@ -1372,6 +1551,8 @@ function openImageBrowser() {
     }
     modal.setBusy(false);
     renderGrid();
+    if (!opts?.preserveScroll)
+      scrollHost.scrollTop = 0;
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
@@ -1391,6 +1572,7 @@ function openImageBrowser() {
   }
   function renderGrid() {
     const q = state.query;
+    const savedScrollTop = scrollHost.scrollTop;
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     const showUp = canGoUp();
@@ -1406,7 +1588,8 @@ function openImageBrowser() {
       const c = document.createElement("div");
       c.className = "ib-card is-dir";
       c.dataset.name = d.name;
-      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>`;
+      const dirDelBtn = canWrite ? `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
+      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirDelBtn}`;
       gridEl.appendChild(c);
     }
     let files = state.files;
@@ -1442,6 +1625,7 @@ function openImageBrowser() {
         c.classList.add("is-selected");
       c.dataset.name = f.name;
       c.dataset.ext = (f.ext || "").toLowerCase();
+      c.dataset.idx = String(fi);
       const t = thumbForFile(f);
       const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
       const when = new Date(f.mtime * 1000).toLocaleString();
@@ -1455,7 +1639,9 @@ ${when}`;
            ${moveBtn}
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
       const starsRow = canWrite ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
+      const checkBtn = canWrite ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>` : "";
       c.innerHTML = `
+        ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
@@ -1475,8 +1661,7 @@ ${when}`;
     }
     setCount(visible, state.files.length);
     installLazyThumbs(gridEl);
-    const focusedCard = gridEl.querySelector(".ib-card.is-focused");
-    focusedCard?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    scrollHost.scrollTop = savedScrollTop;
   }
   function installLazyThumbs(rootEl) {
     if (typeof IntersectionObserver === "undefined")
@@ -1582,6 +1767,15 @@ ${when}`;
     const n = selected.size;
     selectedBadge.style.display = n > 0 ? "inline" : "none";
     selectedBadge.textContent = n > 0 ? `${n} selected` : "";
+    selBar.classList.toggle("is-visible", n > 0);
+    selBarCount.textContent = `${n} selected`;
+  }
+  function setSelectMode(on) {
+    if (on && !SANDBOXED_TYPES.includes(state.type))
+      return;
+    selectMode = on;
+    selectToggleEl.classList.toggle("is-active", on);
+    modal.dialog.classList.toggle("is-selecting", on);
   }
   function toggleSelectionAt(i) {
     if (!SANDBOXED_TYPES.includes(state.type))
@@ -1594,6 +1788,24 @@ ${when}`;
       selected.delete(key);
     else
       selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+    refreshSelectionClasses();
+    updateSelectedCount();
+  }
+  function setSelectedRange(a, b, on) {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    for (let i = lo;i <= hi; i++) {
+      const f = renderedFiles[i];
+      if (!f)
+        continue;
+      const key = selectionKey(state.type, state.subfolder, f.name);
+      if (on)
+        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+      else
+        selected.delete(key);
+    }
     refreshSelectionClasses();
     updateSelectedCount();
   }
@@ -1672,8 +1884,6 @@ ${when}`;
     modal.setStatus("");
   }
   async function doDelete() {
-    if (!SANDBOXED_TYPES.includes(state.type))
-      return;
     const items = collectSelectedOrFocused();
     if (items.length === 0)
       return;
@@ -1707,6 +1917,77 @@ ${when}`;
       reportError("Delete failed", e);
     }
   }
+  async function doMoveSelected() {
+    const items = collectSelectedOrFocused();
+    if (items.length === 0)
+      return;
+    const dest = await pickDestination(modal, {
+      type: state.type,
+      subfolder: state.subfolder
+    });
+    if (!dest)
+      return;
+    try {
+      const result = await moveMany(items, dest.type, dest.subfolder);
+      const errored = new Set((result.errors ?? []).map((er) => er.name));
+      for (const it of items) {
+        if (!errored.has(it.name))
+          selected.delete(selectionKey(it.type, it.subfolder, it.name));
+      }
+      updateSelectedCount();
+      if (result.moved > 0)
+        saveDest(dest);
+      if (dest.type === state.type && dest.subfolder === state.subfolder) {
+        await loadAndRender({ preserveScroll: true });
+      } else {
+        const removedHere = new Set(items.filter((it) => it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name)).map((it) => it.name));
+        state.files = state.files.filter((f) => !removedHere.has(f.name));
+        renderGrid();
+      }
+      if (result.errors && result.errors.length > 0) {
+        const names = result.errors.map((er) => er.name).join(", ");
+        reportError(`Moved ${result.moved}, ${result.errors.length} failed`, new Error(names));
+      } else {
+        notify({
+          severity: "success",
+          summary: "Moved",
+          detail: `${result.moved} file(s) → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`
+        });
+      }
+    } catch (e) {
+      reportError("Move failed", e);
+    }
+  }
+  async function onDeleteDir(name) {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    try {
+      const res = await removeDir(state.type, state.subfolder, name, false);
+      if (res.status === "not_empty") {
+        const parts = [`${res.files} file${res.files === 1 ? "" : "s"}`];
+        if (res.dirs > 0)
+          parts.push(`${res.dirs} subfolder${res.dirs === 1 ? "" : "s"}`);
+        const ok = await confirmAction(modal, {
+          title: "Delete folder and contents?",
+          message: `"${name}" contains ${parts.join(" and ")}. Permanently delete everything inside? This cannot be undone.`,
+          confirmLabel: `Delete ${res.files} file${res.files === 1 ? "" : "s"}`,
+          danger: true
+        });
+        if (!ok)
+          return;
+        await removeDir(state.type, state.subfolder, name, true);
+      }
+      state.dirs = state.dirs.filter((d) => d.name !== name);
+      renderGrid();
+      notify({
+        severity: "success",
+        summary: "Folder deleted",
+        detail: res.status === "not_empty" ? `"${name}" (${res.files} files)` : `"${name}" (empty)`
+      });
+    } catch (e) {
+      reportError("Delete folder failed", e);
+    }
+  }
   function doYank() {
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
@@ -1736,7 +2017,9 @@ ${when}`;
       }
       yanked = null;
       updateSelectedCount();
-      await loadAndRender();
+      if (result.moved > 0)
+        saveDest({ type: state.type, subfolder: state.subfolder });
+      await loadAndRender({ preserveScroll: true });
       if (result.errors && result.errors.length > 0) {
         const names = result.errors.map((e) => e.name).join(", ");
         reportError(`Moved ${result.moved}, ${result.errors.length} failed`, new Error(names));
@@ -1822,6 +2105,8 @@ ${when}`;
             <dt>v</dt><dd>visual mode</dd>
             <dt>Ctrl+A</dt><dd>select all visible</dd>
             <dt>Esc</dt><dd>clear selection</dd>
+            <dt>long-press</dt><dd>select mode (touch)</dd>
+            <dt>drag ✓</dt><dd>range select (touch)</dd>
           </dl>
         </div>
         <div class="ib-help-col">
@@ -1832,7 +2117,7 @@ ${when}`;
             <dt>y y</dt><dd>yank (cut) selected</dd>
             <dt>p</dt><dd>paste (move) here</dd>
             <dt>r</dt><dd>rename focused</dd>
-            <dt>m</dt><dd>move focused…</dd>
+            <dt>m</dt><dd>move selected…</dd>
           </dl>
         </div>
         <div class="ib-help-col">
@@ -1863,7 +2148,8 @@ ${when}`;
       } else if (visualMode) {
         visualMode = false;
         modal.dialog.classList.remove("is-visual");
-      } else if (selected.size > 0) {
+      } else if (selectMode || selected.size > 0) {
+        setSelectMode(false);
         clearSelection();
       } else {
         return;
@@ -1996,10 +2282,10 @@ ${when}`;
         }
         break;
       case "m":
-        if (SANDBOXED_TYPES.includes(state.type) && f) {
+        if (selected.size > 0 || SANDBOXED_TYPES.includes(state.type) && f) {
           e.preventDefault();
           e.stopPropagation();
-          onMove(f.name);
+          doMoveSelected();
         }
         break;
       case "/":
@@ -2024,7 +2310,8 @@ function pickDestination(modal, start) {
   return new Promise((resolve) => {
     const ov = openOverlay(modal, () => resolve(null));
     ov.card.classList.add("ib-move-card");
-    const cur = {
+    const remembered = loadSavedDest();
+    const cur = remembered ?? {
       type: SANDBOXED_TYPES.includes(start.type) ? start.type : "output",
       subfolder: start.subfolder
     };
@@ -2092,6 +2379,10 @@ function pickDestination(modal, start) {
       status.textContent = "Loading…";
       try {
         const data = await fetchListing({ type: cur.type, subfolder: cur.subfolder });
+        if (!data.exists && cur.subfolder) {
+          cur.subfolder = "";
+          return load();
+        }
         status.textContent = "";
         if (cur.subfolder) {
           const up = document.createElement("button");
@@ -2234,6 +2525,10 @@ var BROWSER_CSS = `
     background: #21212a; border: 1px solid #2a2a32; border-radius: 6px; overflow: hidden;
     cursor: pointer; display: flex; flex-direction: column;
     transition: transform 0.06s ease, border-color 0.1s ease;
+    /* Anchor for the corner overlays (selection check / folder delete); the
+       text-selection + touch-callout suppression keeps long-press clean. */
+    position: relative;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .ib-card:hover { border-color: #6ba6ff; transform: translateY(-1px); }
 .ib-card.is-up, .ib-card.is-dir { background: #1f1f26; }
@@ -2286,6 +2581,51 @@ var BROWSER_CSS = `
 .ib-card.is-focused { outline: 2px solid #6ba6ff; outline-offset: -2px; z-index: 1; }
 .ib-card.is-selected { border-color: #ffd866; background: #2a2a1f; }
 .ib-card.is-selected.is-focused { outline-color: #ffd866; }
+/* Selection checkbox — the touch affordance for multi-select. Hidden until
+   hover on fine pointers; always visible on touch, in select mode, and on
+   already-selected cards. touch-action:none makes a drag starting here a
+   range-select instead of a scroll. */
+.ib-check {
+    position: absolute; top: 4px; left: 4px; z-index: 2;
+    width: 34px; height: 34px; padding: 0; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45);
+    color: transparent; font-size: 16px; line-height: 1; cursor: pointer;
+    display: none; align-items: center; justify-content: center;
+    touch-action: none;
+}
+.ib-card:hover .ib-check,
+.ib-card.is-selected .ib-check,
+.ib-dialog.is-selecting .ib-check { display: flex; }
+@media (pointer: coarse) { .ib-check { display: flex; } }
+.ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
+.ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
+.ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+/* Folder delete — corner overlay on dir cards (write-gated). */
+.ib-dir-del {
+    position: absolute; top: 4px; right: 4px; z-index: 2;
+    width: 34px; height: 34px; padding: 0; border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(0, 0, 0, 0.45);
+    color: #b8b8c0; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.ib-dir-del:hover { background: #5c2a3c; color: #ff9eb0; }
+/* Floating batch-action bar — appears while a selection exists. */
+.ib-selbar {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: calc(52px + env(safe-area-inset-bottom, 0px));
+    z-index: 4; display: none; align-items: center; gap: 8px;
+    max-width: calc(100% - 16px); white-space: nowrap;
+    background: #1c1c24; border: 1px solid #3a3a44; border-radius: 24px;
+    padding: 8px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.ib-selbar.is-visible { display: flex; }
+.ib-selbar-count { font-size: 12.5px; font-weight: 600; color: #9ec6ff; padding: 0 4px; }
+.ib-selbar-btn {
+    background: #2a2a36; color: #d8d8dc; border: 1px solid #3a3a44; border-radius: 16px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer; font-family: inherit; min-height: 38px;
+}
+.ib-selbar-btn:hover { background: #3a3a4a; color: #fff; }
+.ib-selbar-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.ib-selbar-danger:hover { background: #5c2a3c; color: #fff; }
 .ib-dialog.is-visual .ib-grid { outline: 2px solid #ffd866; outline-offset: -2px; }
 .ib-selected-badge {
     background: #2f3a52; color: #9ec6ff; border: 1px solid #4a5878; border-radius: 10px;

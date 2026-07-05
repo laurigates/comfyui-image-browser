@@ -26,6 +26,9 @@ in the HTTP endpoints + the served bundle.
 | `/delete` | POST | `{type, subfolder, name}` — delete a file. |
 | `/rename` | POST | `{type, subfolder, name, new_name}` — rename in place. |
 | `/move` | POST | `{type, subfolder, name, dest_type, dest_subfolder}` — move between roots/subfolders. |
+| `/delete_many` | POST | `{items:[{type,subfolder,name},…]}` — batch delete; per-item errors in `errors[]`, partial success is still `ok:true`. |
+| `/move_many` | POST | `{items:[…], dest_type, dest_subfolder}` — batch move into one destination; same per-item error contract. |
+| `/rmdir` | POST | `{type, subfolder, name, recursive}` — delete a folder. Empty deletes outright; non-empty without `recursive:true` answers **409 with nested `{files, dirs}` counts** so the UI confirms with the real number before re-posting `recursive:true`. Sandboxed types only; symlinked dirs rejected. |
 | `/rating` | POST | `{type, subfolder, name, rating}` — persist a 0..5 star rating into the file's XMP (or sidecar). Sandboxed types only, like all writes. |
 
 ## File layout
@@ -109,7 +112,10 @@ restart. Backend `.py` edits need a fresh `smoke-server` (baked into the image).
 | **browse…** tab | Starts at `base_path`; navigate into `models/` etc.; **only the ↗ open button** on cards (no write buttons). |
 | Delete | Confirm overlay → file gone from grid; re-list confirms it's off disk. |
 | Rename | Overlay input (extension enforced) → card renames; a name collision returns a 409 error toast. |
-| Move | Destination picker (tabs + folder nav) → file leaves the source grid; appears under the destination. |
+| Move | Destination picker (tabs + folder nav) → file leaves the source grid; appears under the destination. **Re-open the picker** → it starts at the last destination (localStorage `move-dest`); if that folder was deleted since, it falls back to the tab root. |
+| Multi-select (touch) | Tap a card's ✓ circle → selected + floating **N selected / Move… / Delete / ✕** bar appears; long-press a card → select mode (toolbar ☑ highlights, every card tap toggles); drag across ✓ circles → range select without scrolling. Batch Delete confirms with the count; batch Move uses the destination picker. No ✓ circles on the browse…/path tab. |
+| Folder delete | Dir cards show a corner 🗑 (sandboxed tabs only). Empty folder → gone immediately. Non-empty → confirm overlay stating the **nested** file/subfolder counts → deletes recursively. |
+| Scroll preservation | Scroll deep into a big folder, delete/rename/move a card → the grid does **not** jump back to the top. Changing sort/search or entering a folder does start at the top. |
 | Error path | Kill the server mid-action → a **copyable** `notify()` error toast (not a silent console log). |
 | Phone width (~400px) | Resize; grid reflows, tap targets ≥34px, modal is full-bleed (header stays visible with the URL bar shown — 100dvh), breadcrumbs on their own toolbar row (never painted under the sort dropdown). |
 | Android back (or browser back) | Overlay open → dismisses it; else goes up one directory; at a root → closes the modal without leaving ComfyUI. |

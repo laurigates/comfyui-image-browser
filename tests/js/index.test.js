@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 // Vitest transpiles TypeScript, so the test imports the `.ts` source directly
 // (no build step). Importing the module also runs the registerExtension wiring
 // against tests/js/__mocks__/app.js. The standalone modal is launched from the
@@ -15,6 +15,100 @@ import { openShell } from "../../src/index.ts";
 function pressKey(key) {
   window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
 }
+
+/** Stub global fetch so /image_browser/list returns a populated output dir. */
+function stubListing({ files = [], dirs = [] } = {}) {
+  const fn = vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      ok: true,
+      type: "output",
+      subfolder: "",
+      path: "/out",
+      dirs,
+      files,
+      exists: true,
+    }),
+  }));
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+const TWO_FILES = [
+  { name: "a.png", ext: ".png", mtime: 2, size: 10, width: 8, height: 8, rating: 0 },
+  { name: "b.png", ext: ".png", mtime: 1, size: 10, width: 8, height: 8, rating: 0 },
+];
+
+/** Open the browser and wait for the stubbed listing to render. */
+async function openLoaded(modal) {
+  await vi.waitFor(() => {
+    if (!modal.bodyEl.querySelector(".ib-card.is-file")) throw new Error("grid not rendered");
+  });
+}
+
+describe("touch multi-select affordances", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    // Any dialog left open would leak its window key listener into later tests.
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    // Closing pops the back-button sentinel via history.back(); jsdom delivers
+    // that popstate asynchronously and it would close the NEXT test's modal.
+    // Flush it while no browser is open.
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it("renders a selection checkbox per file card and a delete button per dir card", async () => {
+    stubListing({ files: TWO_FILES, dirs: [{ name: "sub" }] });
+    const modal = openShell();
+    await openLoaded(modal);
+    expect(modal.bodyEl.querySelectorAll(".ib-card.is-file .ib-check").length).toBe(2);
+    expect(modal.bodyEl.querySelectorAll(".ib-card.is-dir .ib-dir-del").length).toBe(1);
+    modal.close();
+  });
+
+  it("checkbox tap selects the card and reveals the batch action bar", async () => {
+    stubListing({ files: TWO_FILES });
+    const modal = openShell();
+    await openLoaded(modal);
+    const selBar = modal.dialog.querySelector(".ib-selbar");
+    expect(selBar.classList.contains("is-visible")).toBe(false);
+
+    modal.bodyEl.querySelector(".ib-card.is-file .ib-check").click();
+    const card = modal.bodyEl.querySelector(".ib-card.is-file");
+    expect(card.classList.contains("is-selected")).toBe(true);
+    expect(selBar.classList.contains("is-visible")).toBe(true);
+    expect(selBar.querySelector(".ib-selbar-count").textContent).toBe("1 selected");
+
+    // Esc clears the selection and hides the bar. (The shell autofocuses its
+    // search input on open; a real tap would have moved focus off it, but a
+    // jsdom synthetic click does not — blur so Esc reaches the selection.)
+    document.activeElement?.blur?.();
+    pressKey("Escape");
+    expect(selBar.classList.contains("is-visible")).toBe(false);
+    expect(card.classList.contains("is-selected")).toBe(false);
+    modal.close();
+  });
+
+  it("select mode makes a plain card tap toggle selection instead of opening", async () => {
+    stubListing({ files: TWO_FILES });
+    const opened = vi.fn();
+    vi.stubGlobal("open", opened);
+    const modal = openShell();
+    await openLoaded(modal);
+
+    modal.dialog.querySelector(".ib-select-toggle").click();
+    expect(modal.dialog.classList.contains("is-selecting")).toBe(true);
+
+    const cards = modal.bodyEl.querySelectorAll(".ib-card.is-file");
+    cards[0].querySelector(".ib-thumb").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    cards[1].querySelector(".ib-thumb").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(opened).not.toHaveBeenCalled();
+    expect(modal.bodyEl.querySelectorAll(".ib-card.is-selected").length).toBe(2);
+    expect(modal.dialog.querySelector(".ib-selbar-count").textContent).toBe("2 selected");
+    modal.close();
+  });
+});
 
 describe("comfyui-image-browser standalone modal", () => {
   it("mounts the full-canvas browser scaffold into the modal shell", () => {
