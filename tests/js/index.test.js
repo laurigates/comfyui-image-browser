@@ -110,6 +110,127 @@ describe("touch multi-select affordances", () => {
   });
 });
 
+describe("scroll memory across directory traversal", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  /** Wait until the grid shows (or stops showing) the "up" card. */
+  async function waitInSubfolder(modal, inside) {
+    await vi.waitFor(() => {
+      const up = modal.bodyEl.querySelector(".ib-card.is-up");
+      if (inside ? !up : up) throw new Error("navigation not rendered");
+    });
+  }
+
+  it("each directory keeps its own scroll position when traversing up and down", async () => {
+    stubListing({ files: TWO_FILES, dirs: [{ name: "sub" }] });
+    const modal = openShell();
+    await openLoaded(modal);
+
+    modal.bodyEl.scrollTop = 500;
+    modal.bodyEl.querySelector(".ib-card.is-dir").click();
+    await waitInSubfolder(modal, true);
+    // First visit of the subfolder starts at the top.
+    expect(modal.bodyEl.scrollTop).toBe(0);
+
+    modal.bodyEl.scrollTop = 250;
+    modal.bodyEl.querySelector(".ib-card.is-up").click();
+    await waitInSubfolder(modal, false);
+    // Back in the parent — restored to where we left it.
+    expect(modal.bodyEl.scrollTop).toBe(500);
+
+    modal.bodyEl.querySelector(".ib-card.is-dir").click();
+    await waitInSubfolder(modal, true);
+    // Descending again restores the subfolder's own position.
+    expect(modal.bodyEl.scrollTop).toBe(250);
+    modal.close();
+  });
+});
+
+describe("pinned directories", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it("the toolbar 📌 pins/unpins the current folder and renders a chip row", async () => {
+    stubListing({ files: TWO_FILES });
+    const modal = openShell();
+    await openLoaded(modal);
+    const toggle = modal.dialog.querySelector(".ib-pin-toggle");
+    expect(toggle).not.toBeNull();
+    expect(modal.dialog.querySelector(".ib-pin-chip")).toBeNull();
+
+    toggle.click();
+    expect(toggle.classList.contains("is-active")).toBe(true);
+    const chip = modal.dialog.querySelector(".ib-pin-chip .ib-pin-go");
+    expect(chip.textContent).toContain("output");
+    expect(JSON.parse(localStorage.getItem("comfyui-image-browser:pins"))).toEqual([
+      { type: "output", subfolder: "" },
+    ]);
+
+    // Unpin via the chip's ✕.
+    modal.dialog.querySelector(".ib-pin-x").click();
+    expect(modal.dialog.querySelector(".ib-pin-chip")).toBeNull();
+    expect(toggle.classList.contains("is-active")).toBe(false);
+    modal.close();
+  });
+
+  it("a pin chip navigates to the pinned folder", async () => {
+    localStorage.setItem(
+      "comfyui-image-browser:pins",
+      JSON.stringify([{ type: "output", subfolder: "sub" }]),
+    );
+    stubListing({ files: TWO_FILES, dirs: [{ name: "sub" }] });
+    const modal = openShell();
+    await openLoaded(modal);
+    expect(modal.bodyEl.querySelector(".ib-card.is-up")).toBeNull();
+
+    modal.dialog.querySelector(".ib-pin-go").click();
+    await vi.waitFor(() => {
+      if (!modal.bodyEl.querySelector(".ib-card.is-up")) throw new Error("did not navigate");
+    });
+    // The crumbs now show the pinned subfolder.
+    const crumbs = Array.from(modal.dialog.querySelectorAll(".ib-crumbs .ib-crumb"));
+    expect(crumbs.map((c) => c.textContent)).toEqual(["output", "sub"]);
+    modal.close();
+  });
+
+  it("the move picker lists pinned folders as one-tap destinations", async () => {
+    localStorage.setItem(
+      "comfyui-image-browser:pins",
+      JSON.stringify([{ type: "input", subfolder: "keep" }]),
+    );
+    stubListing({ files: TWO_FILES });
+    const modal = openShell();
+    await openLoaded(modal);
+
+    modal.bodyEl.querySelector('[data-action="move"]').click();
+    const pinRow = await vi.waitFor(() => {
+      const r = modal.dialog.querySelector(".ib-move-row.is-pin");
+      if (!r) throw new Error("picker pin row not rendered");
+      return r;
+    });
+    expect(pinRow.textContent).toContain("input/keep");
+
+    pinRow.click();
+    await vi.waitFor(() => {
+      const primary = modal.dialog.querySelector(".ib-move-card .ib-ov-primary");
+      if (primary?.textContent !== "Move to input/keep") throw new Error("picker did not jump");
+    });
+    // Cancel the picker so the modal closes cleanly.
+    Array.from(modal.dialog.querySelectorAll(".ib-move-card .ib-ov-btn"))
+      .find((b) => b.textContent === "Cancel")
+      .click();
+    modal.close();
+  });
+});
+
 describe("comfyui-image-browser standalone modal", () => {
   it("mounts the full-canvas browser scaffold into the modal shell", () => {
     const modal = openShell();

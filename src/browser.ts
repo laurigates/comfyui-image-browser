@@ -116,6 +116,55 @@ function saveDest(d: Destination): void {
   }
 }
 
+// Per-directory scroll positions — traversing up/down (or hopping via tabs,
+// crumbs, siblings, pins) returns each folder to where you left it. Module
+// level so reopening the browser restores too; entering a never-visited
+// folder still starts at the top.
+const scrollMemory = new Map<string, number>();
+
+// Pinned directories — quick-nav chips in the toolbar and shortcut rows in
+// the move-destination picker, for sorting big batches between a few folders.
+// Sandboxed roots only (pins exist to reach write targets fast).
+const PINS_STORAGE_KEY = "comfyui-image-browser:pins";
+
+interface Pin {
+  type: BrowseType;
+  subfolder: string;
+}
+
+function pinKey(p: Pin): string {
+  return `${p.type}:${p.subfolder}`;
+}
+
+function pinLabel(p: Pin): string {
+  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+
+function loadPins(): Pin[] {
+  try {
+    const raw = localStorage.getItem(PINS_STORAGE_KEY);
+    if (!raw) return [];
+    const arr: unknown = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (p): p is Pin =>
+        !!p &&
+        typeof (p as Pin).subfolder === "string" &&
+        SANDBOXED_TYPES.includes((p as Pin).type),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function savePins(pins: Pin[]): void {
+  try {
+    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+  } catch {
+    /* private-mode / disabled storage — non-fatal */
+  }
+}
+
 interface ThumbDescriptor {
   kind: "img" | "video" | "icon";
   src?: string;
@@ -161,6 +210,9 @@ export function openImageBrowser(): ModalShellController {
     // dismiss) — the controller.close wrapper does not, so keyboard cleanup
     // must hang off onClose or the window listener leaks after close.
     onClose: () => {
+      // Remember where this folder was scrolled to so reopening the browser
+      // (scrollMemory is module-level) resumes in place.
+      rememberScroll();
       window.removeEventListener("keydown", onWindowKey, true);
       window.removeEventListener("popstate", onPopState);
       // Pop the back-button sentinel unless back itself closed the browser.
@@ -217,7 +269,19 @@ export function openImageBrowser(): ModalShellController {
   selectToggleEl.title = "Select multiple";
   selectToggleEl.textContent = "☑";
 
-  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, sortEl, refreshEl);
+  // Pin the folder you're looking at; hidden on the browse-only path tab
+  // (pins are write-target shortcuts, and pin state renders in renderPins).
+  const pinToggleEl = document.createElement("button");
+  pinToggleEl.type = "button";
+  pinToggleEl.className = "ib-control ib-icon ib-pin-toggle";
+  pinToggleEl.title = "Pin this folder";
+  pinToggleEl.textContent = "📌";
+
+  // One-tap navigation chips for the pinned folders; hidden while empty.
+  const pinsEl = document.createElement("div");
+  pinsEl.className = "ib-pins";
+
+  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, pinToggleEl, sortEl, refreshEl, pinsEl);
 
   // ---- Grid ------------------------------------------------------
   const gridEl = document.createElement("div");
@@ -266,7 +330,20 @@ export function openImageBrowser(): ModalShellController {
   modal.headerEl.appendChild(selectedBadge);
 
   // ---- Navigation helpers ---------------------------------------
+  // Key for the CURRENT location's scroll-memory slot. Distinct namespaces
+  // for the sandboxed roots (`type:subfolder`) and path mode (`path:/abs`).
+  function locationKey(): string {
+    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}`;
+  }
+
+  // Called on every navigation BEFORE the location mutates, so returning to
+  // this folder later (up, chip, tab, crumb) lands where the user left off.
+  function rememberScroll(): void {
+    scrollMemory.set(locationKey(), scrollHost.scrollTop);
+  }
+
   function navigateUp(): void {
+    rememberScroll();
     if (state.type === "path") {
       const p = (state.absPath || "/").replace(/\/+$/, "");
       if (p === "" || p === "/") return;
@@ -281,6 +358,7 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function navigateInto(name: string): void {
+    rememberScroll();
     if (state.type === "path") {
       state.absPath = joinAbs(state.absPath, name);
     } else {
@@ -291,6 +369,7 @@ export function openImageBrowser(): ModalShellController {
   }
 
   async function switchType(type: BrowseType): Promise<void> {
+    rememberScroll();
     state.type = type;
     state.subfolder = "";
     if (type === "path") {
@@ -346,6 +425,33 @@ export function openImageBrowser(): ModalShellController {
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
+  pinToggleEl.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const cur: Pin = { type: state.type, subfolder: state.subfolder };
+    const pins = loadPins();
+    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
+    if (next.length === pins.length) next.push(cur);
+    savePins(next);
+    renderPins();
+  });
+  pinsEl.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    const chip = t.closest("[data-pin-type]") as HTMLElement | null;
+    if (!chip) return;
+    const type = chip.dataset.pinType as BrowseType;
+    if (!SANDBOXED_TYPES.includes(type)) return;
+    const pin: Pin = { type, subfolder: chip.dataset.pinSub || "" };
+    if (t.closest(".ib-pin-x")) {
+      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
+      renderPins();
+      return;
+    }
+    if (pin.type === state.type && pin.subfolder === state.subfolder) return;
+    rememberScroll();
+    state.type = pin.type;
+    state.subfolder = pin.subfolder;
+    loadAndRender();
+  });
   selBar.addEventListener("click", (e) => {
     const b = (e.target as HTMLElement).closest("[data-selbar]") as HTMLElement | null;
     if (!b) return;
@@ -367,6 +473,7 @@ export function openImageBrowser(): ModalShellController {
   crumbsEl.addEventListener("click", (e) => {
     const c = (e.target as HTMLElement).closest("[data-sub], [data-abs]") as HTMLElement | null;
     if (!c) return;
+    rememberScroll();
     if (c.dataset.abs !== undefined) state.absPath = c.dataset.abs || "/";
     else state.subfolder = c.dataset.sub || "";
     loadAndRender();
@@ -642,6 +749,38 @@ export function openImageBrowser(): ModalShellController {
     selectToggleEl.style.display = SANDBOXED_TYPES.includes(state.type) ? "" : "none";
   }
 
+  function renderPins(): void {
+    const pins = loadPins();
+    const canPin = SANDBOXED_TYPES.includes(state.type);
+    pinToggleEl.style.display = canPin ? "" : "none";
+    const herePinned =
+      canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    pinToggleEl.classList.toggle("is-active", herePinned);
+    pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pinsEl.innerHTML = "";
+    pinsEl.style.display = pins.length ? "" : "none";
+    for (const p of pins) {
+      const chip = document.createElement("span");
+      chip.className = "ib-pin-chip";
+      chip.dataset.pinType = p.type;
+      chip.dataset.pinSub = p.subfolder;
+      if (p.type === state.type && p.subfolder === state.subfolder)
+        chip.classList.add("is-current");
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ib-pin-go";
+      go.title = `Go to ${pinLabel(p)}`;
+      go.textContent = `📌 ${pinLabel(p)}`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "ib-pin-x";
+      x.title = `Unpin ${pinLabel(p)}`;
+      x.textContent = "✕";
+      chip.append(go, x);
+      pinsEl.appendChild(chip);
+    }
+  }
+
   function renderCrumbs(): void {
     crumbsEl.innerHTML = "";
     const mk = (text: string, attr: string, value: string) => {
@@ -698,10 +837,12 @@ export function openImageBrowser(): ModalShellController {
     }
     modal.setBusy(false);
     renderGrid();
-    // Navigating to a different directory starts at the top; refresh-in-place
-    // (refresh button, paste/move re-list) keeps the scroll position that
-    // renderGrid restored.
-    if (!opts?.preserveScroll) scrollHost.scrollTop = 0;
+    renderPins();
+    // Navigating restores the folder's remembered scroll position (0 for a
+    // never-visited one) — each directory keeps its own place while you
+    // traverse up and down. Refresh-in-place (refresh button, paste/move
+    // re-list) keeps the position renderGrid restored.
+    if (!opts?.preserveScroll) scrollHost.scrollTop = scrollMemory.get(locationKey()) ?? 0;
   }
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
@@ -1181,6 +1322,15 @@ export function openImageBrowser(): ModalShellController {
         await removeDir(state.type, state.subfolder, name, true);
       }
       state.dirs = state.dirs.filter((d) => d.name !== name);
+      // A pin pointing at (or under) the deleted folder is now a dead end.
+      const gone = state.subfolder ? `${state.subfolder}/${name}` : name;
+      savePins(
+        loadPins().filter(
+          (p) =>
+            p.type !== state.type || (p.subfolder !== gone && !p.subfolder.startsWith(`${gone}/`)),
+        ),
+      );
+      renderPins();
       renderGrid();
       notify({
         severity: "success",
@@ -1233,6 +1383,7 @@ export function openImageBrowser(): ModalShellController {
 
   async function siblingNav(dir: -1 | 1): Promise<void> {
     // Navigate to the previous/next sibling directory (alphabetical).
+    rememberScroll();
     let parentType: BrowseType;
     let parentSub: string;
     let parentPath: string;
@@ -1625,6 +1776,18 @@ function pickDestination(
           return load();
         }
         status.textContent = "";
+        // Pinned folders jump the picker straight to a frequent destination —
+        // the current location is omitted (moving here would be a no-op).
+        for (const p of loadPins()) {
+          if (p.type === cur.type && p.subfolder === cur.subfolder) continue;
+          const r = document.createElement("button");
+          r.type = "button";
+          r.className = "ib-move-row is-pin";
+          r.dataset.pinType = p.type;
+          r.dataset.pinSub = p.subfolder;
+          r.textContent = `📌 ${pinLabel(p)}`;
+          list.appendChild(r);
+        }
         if (cur.subfolder) {
           const up = document.createElement("button");
           up.type = "button";
@@ -1665,6 +1828,15 @@ function pickDestination(
       load();
     });
     list.addEventListener("click", (e) => {
+      const pin = (e.target as HTMLElement).closest(".is-pin") as HTMLElement | null;
+      if (pin) {
+        const t = pin.dataset.pinType as BrowseType;
+        if (!SANDBOXED_TYPES.includes(t)) return;
+        cur.type = t;
+        cur.subfolder = pin.dataset.pinSub || "";
+        load();
+        return;
+      }
       const up = (e.target as HTMLElement).closest(".is-up");
       if (up) {
         const p = cur.subfolder.replace(/\/+$/, "");
@@ -1863,6 +2035,30 @@ const BROWSER_CSS = `
 .ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
 .ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
 .ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
+   order:10 keeps them below the crumbs row when the toolbar wraps on phones. */
+.ib-pins {
+    order: 10; flex-basis: 100%;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.ib-pin-chip { display: inline-flex; align-items: stretch; }
+.ib-pin-go {
+    background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
+    border-radius: 4px 0 0 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+    font-family: inherit; min-height: 32px; max-width: 45vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ib-pin-go:hover { background: #2f3a52; color: #fff; }
+.ib-pin-chip.is-current .ib-pin-go { color: #ffd866; border-color: #78683a; }
+.ib-pin-chip.is-current .ib-pin-x { border-color: #78683a; }
+.ib-pin-x {
+    background: #23283a; color: #667; border: 1px solid #3a4560;
+    border-radius: 0 4px 4px 0; padding: 6px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit; min-height: 32px; min-width: 28px;
+}
+.ib-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
+.ib-move-row.is-pin { color: #9ec6ff; }
 /* Folder delete — corner overlay on dir cards (write-gated). */
 .ib-dir-del {
     position: absolute; top: 4px; right: 4px; z-index: 2;

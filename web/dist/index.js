@@ -1048,6 +1048,32 @@ function saveDest(d) {
     localStorage.setItem(MOVE_DEST_STORAGE_KEY, `${d.type}:${d.subfolder}`);
   } catch {}
 }
+var scrollMemory = new Map;
+var PINS_STORAGE_KEY = "comfyui-image-browser:pins";
+function pinKey(p) {
+  return `${p.type}:${p.subfolder}`;
+}
+function pinLabel(p) {
+  return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
+}
+function loadPins() {
+  try {
+    const raw = localStorage.getItem(PINS_STORAGE_KEY);
+    if (!raw)
+      return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr))
+      return [];
+    return arr.filter((p) => !!p && typeof p.subfolder === "string" && SANDBOXED_TYPES.includes(p.type));
+  } catch {
+    return [];
+  }
+}
+function savePins(pins) {
+  try {
+    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+  } catch {}
+}
 function openImageBrowser() {
   ensureStyle3();
   const state = {
@@ -1074,6 +1100,7 @@ function openImageBrowser() {
     footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     onClose: () => {
+      rememberScroll();
       window.removeEventListener("keydown", onWindowKey, true);
       window.removeEventListener("popstate", onPopState);
       if (!closedByBack)
@@ -1119,7 +1146,14 @@ function openImageBrowser() {
   selectToggleEl.className = "ib-control ib-icon ib-select-toggle";
   selectToggleEl.title = "Select multiple";
   selectToggleEl.textContent = "☑";
-  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, sortEl, refreshEl);
+  const pinToggleEl = document.createElement("button");
+  pinToggleEl.type = "button";
+  pinToggleEl.className = "ib-control ib-icon ib-pin-toggle";
+  pinToggleEl.title = "Pin this folder";
+  pinToggleEl.textContent = "\uD83D\uDCCC";
+  const pinsEl = document.createElement("div");
+  pinsEl.className = "ib-pins";
+  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, pinToggleEl, sortEl, refreshEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -1151,7 +1185,14 @@ function openImageBrowser() {
   selectedBadge.className = "ib-selected-badge";
   selectedBadge.style.display = "none";
   modal.headerEl.appendChild(selectedBadge);
+  function locationKey() {
+    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}`;
+  }
+  function rememberScroll() {
+    scrollMemory.set(locationKey(), scrollHost.scrollTop);
+  }
   function navigateUp() {
+    rememberScroll();
     if (state.type === "path") {
       const p = (state.absPath || "/").replace(/\/+$/, "");
       if (p === "" || p === "/")
@@ -1166,6 +1207,7 @@ function openImageBrowser() {
     loadAndRender();
   }
   function navigateInto(name) {
+    rememberScroll();
     if (state.type === "path") {
       state.absPath = joinAbs(state.absPath, name);
     } else {
@@ -1175,6 +1217,7 @@ function openImageBrowser() {
     loadAndRender();
   }
   async function switchType(type) {
+    rememberScroll();
     state.type = type;
     state.subfolder = "";
     if (type === "path") {
@@ -1217,6 +1260,38 @@ function openImageBrowser() {
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
+  pinToggleEl.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const cur = { type: state.type, subfolder: state.subfolder };
+    const pins = loadPins();
+    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
+    if (next.length === pins.length)
+      next.push(cur);
+    savePins(next);
+    renderPins();
+  });
+  pinsEl.addEventListener("click", (e) => {
+    const t = e.target;
+    const chip = t.closest("[data-pin-type]");
+    if (!chip)
+      return;
+    const type = chip.dataset.pinType;
+    if (!SANDBOXED_TYPES.includes(type))
+      return;
+    const pin = { type, subfolder: chip.dataset.pinSub || "" };
+    if (t.closest(".ib-pin-x")) {
+      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
+      renderPins();
+      return;
+    }
+    if (pin.type === state.type && pin.subfolder === state.subfolder)
+      return;
+    rememberScroll();
+    state.type = pin.type;
+    state.subfolder = pin.subfolder;
+    loadAndRender();
+  });
   selBar.addEventListener("click", (e) => {
     const b = e.target.closest("[data-selbar]");
     if (!b)
@@ -1244,6 +1319,7 @@ function openImageBrowser() {
     const c = e.target.closest("[data-sub], [data-abs]");
     if (!c)
       return;
+    rememberScroll();
     if (c.dataset.abs !== undefined)
       state.absPath = c.dataset.abs || "/";
     else
@@ -1499,6 +1575,36 @@ function openImageBrowser() {
     }
     selectToggleEl.style.display = SANDBOXED_TYPES.includes(state.type) ? "" : "none";
   }
+  function renderPins() {
+    const pins = loadPins();
+    const canPin = SANDBOXED_TYPES.includes(state.type);
+    pinToggleEl.style.display = canPin ? "" : "none";
+    const herePinned = canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    pinToggleEl.classList.toggle("is-active", herePinned);
+    pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pinsEl.innerHTML = "";
+    pinsEl.style.display = pins.length ? "" : "none";
+    for (const p of pins) {
+      const chip = document.createElement("span");
+      chip.className = "ib-pin-chip";
+      chip.dataset.pinType = p.type;
+      chip.dataset.pinSub = p.subfolder;
+      if (p.type === state.type && p.subfolder === state.subfolder)
+        chip.classList.add("is-current");
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "ib-pin-go";
+      go.title = `Go to ${pinLabel(p)}`;
+      go.textContent = `\uD83D\uDCCC ${pinLabel(p)}`;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "ib-pin-x";
+      x.title = `Unpin ${pinLabel(p)}`;
+      x.textContent = "✕";
+      chip.append(go, x);
+      pinsEl.appendChild(chip);
+    }
+  }
   function renderCrumbs() {
     crumbsEl.innerHTML = "";
     const mk = (text, attr, value) => {
@@ -1551,8 +1657,9 @@ function openImageBrowser() {
     }
     modal.setBusy(false);
     renderGrid();
+    renderPins();
     if (!opts?.preserveScroll)
-      scrollHost.scrollTop = 0;
+      scrollHost.scrollTop = scrollMemory.get(locationKey()) ?? 0;
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
@@ -1978,6 +2085,9 @@ ${when}`;
         await removeDir(state.type, state.subfolder, name, true);
       }
       state.dirs = state.dirs.filter((d) => d.name !== name);
+      const gone = state.subfolder ? `${state.subfolder}/${name}` : name;
+      savePins(loadPins().filter((p) => p.type !== state.type || p.subfolder !== gone && !p.subfolder.startsWith(`${gone}/`)));
+      renderPins();
       renderGrid();
       notify({
         severity: "success",
@@ -2031,6 +2141,7 @@ ${when}`;
     }
   }
   async function siblingNav(dir) {
+    rememberScroll();
     let parentType;
     let parentSub;
     let parentPath;
@@ -2384,6 +2495,17 @@ function pickDestination(modal, start) {
           return load();
         }
         status.textContent = "";
+        for (const p of loadPins()) {
+          if (p.type === cur.type && p.subfolder === cur.subfolder)
+            continue;
+          const r = document.createElement("button");
+          r.type = "button";
+          r.className = "ib-move-row is-pin";
+          r.dataset.pinType = p.type;
+          r.dataset.pinSub = p.subfolder;
+          r.textContent = `\uD83D\uDCCC ${pinLabel(p)}`;
+          list.appendChild(r);
+        }
         if (cur.subfolder) {
           const up = document.createElement("button");
           up.type = "button";
@@ -2425,6 +2547,16 @@ function pickDestination(modal, start) {
       load();
     });
     list.addEventListener("click", (e) => {
+      const pin = e.target.closest(".is-pin");
+      if (pin) {
+        const t = pin.dataset.pinType;
+        if (!SANDBOXED_TYPES.includes(t))
+          return;
+        cur.type = t;
+        cur.subfolder = pin.dataset.pinSub || "";
+        load();
+        return;
+      }
       const up = e.target.closest(".is-up");
       if (up) {
         const p = cur.subfolder.replace(/\/+$/, "");
@@ -2600,6 +2732,30 @@ var BROWSER_CSS = `
 .ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
 .ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
 .ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
+   order:10 keeps them below the crumbs row when the toolbar wraps on phones. */
+.ib-pins {
+    order: 10; flex-basis: 100%;
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.ib-pin-chip { display: inline-flex; align-items: stretch; }
+.ib-pin-go {
+    background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
+    border-radius: 4px 0 0 4px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+    font-family: inherit; min-height: 32px; max-width: 45vw;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ib-pin-go:hover { background: #2f3a52; color: #fff; }
+.ib-pin-chip.is-current .ib-pin-go { color: #ffd866; border-color: #78683a; }
+.ib-pin-chip.is-current .ib-pin-x { border-color: #78683a; }
+.ib-pin-x {
+    background: #23283a; color: #667; border: 1px solid #3a4560;
+    border-radius: 0 4px 4px 0; padding: 6px 8px; font-size: 11px; cursor: pointer;
+    font-family: inherit; min-height: 32px; min-width: 28px;
+}
+.ib-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
+.ib-move-row.is-pin { color: #9ec6ff; }
 /* Folder delete — corner overlay on dir cards (write-gated). */
 .ib-dir-del {
     position: absolute; top: 4px; right: 4px; z-index: 2;
