@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.5...comfyui-image-browser-v0.1.6) (2026-07-05)
+
+
+### Features
+
+* mobile multi-select, folder delete, scroll preservation, move-destination memory ([#17](https://github.com/laurigates/comfyui-image-browser/issues/17)) ([3f91c5b](https://github.com/laurigates/comfyui-image-browser/commit/3f91c5b8d19953e9c93acc38c195aa77c5b064f5))
+
 ## [0.1.5](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.4...comfyui-image-browser-v0.1.5) (2026-07-04)
 
 
