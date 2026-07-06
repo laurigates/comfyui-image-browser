@@ -220,11 +220,11 @@ describe("pinned directories", () => {
 
     pinRow.click();
     await vi.waitFor(() => {
-      const primary = modal.dialog.querySelector(".ib-move-card .ib-ov-primary");
+      const primary = modal.dialog.querySelector(".ib-move-card .cmp-ov-primary");
       if (primary?.textContent !== "Move to input/keep") throw new Error("picker did not jump");
     });
     // Cancel the picker so the modal closes cleanly.
-    Array.from(modal.dialog.querySelectorAll(".ib-move-card .ib-ov-btn"))
+    Array.from(modal.dialog.querySelectorAll(".ib-move-card .cmp-ov-btn"))
       .find((b) => b.textContent === "Cancel")
       .click();
     modal.close();
@@ -282,7 +282,7 @@ describe("comfyui-image-browser standalone modal", () => {
     expect(modal.dialog.querySelector(".ib-help-card")).not.toBeNull();
     window.dispatchEvent(new PopStateEvent("popstate"));
     // The overlay is gone but the browser survived the back press.
-    expect(modal.dialog.querySelector(".ib-ov-backdrop")).toBeNull();
+    expect(modal.dialog.querySelector(".cmp-ov-backdrop")).toBeNull();
     expect(document.querySelector(".ib-dialog")).not.toBeNull();
     modal.close();
   });

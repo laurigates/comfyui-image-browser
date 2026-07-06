@@ -9,11 +9,15 @@
 import type { ModalShellController, RatingAddress } from "@laurigates/comfy-modal-kit";
 import {
   applyStars,
+  confirmInShell,
+  ensureStyleOnce,
   fuzzyScore,
   nextRating,
   notify,
   openModalShell,
+  openShellOverlay,
   postRating,
+  promptInShell,
   ratingOf,
   starsHTML,
 } from "@laurigates/comfy-modal-kit";
@@ -40,7 +44,6 @@ import {
   VIDEO_EXTS,
   videoSrcURL,
 } from "./api.js";
-import { confirmAction, OVERLAY_CSS, openOverlay, promptText } from "./overlay.js";
 
 const STYLE_ID = "ib-style";
 const SORT_STORAGE_KEY = "comfyui-image-browser:sort";
@@ -176,7 +179,7 @@ interface ThumbDescriptor {
 // ============================================================
 
 export function openImageBrowser(): ModalShellController {
-  ensureStyle();
+  ensureStyleOnce(STYLE_ID, BROWSER_CSS);
 
   const state: BrowserState = {
     type: "output",
@@ -390,7 +393,7 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function onPopState(): void {
-    const hasOverlay = !!modal.dialog.querySelector(".ib-ov-backdrop");
+    const hasOverlay = !!modal.dialog.querySelector(".cmp-ov-backdrop");
     if (hasOverlay || canGoUp()) {
       history.pushState({ modal: EXT_NAME }, ""); // re-arm before acting
       if (hasOverlay) {
@@ -676,7 +679,7 @@ export function openImageBrowser(): ModalShellController {
   }
 
   async function onDelete(name: string): Promise<void> {
-    const ok = await confirmAction(modal, {
+    const ok = await confirmInShell(modal, {
       title: "Delete file?",
       message: `Permanently delete "${name}"? This cannot be undone.`,
       confirmLabel: "Delete",
@@ -695,7 +698,7 @@ export function openImageBrowser(): ModalShellController {
   async function onRename(name: string): Promise<void> {
     const dot = name.lastIndexOf(".");
     const ext = dot >= 0 ? name.slice(dot) : "";
-    const newName = await promptText(modal, {
+    const newName = await promptInShell(modal, {
       title: "Rename file",
       label: "New filename",
       value: name,
@@ -1215,7 +1218,7 @@ export function openImageBrowser(): ModalShellController {
     const items = collectSelectedOrFocused();
     if (items.length === 0) return;
     const count = items.length;
-    const ok = await confirmAction(modal, {
+    const ok = await confirmInShell(modal, {
       title: count === 1 ? "Delete file?" : `Delete ${count} files?`,
       message:
         count === 1
@@ -1312,7 +1315,7 @@ export function openImageBrowser(): ModalShellController {
       if (res.status === "not_empty") {
         const parts = [`${res.files} file${res.files === 1 ? "" : "s"}`];
         if (res.dirs > 0) parts.push(`${res.dirs} subfolder${res.dirs === 1 ? "" : "s"}`);
-        const ok = await confirmAction(modal, {
+        const ok = await confirmInShell(modal, {
           title: "Delete folder and contents?",
           message: `"${name}" contains ${parts.join(" and ")}. Permanently delete everything inside? This cannot be undone.`,
           confirmLabel: `Delete ${res.files} file${res.files === 1 ? "" : "s"}`,
@@ -1431,10 +1434,10 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function showHelp(): void {
-    const ov = openOverlay(modal, () => {});
+    const ov = openShellOverlay(modal);
     ov.card.classList.add("ib-help-card");
     ov.card.innerHTML = `
-      <div class="ib-ov-title">Keyboard shortcuts</div>
+      <div class="cmp-ov-title">Keyboard shortcuts</div>
       <div class="ib-help-body">
         <div class="ib-help-col">
           <div class="ib-help-h">Navigate</div>
@@ -1479,8 +1482,8 @@ export function openImageBrowser(): ModalShellController {
           </dl>
         </div>
       </div>
-      <div class="ib-ov-actions">
-        <button type="button" class="ib-ov-btn ib-ov-primary" data-help-close>Close</button>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn cmp-ov-primary" data-help-close>Close</button>
       </div>`;
     const closeBtn = ov.card.querySelector("[data-help-close]") as HTMLButtonElement | null;
     closeBtn?.addEventListener("click", () => ov.close());
@@ -1488,7 +1491,7 @@ export function openImageBrowser(): ModalShellController {
 
   function onWindowKey(e: KeyboardEvent): void {
     // Skip when any overlay is open (confirm / prompt / help / move-picker).
-    if (modal.dialog.querySelector(".ib-ov-backdrop")) return;
+    if (modal.dialog.querySelector(".cmp-ov-backdrop")) return;
     const inInput = isInInput();
 
     // ESC — priority: input → pending → visual → selection → let shell close.
@@ -1688,7 +1691,7 @@ function pickDestination(
   start: Destination,
 ): Promise<Destination | null> {
   return new Promise((resolve) => {
-    const ov = openOverlay(modal, () => resolve(null));
+    const ov = openShellOverlay(modal, { onDismiss: () => resolve(null) });
     ov.card.classList.add("ib-move-card");
 
     // Open at the last successful move destination (sorting a batch into the
@@ -1700,7 +1703,7 @@ function pickDestination(
     };
 
     const title = document.createElement("div");
-    title.className = "ib-ov-title";
+    title.className = "cmp-ov-title";
     title.textContent = "Move to…";
 
     const tabs = document.createElement("div");
@@ -1719,13 +1722,13 @@ function pickDestination(
     const list = document.createElement("div");
     list.className = "ib-move-list";
     const status = document.createElement("div");
-    status.className = "ib-ov-msg";
+    status.className = "cmp-ov-msg";
 
     const row = document.createElement("div");
-    row.className = "ib-ov-actions";
+    row.className = "cmp-ov-actions";
     const cancel = document.createElement("button");
     cancel.type = "button";
-    cancel.className = "ib-ov-btn";
+    cancel.className = "cmp-ov-btn";
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => {
       ov.close();
@@ -1733,7 +1736,7 @@ function pickDestination(
     });
     const moveHere = document.createElement("button");
     moveHere.type = "button";
-    moveHere.className = "ib-ov-btn ib-ov-primary";
+    moveHere.className = "cmp-ov-btn cmp-ov-primary";
     moveHere.addEventListener("click", () => {
       ov.close();
       resolve({ type: cur.type, subfolder: cur.subfolder });
@@ -1797,7 +1800,7 @@ function pickDestination(
         }
         if (!data.dirs.length && !cur.subfolder) {
           const none = document.createElement("div");
-          none.className = "ib-ov-msg";
+          none.className = "cmp-ov-msg";
           none.textContent = "No subfolders — move into the root above.";
           list.appendChild(none);
         }
@@ -2104,11 +2107,3 @@ const BROWSER_CSS = `
 }
 .ib-help-body dd { margin: 0 0 4px 0; font-size: 11.5px; color: #b8b8c0; }
 `;
-
-function ensureStyle(): void {
-  if (document.getElementById(STYLE_ID)) return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID;
-  s.textContent = BROWSER_CSS + OVERLAY_CSS;
-  document.head.appendChild(s);
-}

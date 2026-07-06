@@ -242,18 +242,18 @@ export interface BatchItem {
   name: string;
 }
 
-export interface BatchError {
+interface BatchError {
   name: string;
   error: string;
 }
 
-export interface DeleteManyResult {
+interface DeleteManyResult {
   ok: boolean;
   deleted: number;
   errors?: BatchError[];
 }
 
-export interface MoveManyResult {
+interface MoveManyResult {
   ok: boolean;
   moved: number;
   errors?: BatchError[];
