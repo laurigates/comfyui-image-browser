@@ -1,4 +1,14 @@
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+var KEY = Symbol.for("laurigates.comfyModalKit");
+function getKit() {
+  const g = globalThis;
+  let kit = g[KEY];
+  if (!kit) {
+    kit = { fieldProviders: [], activeModal: null, pointerClaim: null };
+    g[KEY] = kit;
+  }
+  return kit;
+}
 function ensureStyleOnce(id, css) {
   if (typeof document === "undefined")
     return;
@@ -250,16 +260,6 @@ function makeLauncher(opts) {
     ];
   }
   return fields;
-}
-var KEY = Symbol.for("laurigates.comfyModalKit");
-function getKit() {
-  const g = globalThis;
-  let kit = g[KEY];
-  if (!kit) {
-    kit = { fieldProviders: [], activeModal: null, pointerClaim: null };
-    g[KEY] = kit;
-  }
-  return kit;
 }
 var guardInstalled = false;
 function setActiveModal(handle) {
