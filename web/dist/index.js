@@ -1,98 +1,13 @@
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
-var KEY = Symbol.for("laurigates.comfyModalKit");
-function getKit() {
-  const g = globalThis;
-  let kit = g[KEY];
-  if (!kit) {
-    kit = { fieldProviders: [], activeModal: null, pointerClaim: null };
-    g[KEY] = kit;
-  }
-  return kit;
-}
-var guardInstalled = false;
-function setActiveModal(handle) {
-  installPointerGuard();
-  dismissActiveModal();
-  getKit().activeModal = handle;
-}
-function dismissActiveModal() {
-  const kit = getKit();
-  const active = kit.activeModal;
-  if (!active)
+function ensureStyleOnce(id, css) {
+  if (typeof document === "undefined")
     return;
-  kit.activeModal = null;
-  try {
-    active.close();
-  } catch (e) {
-    console.warn("[comfy-modal-kit] active modal close() threw", e);
-  }
-}
-function getActiveModal() {
-  return getKit().activeModal;
-}
-function installPointerGuard() {
-  if (guardInstalled)
+  if (document.getElementById(id))
     return;
-  if (typeof window === "undefined")
-    return;
-  guardInstalled = true;
-  window.addEventListener("pointerdown", pointerGuard, true);
-}
-function pointerGuard(e) {
-  const active = getKit().activeModal;
-  if (!active)
-    return;
-  const target = e.target;
-  if (active.element && target && active.element.contains(target)) {
-    return;
-  }
-  e.stopImmediatePropagation();
-  dismissActiveModal();
-}
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
+  const s = document.createElement("style");
+  s.id = id;
+  s.textContent = css;
+  document.head.appendChild(s);
 }
 var STYLE_ID = "cmn-notify-style";
 var CONTAINER_ID = "cmn-notify-container";
@@ -219,16 +134,6 @@ var CSS = `
 .cmn-copy:hover  { background: #34343f; color: #fff; }
 .cmn-copy.cmn-copied { background: #2f4a30; border-color: #4caf50; color: #cfe8d0; }
 `;
-function ensureStyle() {
-  if (typeof document === "undefined")
-    return;
-  if (document.getElementById(STYLE_ID))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID;
-  s.textContent = CSS;
-  document.head.appendChild(s);
-}
 function ensureContainer() {
   let c = document.getElementById(CONTAINER_ID);
   if (!c) {
@@ -245,7 +150,7 @@ function notify(opts) {
     console.info(`[notify] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
     return null;
   }
-  ensureStyle();
+  ensureStyleOnce(STYLE_ID, CSS);
   const container = ensureContainer();
   const life = opts.life ?? defaultLife(severity);
   const copyable = opts.copyable ?? defaultCopyable(severity);
@@ -306,6 +211,140 @@ function notify(opts) {
     timer = setTimeout(close, life);
   }
   return { close, el: toast };
+}
+var FAMILY_MENU_PATH = ["Extensions", "Touch Tools"];
+var KEBAB_COMMAND_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function makeLauncher(opts) {
+  if (!KEBAB_COMMAND_ID.test(opts.id)) {
+    console.warn(`[comfy-modal-kit] launcher id "${opts.id}" does not match the family convention "<pack-short-name>.<action>" (kebab-case)`);
+  }
+  const safeOpen = () => {
+    try {
+      opts.open();
+    } catch (e) {
+      console.error(`[comfy-modal-kit] launcher "${opts.id}" open failed`, e);
+      try {
+        notify({
+          severity: "error",
+          summary: opts.failSummary ?? `Could not open ${opts.label}`,
+          detail: String(e)
+        });
+      } catch (notifyErr) {
+        console.warn(`[comfy-modal-kit] notify failed`, notifyErr);
+      }
+    }
+  };
+  const fields = {
+    commands: [{ id: opts.id, label: opts.label, icon: opts.icon, function: safeOpen }],
+    menuCommands: [{ path: [...opts.menuPath ?? FAMILY_MENU_PATH], commands: [opts.id] }]
+  };
+  if (opts.actionBar !== false) {
+    const bar = typeof opts.actionBar === "object" ? opts.actionBar : {};
+    fields.actionBarButtons = [
+      {
+        icon: opts.icon,
+        ...bar.label !== undefined ? { label: bar.label } : {},
+        tooltip: bar.tooltip ?? opts.tooltip ?? opts.label,
+        onClick: safeOpen
+      }
+    ];
+  }
+  return fields;
+}
+var KEY = Symbol.for("laurigates.comfyModalKit");
+function getKit() {
+  const g = globalThis;
+  let kit = g[KEY];
+  if (!kit) {
+    kit = { fieldProviders: [], activeModal: null, pointerClaim: null };
+    g[KEY] = kit;
+  }
+  return kit;
+}
+var guardInstalled = false;
+function setActiveModal(handle) {
+  installPointerGuard();
+  dismissActiveModal();
+  getKit().activeModal = handle;
+}
+function dismissActiveModal() {
+  const kit = getKit();
+  const active = kit.activeModal;
+  if (!active)
+    return;
+  kit.activeModal = null;
+  try {
+    active.close();
+  } catch (e) {
+    console.warn("[comfy-modal-kit] active modal close() threw", e);
+  }
+}
+function getActiveModal() {
+  return getKit().activeModal;
+}
+function installPointerGuard() {
+  if (guardInstalled)
+    return;
+  if (typeof window === "undefined")
+    return;
+  guardInstalled = true;
+  window.addEventListener("pointerdown", pointerGuard, true);
+}
+function pointerGuard(e) {
+  const active = getKit().activeModal;
+  if (!active)
+    return;
+  const target = e.target;
+  if (active.element && target && active.element.contains(target)) {
+    return;
+  }
+  e.stopImmediatePropagation();
+  dismissActiveModal();
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
 }
 var MAX_RATING = 5;
 function ratingOf(f) {
@@ -500,16 +539,8 @@ var CSS2 = `
     color: #b8b8c0;
 }
 `;
-function ensureStyle2() {
-  if (document.getElementById(STYLE_ID2))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID2;
-  s.textContent = CSS2;
-  document.head.appendChild(s);
-}
 function openModalShell(opts = {}) {
-  ensureStyle2();
+  ensureStyleOnce(STYLE_ID2, CSS2);
   const backdrop = document.createElement("div");
   backdrop.className = "cmp-backdrop";
   const dialog = document.createElement("div");
@@ -639,6 +670,190 @@ function openModalShell(opts = {}) {
     });
   }
   return controller;
+}
+var STYLE_ID3 = "cmp-overlay-style";
+var CSS3 = `
+.cmp-ov-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    touch-action: manipulation;
+}
+.cmp-ov-card {
+    background: #1c1c24;
+    border: 1px solid #33333f;
+    border-radius: 10px;
+    padding: 18px;
+    width: min(520px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.cmp-ov-title { font-size: 15px; font-weight: 600; color: #e8e8ec; }
+.cmp-ov-msg { font-size: 13px; color: #b8b8c0; line-height: 1.5; word-break: break-word; }
+.cmp-ov-input {
+    font-size: 16px;
+    padding: 10px 12px;
+    background: #12121a;
+    border: 1px solid #3a3a44;
+    border-radius: 6px;
+    color: #e8e8ec;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.cmp-ov-input:focus { outline: none; border-color: #6ba6ff; }
+.cmp-ov-err { font-size: 12px; color: #ff7a7a; min-height: 14px; }
+.cmp-ov-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cmp-ov-btn {
+    font-size: 13px;
+    padding: 9px 16px;
+    border-radius: 6px;
+    border: 1px solid #3a3a44;
+    background: #2a2a36;
+    color: #d8d8dc;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 38px;
+}
+.cmp-ov-btn:hover { background: #3a3a4a; color: #fff; }
+.cmp-ov-primary { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.cmp-ov-primary:hover { background: #3a4868; color: #fff; }
+.cmp-ov-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.cmp-ov-danger:hover { background: #5c2a3c; color: #fff; }
+`;
+function openShellOverlay(shell, opts = {}) {
+  ensureStyleOnce(STYLE_ID3, CSS3);
+  const backdrop = document.createElement("div");
+  backdrop.className = "cmp-ov-backdrop";
+  const card = document.createElement("div");
+  card.className = "cmp-ov-card";
+  backdrop.appendChild(card);
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    }
+  };
+  let closed = false;
+  function close() {
+    if (closed)
+      return;
+    closed = true;
+    document.removeEventListener("keydown", onKey, true);
+    document.addEventListener("keydown", shell._onKey, true);
+    backdrop.remove();
+  }
+  function dismiss() {
+    opts.onDismiss?.();
+    close();
+  }
+  backdrop.addEventListener("pointerdown", (e) => {
+    if (e.target === backdrop)
+      dismiss();
+  });
+  document.removeEventListener("keydown", shell._onKey, true);
+  document.addEventListener("keydown", onKey, true);
+  shell.dialog.appendChild(backdrop);
+  return { card, close };
+}
+function confirmInShell(shell, opts) {
+  return new Promise((resolve) => {
+    const ov = openShellOverlay(shell, { onDismiss: () => resolve(false) });
+    const h = document.createElement("div");
+    h.className = "cmp-ov-title";
+    h.textContent = opts.title;
+    const p = document.createElement("div");
+    p.className = "cmp-ov-msg";
+    p.textContent = opts.message;
+    const row = document.createElement("div");
+    row.className = "cmp-ov-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cmp-ov-btn";
+    cancel.textContent = opts.cancelLabel || "Cancel";
+    cancel.addEventListener("click", () => {
+      ov.close();
+      resolve(false);
+    });
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = opts.danger ? "cmp-ov-btn cmp-ov-danger" : "cmp-ov-btn cmp-ov-primary";
+    ok.textContent = opts.confirmLabel || "OK";
+    const confirm = () => {
+      ov.close();
+      resolve(true);
+    };
+    ok.addEventListener("click", confirm);
+    if (opts.enterConfirms) {
+      ov.card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          confirm();
+        }
+      });
+    }
+    row.append(cancel, ok);
+    ov.card.append(h, p, row);
+    ok.focus();
+  });
+}
+function promptInShell(shell, opts) {
+  return new Promise((resolve) => {
+    const ov = openShellOverlay(shell, { onDismiss: () => resolve(null) });
+    const h = document.createElement("div");
+    h.className = "cmp-ov-title";
+    h.textContent = opts.title;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "cmp-ov-input";
+    input.value = opts.value || "";
+    if (opts.label)
+      input.setAttribute("aria-label", opts.label);
+    const errEl = document.createElement("div");
+    errEl.className = "cmp-ov-err";
+    const row = document.createElement("div");
+    row.className = "cmp-ov-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cmp-ov-btn";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => {
+      ov.close();
+      resolve(null);
+    });
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "cmp-ov-btn cmp-ov-primary";
+    ok.textContent = opts.confirmLabel || "OK";
+    function submit() {
+      const v = input.value.trim();
+      const err = opts.validate?.(v) ?? (v ? null : "Value required");
+      if (err) {
+        errEl.textContent = err;
+        return;
+      }
+      ov.close();
+      resolve(v);
+    }
+    ok.addEventListener("click", submit);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
+    row.append(cancel, ok);
+    ov.card.append(h, input, errEl, row);
+    input.focus();
+    input.select();
+  });
 }
 
 // src/index.ts
@@ -825,180 +1040,8 @@ function moveMany(items, destType, destSubfolder) {
   });
 }
 
-// src/overlay.ts
-function openOverlay(modal, onDismiss) {
-  const host = modal.dialog;
-  const backdrop = document.createElement("div");
-  backdrop.className = "ib-ov-backdrop";
-  const card = document.createElement("div");
-  card.className = "ib-ov-card";
-  backdrop.appendChild(card);
-  const onKey = (e) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      dismiss();
-    }
-  };
-  function close() {
-    document.removeEventListener("keydown", onKey, true);
-    document.addEventListener("keydown", modal._onKey, true);
-    backdrop.remove();
-  }
-  function dismiss() {
-    onDismiss?.();
-    close();
-  }
-  backdrop.addEventListener("pointerdown", (e) => {
-    if (e.target === backdrop)
-      dismiss();
-  });
-  document.removeEventListener("keydown", modal._onKey, true);
-  document.addEventListener("keydown", onKey, true);
-  host.appendChild(backdrop);
-  return { card, close };
-}
-function confirmAction(modal, opts) {
-  return new Promise((resolve) => {
-    const ov = openOverlay(modal, () => resolve(false));
-    const h = document.createElement("div");
-    h.className = "ib-ov-title";
-    h.textContent = opts.title;
-    const p = document.createElement("div");
-    p.className = "ib-ov-msg";
-    p.textContent = opts.message;
-    const row = document.createElement("div");
-    row.className = "ib-ov-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "ib-ov-btn";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => {
-      ov.close();
-      resolve(false);
-    });
-    const ok = document.createElement("button");
-    ok.type = "button";
-    ok.className = opts.danger ? "ib-ov-btn ib-ov-danger" : "ib-ov-btn ib-ov-primary";
-    ok.textContent = opts.confirmLabel || "OK";
-    ok.addEventListener("click", () => {
-      ov.close();
-      resolve(true);
-    });
-    row.append(cancel, ok);
-    ov.card.append(h, p, row);
-    ok.focus();
-  });
-}
-function promptText(modal, opts) {
-  return new Promise((resolve) => {
-    const ov = openOverlay(modal, () => resolve(null));
-    const h = document.createElement("div");
-    h.className = "ib-ov-title";
-    h.textContent = opts.title;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "ib-ov-input";
-    input.value = opts.value || "";
-    if (opts.label)
-      input.setAttribute("aria-label", opts.label);
-    const errEl = document.createElement("div");
-    errEl.className = "ib-ov-err";
-    const row = document.createElement("div");
-    row.className = "ib-ov-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "ib-ov-btn";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => {
-      ov.close();
-      resolve(null);
-    });
-    const ok = document.createElement("button");
-    ok.type = "button";
-    ok.className = "ib-ov-btn ib-ov-primary";
-    ok.textContent = opts.confirmLabel || "OK";
-    function submit() {
-      const v = input.value.trim();
-      const err = opts.validate?.(v) ?? (v ? null : "Value required");
-      if (err) {
-        errEl.textContent = err;
-        return;
-      }
-      ov.close();
-      resolve(v);
-    }
-    ok.addEventListener("click", submit);
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        submit();
-      }
-    });
-    row.append(cancel, ok);
-    ov.card.append(h, input, errEl, row);
-    input.focus();
-    input.select();
-  });
-}
-var OVERLAY_CSS = `
-.ib-ov-backdrop {
-    position: absolute;
-    inset: 0;
-    z-index: 5;
-    background: rgba(0, 0, 0, 0.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-    touch-action: manipulation;
-}
-.ib-ov-card {
-    background: #1c1c24;
-    border: 1px solid #33333f;
-    border-radius: 10px;
-    padding: 18px;
-    width: min(520px, calc(100% - 24px));
-    max-height: calc(100% - 24px);
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-}
-.ib-ov-title { font-size: 15px; font-weight: 600; color: #e8e8ec; }
-.ib-ov-msg { font-size: 13px; color: #b8b8c0; line-height: 1.5; word-break: break-word; }
-.ib-ov-input {
-    font-size: 16px;
-    padding: 10px 12px;
-    background: #12121a;
-    border: 1px solid #3a3a44;
-    border-radius: 6px;
-    color: #e8e8ec;
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-.ib-ov-input:focus { outline: none; border-color: #6ba6ff; }
-.ib-ov-err { font-size: 12px; color: #ff7a7a; min-height: 14px; }
-.ib-ov-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.ib-ov-btn {
-    font-size: 13px;
-    padding: 9px 16px;
-    border-radius: 6px;
-    border: 1px solid #3a3a44;
-    background: #2a2a36;
-    color: #d8d8dc;
-    cursor: pointer;
-    font-family: inherit;
-    min-height: 38px;
-}
-.ib-ov-btn:hover { background: #3a3a4a; color: #fff; }
-.ib-ov-primary { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
-.ib-ov-primary:hover { background: #3a4868; color: #fff; }
-.ib-ov-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
-.ib-ov-danger:hover { background: #5c2a3c; color: #fff; }
-`;
-
 // src/browser.ts
-var STYLE_ID3 = "ib-style";
+var STYLE_ID4 = "ib-style";
 var SORT_STORAGE_KEY = "comfyui-image-browser:sort";
 var VALID_SORTS = new Set([
   "mtime:desc",
@@ -1075,7 +1118,7 @@ function savePins(pins) {
   } catch {}
 }
 function openImageBrowser() {
-  ensureStyle3();
+  ensureStyleOnce(STYLE_ID4, BROWSER_CSS);
   const state = {
     type: "output",
     subfolder: "",
@@ -1230,7 +1273,7 @@ function openImageBrowser() {
     return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
   }
   function onPopState() {
-    const hasOverlay = !!modal.dialog.querySelector(".ib-ov-backdrop");
+    const hasOverlay = !!modal.dialog.querySelector(".cmp-ov-backdrop");
     if (hasOverlay || canGoUp()) {
       history.pushState({ modal: EXT_NAME }, "");
       if (hasOverlay) {
@@ -1500,7 +1543,7 @@ function openImageBrowser() {
     window.open(url, "_blank", "noopener");
   }
   async function onDelete(name) {
-    const ok = await confirmAction(modal, {
+    const ok = await confirmInShell(modal, {
       title: "Delete file?",
       message: `Permanently delete "${name}"? This cannot be undone.`,
       confirmLabel: "Delete",
@@ -1519,7 +1562,7 @@ function openImageBrowser() {
   async function onRename(name) {
     const dot = name.lastIndexOf(".");
     const ext = dot >= 0 ? name.slice(dot) : "";
-    const newName = await promptText(modal, {
+    const newName = await promptInShell(modal, {
       title: "Rename file",
       label: "New filename",
       value: name,
@@ -1995,7 +2038,7 @@ ${when}`;
     if (items.length === 0)
       return;
     const count = items.length;
-    const ok = await confirmAction(modal, {
+    const ok = await confirmInShell(modal, {
       title: count === 1 ? "Delete file?" : `Delete ${count} files?`,
       message: count === 1 ? `Permanently delete "${items[0]?.name}"? This cannot be undone.` : `Permanently delete ${count} selected files? This cannot be undone.`,
       confirmLabel: "Delete",
@@ -2074,7 +2117,7 @@ ${when}`;
         const parts = [`${res.files} file${res.files === 1 ? "" : "s"}`];
         if (res.dirs > 0)
           parts.push(`${res.dirs} subfolder${res.dirs === 1 ? "" : "s"}`);
-        const ok = await confirmAction(modal, {
+        const ok = await confirmInShell(modal, {
           title: "Delete folder and contents?",
           message: `"${name}" contains ${parts.join(" and ")}. Permanently delete everything inside? This cannot be undone.`,
           confirmLabel: `Delete ${res.files} file${res.files === 1 ? "" : "s"}`,
@@ -2193,10 +2236,10 @@ ${when}`;
     }
   }
   function showHelp() {
-    const ov = openOverlay(modal, () => {});
+    const ov = openShellOverlay(modal);
     ov.card.classList.add("ib-help-card");
     ov.card.innerHTML = `
-      <div class="ib-ov-title">Keyboard shortcuts</div>
+      <div class="cmp-ov-title">Keyboard shortcuts</div>
       <div class="ib-help-body">
         <div class="ib-help-col">
           <div class="ib-help-h">Navigate</div>
@@ -2241,14 +2284,14 @@ ${when}`;
           </dl>
         </div>
       </div>
-      <div class="ib-ov-actions">
-        <button type="button" class="ib-ov-btn ib-ov-primary" data-help-close>Close</button>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn cmp-ov-primary" data-help-close>Close</button>
       </div>`;
     const closeBtn = ov.card.querySelector("[data-help-close]");
     closeBtn?.addEventListener("click", () => ov.close());
   }
   function onWindowKey(e) {
-    if (modal.dialog.querySelector(".ib-ov-backdrop"))
+    if (modal.dialog.querySelector(".cmp-ov-backdrop"))
       return;
     const inInput = isInInput();
     if (e.key === "Escape") {
@@ -2419,7 +2462,7 @@ ${when}`;
 }
 function pickDestination(modal, start) {
   return new Promise((resolve) => {
-    const ov = openOverlay(modal, () => resolve(null));
+    const ov = openShellOverlay(modal, { onDismiss: () => resolve(null) });
     ov.card.classList.add("ib-move-card");
     const remembered = loadSavedDest();
     const cur = remembered ?? {
@@ -2427,7 +2470,7 @@ function pickDestination(modal, start) {
       subfolder: start.subfolder
     };
     const title = document.createElement("div");
-    title.className = "ib-ov-title";
+    title.className = "cmp-ov-title";
     title.textContent = "Move to…";
     const tabs = document.createElement("div");
     tabs.className = "ib-tabs";
@@ -2444,12 +2487,12 @@ function pickDestination(modal, start) {
     const list = document.createElement("div");
     list.className = "ib-move-list";
     const status = document.createElement("div");
-    status.className = "ib-ov-msg";
+    status.className = "cmp-ov-msg";
     const row = document.createElement("div");
-    row.className = "ib-ov-actions";
+    row.className = "cmp-ov-actions";
     const cancel = document.createElement("button");
     cancel.type = "button";
-    cancel.className = "ib-ov-btn";
+    cancel.className = "cmp-ov-btn";
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => {
       ov.close();
@@ -2457,7 +2500,7 @@ function pickDestination(modal, start) {
     });
     const moveHere = document.createElement("button");
     moveHere.type = "button";
-    moveHere.className = "ib-ov-btn ib-ov-primary";
+    moveHere.className = "cmp-ov-btn cmp-ov-primary";
     moveHere.addEventListener("click", () => {
       ov.close();
       resolve({ type: cur.type, subfolder: cur.subfolder });
@@ -2515,7 +2558,7 @@ function pickDestination(modal, start) {
         }
         if (!data.dirs.length && !cur.subfolder) {
           const none = document.createElement("div");
-          none.className = "ib-ov-msg";
+          none.className = "cmp-ov-msg";
           none.textContent = "No subfolders — move into the root above.";
           list.appendChild(none);
         }
@@ -2801,55 +2844,22 @@ var BROWSER_CSS = `
 }
 .ib-help-body dd { margin: 0 0 4px 0; font-size: 11.5px; color: #b8b8c0; }
 `;
-function ensureStyle3() {
-  if (document.getElementById(STYLE_ID3))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID3;
-  s.textContent = BROWSER_CSS + OVERLAY_CSS;
-  document.head.appendChild(s);
-}
 
 // src/index.ts
-var OPEN_COMMAND_ID = "image-browser.open";
 function openShell() {
   return openImageBrowser();
 }
-function openShellSafe() {
-  try {
-    openImageBrowser();
-  } catch (e) {
-    console.warn(`[${EXT_NAME}] open failed`, e);
-    notify({
-      severity: "error",
-      summary: "Image Browser failed to open",
-      detail: e instanceof Error ? e.message : String(e)
-    });
-  }
-}
 app.registerExtension({
   name: "comfy.image-browser",
-  actionBarButtons: [
-    {
-      icon: "icon-[lucide--images]",
-      label: "Image Browser",
-      tooltip: "Browse & manage input/output images",
-      onClick: openShellSafe
-    }
-  ],
-  commands: [
-    {
-      id: OPEN_COMMAND_ID,
-      label: "Open Image Browser",
-      function: openShellSafe
-    }
-  ],
-  menuCommands: [
-    {
-      path: ["Extensions", "Image Browser"],
-      commands: [OPEN_COMMAND_ID]
-    }
-  ]
+  ...makeLauncher({
+    id: "image-browser.open",
+    label: "Image Browser",
+    icon: "pi pi-images",
+    tooltip: "Browse & manage input/output images",
+    failSummary: "Image Browser failed to open",
+    open: openImageBrowser,
+    actionBar: { label: "Image Browser" }
+  })
 });
 export {
   openShell

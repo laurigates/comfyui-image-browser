@@ -4,7 +4,7 @@ ComfyUI custom-node pack with a thin Python backend (a node + HTTP endpoints in 
 
 ## The pattern ("the vein")
 
-A mobile-first ComfyUI usability pack in the *standalone-modal* vein: instead of intercepting a per-node widget, a frontend extension opens a STANDALONE modal from the app chrome — an action-bar button plus a command (palette/hotkey-bindable) and a menu entry. There are **no target widgets to hook**, so there is no `TARGET_WIDGETS` / `onPointerDown` wrapping. The modal is **touch-first** (16px inputs to avoid iOS zoom, big tap targets, momentum scroll); its primitives come from `@laurigates/comfy-modal-kit` (`openModalShell` / `fuzzyScore` / `notify`), imported and inlined by `bun build` — not copied into the pack. `openShell()` is exported so the jsdom mount test can prove the modal body renders.
+A mobile-first ComfyUI usability pack in the *standalone-modal* vein: instead of intercepting a per-node widget, a frontend extension opens a STANDALONE modal from the app chrome — an action-bar button plus a command (palette/hotkey-bindable) and a menu entry. There are **no target widgets to hook**, so there is no `TARGET_WIDGETS` / `onPointerDown` wrapping. The modal is **touch-first** (16px inputs to avoid iOS zoom, big tap targets, momentum scroll); its primitives come from `@laurigates/comfy-modal-kit` (`openModalShell` / `fuzzyScore` / `notify` / `makeLauncher` / `ensureStyleOnce`, plus the in-dialog `openShellOverlay` / `confirmInShell` / `promptInShell` used for delete-confirm, rename, and the move picker — kept in-dialog, not a second `openModalShell`, so single-modal discipline doesn't close the browser), imported and inlined by `bun build` — not copied into the pack. `openShell()` is exported so the jsdom mount test can prove the modal body renders.
 
 Concretely, this pack is a **full-canvas image browser + file manager**: the modal
 fills the whole viewport (`width: 100vw; height: 100vh` on `.ib-dialog`), standing
@@ -38,7 +38,6 @@ in the HTTP endpoints + the served bundle.
 | `src/index.ts` | The extension: action-bar/command/menu launcher; exports `openShell()` → `openImageBrowser()`. |
 | `src/browser.ts` | The full-canvas explorer — grid, tabs, breadcrumbs, sort/search, per-card delete/rename/move, the move-destination picker, and all CSS. |
 | `src/api.ts` | Typed wrappers over the `/image_browser/*` endpoints + thumbnail/preview URL builders. No DOM. |
-| `src/overlay.ts` | In-dialog overlays (confirm / text prompt / custom) — used for delete-confirm, rename, move. Kept in-dialog (not a second `openModalShell`) to avoid single-modal discipline closing the browser. |
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import (via the `paths` mapping in `tsconfig.json`). |
 | `__init__.py` | Loader stub. Imports (empty) node mappings from the backend module; exports `WEB_DIRECTORY = "./web/dist"`. |
 | `image_browser.py` | HTTP endpoints only (no node). Bundled libs + stdlib only; reads gate on an extension whitelist, writes are sandboxed to input/output/temp. |
