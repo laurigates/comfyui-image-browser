@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.8](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.7...comfyui-image-browser-v0.1.8) (2026-07-06)
+
+
+### Features
+
+* adopt kit makeLauncher and in-shell overlay primitives ([#21](https://github.com/laurigates/comfyui-image-browser/issues/21)) ([84780cf](https://github.com/laurigates/comfyui-image-browser/commit/84780cf4149ada3cede2d1208ef44248e19e42da))
+
+
+### Bug Fixes
+
+* regenerate bun.lock for comfy-modal-kit 0.6.0 ([#23](https://github.com/laurigates/comfyui-image-browser/issues/23)) ([6f083d9](https://github.com/laurigates/comfyui-image-browser/commit/6f083d9ba2db35388831ad7521e0756419d39164))
+
 ## [0.1.7](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.6...comfyui-image-browser-v0.1.7) (2026-07-05)
 
 

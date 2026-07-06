@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-image-browser"
 description = "Full-canvas file explorer for browsing and managing images across ComfyUI's input, output, temp and arbitrary paths — thumbnails plus delete, rename and move."
-version = "0.1.7"
+version = "0.1.8"
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
