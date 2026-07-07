@@ -21,6 +21,7 @@ Endpoint surface (all under /image_browser/):
     POST /move         {type, subfolder, name, dest_type, dest_subfolder}   move
     POST /move_many    {items:[{type,subfolder,name}, …], dest_type, dest_subfolder} batch move
     POST /rmdir        {type, subfolder, name, recursive}           delete a folder
+    POST /mkdir        {type, subfolder, name}                       create a folder
     POST /rating       {type, subfolder, name, rating}              0..5 star rating
 
 Security posture:
@@ -697,6 +698,45 @@ async def image_browser_rmdir(request: web.Request) -> web.Response:
         log.exception("rmdir failed for %s", target)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True, "files": n_files, "dirs": n_dirs})
+
+
+@PromptServer.instance.routes.post("/image_browser/mkdir")
+async def image_browser_mkdir(request: web.Request) -> web.Response:
+    """Create a folder inside a sandboxed root.
+
+    Body: ``{type, subfolder, name}``. Same write perimeter as the file/folder
+    mutations: sandboxed types only (``type=path`` rejected), a bare
+    traversal-free name, and containment (ADR-0002). The new folder is created
+    directly under the current ``subfolder``, so its parent must already exist —
+    a missing parent answers 404. An existing target answers 409 so the client
+    can surface a name collision rather than silently succeeding.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+
+    target, err = _resolve_sandboxed_dir(
+        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+    )
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert target is not None
+    if not os.path.isdir(os.path.dirname(target)):
+        return web.json_response(
+            {"ok": False, "error": "parent folder does not exist"}, status=404
+        )
+    if os.path.exists(target):
+        return web.json_response(
+            {"ok": False, "error": "a file or folder with that name already exists"},
+            status=409,
+        )
+    try:
+        os.mkdir(target)
+    except OSError as exc:
+        log.exception("mkdir failed for %s", target)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    return web.json_response({"ok": True, "name": os.path.basename(target)})
 
 
 def _parse_rating(value: Any) -> int | None:

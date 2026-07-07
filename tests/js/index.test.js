@@ -231,6 +231,117 @@ describe("pinned directories", () => {
   });
 });
 
+describe("create folder affordance", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it("shows the New folder button on a sandboxed tab", async () => {
+    stubListing({ files: TWO_FILES });
+    const modal = openShell();
+    await openLoaded(modal);
+    const btn = modal.dialog.querySelector(".ib-newfolder");
+    expect(btn).not.toBeNull();
+    expect(btn.style.display).not.toBe("none");
+    modal.close();
+  });
+
+  it("prompts for a name and POSTs /mkdir, then re-lists", async () => {
+    // A fetch stub that records the /mkdir call and answers /list normally.
+    const calls = [];
+    const fetchFn = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (String(url).includes("/image_browser/mkdir")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, name: "fresh" }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "output",
+          subfolder: "",
+          path: "/out",
+          dirs: [],
+          files: TWO_FILES,
+          exists: true,
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchFn);
+
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.dialog.querySelector(".ib-newfolder").click();
+
+    // The prompt overlay is open; type a name and confirm.
+    const input = await vi.waitFor(() => {
+      const el = modal.dialog.querySelector(".cmp-ov-input");
+      if (!el) throw new Error("prompt not rendered");
+      return el;
+    });
+    input.value = "fresh";
+    modal.dialog.querySelector(".cmp-ov-primary").click();
+
+    const mkdir = await vi.waitFor(() => {
+      const c = calls.find((x) => String(x.url).includes("/image_browser/mkdir"));
+      if (!c) throw new Error("mkdir not called");
+      return c;
+    });
+    expect(mkdir.init.method).toBe("POST");
+    expect(JSON.parse(mkdir.init.body)).toEqual({
+      type: "output",
+      subfolder: "",
+      name: "fresh",
+    });
+    modal.close();
+  });
+
+  it("hides the New folder button on the browse-only path tab", async () => {
+    // Path-tab switch fetches /base then /list; answer both.
+    const fetchFn = vi.fn(async (url) => {
+      if (String(url).includes("/image_browser/base")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            base_path: "/",
+            input_dir: "",
+            output_dir: "",
+            temp_dir: "",
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "path",
+          subfolder: "",
+          path: "/",
+          dirs: [],
+          files: TWO_FILES,
+          exists: true,
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchFn);
+    const modal = openShell();
+    await openLoaded(modal);
+
+    modal.dialog.querySelector('.ib-tab[data-type="path"]').click();
+    await vi.waitFor(() => {
+      const btn = modal.dialog.querySelector(".ib-newfolder");
+      if (btn.style.display !== "none") throw new Error("still visible");
+    });
+    modal.close();
+  });
+});
+
 describe("comfyui-image-browser standalone modal", () => {
   it("mounts the full-canvas browser scaffold into the modal shell", () => {
     const modal = openShell();

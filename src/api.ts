@@ -13,6 +13,7 @@ const RENAME_URL = "/image_browser/rename";
 const MOVE_URL = "/image_browser/move";
 const MOVE_MANY_URL = "/image_browser/move_many";
 const RMDIR_URL = "/image_browser/rmdir";
+const MKDIR_URL = "/image_browser/mkdir";
 export const RATING_URL = "/image_browser/rating";
 
 export const IMG_EXTS = new Set([
@@ -334,4 +335,13 @@ export function moveMany(
     dest_type: destType,
     dest_subfolder: destSubfolder,
   });
+}
+
+// ---- Folder creation (sandboxed roots only) ----------------------------
+//
+// Creates a new folder under the current subfolder. postJSON throws on a
+// top-level failure, so a name collision (409) surfaces as a rejected promise
+// with the backend's error message.
+export function makeDir(type: BrowseType, subfolder: string, name: string): Promise<void> {
+  return postJSON(MKDIR_URL, { type, subfolder, name });
 }
