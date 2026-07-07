@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.9...comfyui-image-browser-v0.1.10) (2026-07-07)
+
+
+### Features
+
+* move directories as well as files ([#26](https://github.com/laurigates/comfyui-image-browser/issues/26)) ([b3d4158](https://github.com/laurigates/comfyui-image-browser/commit/b3d4158d87ca983983123c9b199fa9eaead468ae))
+
 ## [0.1.9](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.8...comfyui-image-browser-v0.1.9) (2026-07-07)
 
 
