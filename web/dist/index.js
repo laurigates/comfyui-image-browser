@@ -869,6 +869,7 @@ var DELETE_URL = "/image_browser/delete";
 var DELETE_MANY_URL = "/image_browser/delete_many";
 var RENAME_URL = "/image_browser/rename";
 var MOVE_URL = "/image_browser/move";
+var MOVE_DIR_URL = "/image_browser/move_dir";
 var MOVE_MANY_URL = "/image_browser/move_many";
 var RMDIR_URL = "/image_browser/rmdir";
 var MKDIR_URL = "/image_browser/mkdir";
@@ -987,6 +988,15 @@ function renameFile(type, subfolder, name, newName) {
 }
 function moveFile(type, subfolder, name, destType, destSubfolder) {
   return postJSON(MOVE_URL, {
+    type,
+    subfolder,
+    name,
+    dest_type: destType,
+    dest_subfolder: destSubfolder
+  });
+}
+function moveDir(type, subfolder, name, destType, destSubfolder) {
+  return postJSON(MOVE_DIR_URL, {
     type,
     subfolder,
     name,
@@ -1400,6 +1410,11 @@ function openImageBrowser() {
         onDeleteDir(card.dataset.name);
         return;
       }
+      if (actionBtn?.dataset.action === "movedir") {
+        e.stopPropagation();
+        onMoveDir(card.dataset.name);
+        return;
+      }
       navigateInto(card.dataset.name);
       return;
     }
@@ -1750,8 +1765,8 @@ function openImageBrowser() {
       const c = document.createElement("div");
       c.className = "ib-card is-dir";
       c.dataset.name = d.name;
-      const dirDelBtn = canWrite ? `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
-      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirDelBtn}`;
+      const dirBtns = canWrite ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` + `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
+      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
       gridEl.appendChild(c);
     }
     let files = state.files;
@@ -2151,6 +2166,29 @@ ${when}`;
       reportError("Create folder failed", e);
     }
   }
+  async function onMoveDir(name) {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const srcSub = state.subfolder ? `${state.subfolder}/${name}` : name;
+    const dest = await pickDestination(modal, { type: state.type, subfolder: state.subfolder }, { type: state.type, subfolder: srcSub });
+    if (!dest)
+      return;
+    try {
+      await moveDir(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      saveDest(dest);
+      state.dirs = state.dirs.filter((d) => d.name !== name);
+      savePins(loadPins().filter((p) => p.type !== state.type || p.subfolder !== srcSub && !p.subfolder.startsWith(`${srcSub}/`)));
+      renderPins();
+      renderGrid();
+      notify({
+        severity: "success",
+        summary: "Folder moved",
+        detail: `"${name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`
+      });
+    } catch (e) {
+      reportError("Move folder failed", e);
+    }
+  }
   async function onDeleteDir(name) {
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
@@ -2503,10 +2541,12 @@ ${when}`;
   loadAndRender();
   return modal;
 }
-function pickDestination(modal, start) {
+function pickDestination(modal, start, exclude) {
   return new Promise((resolve) => {
     const ov = openShellOverlay(modal, { onDismiss: () => resolve(null) });
     ov.card.classList.add("ib-move-card");
+    const excludeParent = exclude ? exclude.subfolder.includes("/") ? exclude.subfolder.slice(0, exclude.subfolder.lastIndexOf("/")) : "" : "";
+    const inExcluded = (type, sub) => exclude !== undefined && type === exclude.type && (sub === exclude.subfolder || sub.startsWith(`${exclude.subfolder}/`));
     const remembered = loadSavedDest();
     const cur = remembered ?? {
       type: SANDBOXED_TYPES.includes(start.type) ? start.type : "output",
@@ -2572,6 +2612,8 @@ function pickDestination(modal, start) {
         b.classList.toggle("is-active", b.dataset.type === cur.type);
       renderCrumbs();
       moveHere.textContent = `Move to ${cur.type}${cur.subfolder ? `/${cur.subfolder}` : ""}`;
+      const noop = exclude !== undefined && cur.type === exclude.type && cur.subfolder === excludeParent;
+      moveHere.disabled = noop || inExcluded(cur.type, cur.subfolder);
       list.innerHTML = "";
       status.textContent = "Loading…";
       try {
@@ -2583,6 +2625,8 @@ function pickDestination(modal, start) {
         status.textContent = "";
         for (const p of loadPins()) {
           if (p.type === cur.type && p.subfolder === cur.subfolder)
+            continue;
+          if (inExcluded(p.type, p.subfolder))
             continue;
           const r = document.createElement("button");
           r.type = "button";
@@ -2606,6 +2650,9 @@ function pickDestination(modal, start) {
           list.appendChild(none);
         }
         for (const d of data.dirs) {
+          const childSub = cur.subfolder ? `${cur.subfolder}/${d.name}` : d.name;
+          if (inExcluded(cur.type, childSub))
+            continue;
           const r = document.createElement("button");
           r.type = "button";
           r.className = "ib-move-row";
@@ -2795,6 +2842,9 @@ var BROWSER_CSS = `
     padding: 10px 12px; font-size: 13px; cursor: pointer; font-family: inherit; min-height: 40px;
 }
 .ib-move-row:hover { background: #2a2a3a; color: #fff; }
+/* "Move here" is disabled on a folder's own parent/subtree (a no-op or illegal
+   destination) — dim it so the reason for the dead button is legible. */
+.ib-move-card .cmp-ov-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .cmp-match { color: #ffd866; font-weight: 700; }
 .ib-card.is-focused { outline: 2px solid #6ba6ff; outline-offset: -2px; z-index: 1; }
 .ib-card.is-selected { border-color: #ffd866; background: #2a2a1f; }
@@ -2850,6 +2900,15 @@ var BROWSER_CSS = `
     color: #b8b8c0; font-size: 14px; line-height: 1; cursor: pointer;
 }
 .ib-dir-del:hover { background: #5c2a3c; color: #ff9eb0; }
+/* Folder move — corner overlay on dir cards, mirroring the delete button on the
+   opposite side (write-gated). */
+.ib-dir-move {
+    position: absolute; top: 4px; left: 4px; z-index: 2;
+    width: 34px; height: 34px; padding: 0; border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(0, 0, 0, 0.45);
+    color: #b8b8c0; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.ib-dir-move:hover { background: #3a3a4a; color: #fff; }
 /* Floating batch-action bar — appears while a selection exists. */
 .ib-selbar {
     position: absolute; left: 50%; transform: translateX(-50%);
