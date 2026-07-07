@@ -871,6 +871,7 @@ var RENAME_URL = "/image_browser/rename";
 var MOVE_URL = "/image_browser/move";
 var MOVE_MANY_URL = "/image_browser/move_many";
 var RMDIR_URL = "/image_browser/rmdir";
+var MKDIR_URL = "/image_browser/mkdir";
 var RATING_URL = "/image_browser/rating";
 var IMG_EXTS = new Set([
   ".png",
@@ -1039,6 +1040,9 @@ function moveMany(items, destType, destSubfolder) {
     dest_subfolder: destSubfolder
   });
 }
+function makeDir(type, subfolder, name) {
+  return postJSON(MKDIR_URL, { type, subfolder, name });
+}
 
 // src/browser.ts
 var STYLE_ID4 = "ib-style";
@@ -1194,9 +1198,14 @@ function openImageBrowser() {
   pinToggleEl.className = "ib-control ib-icon ib-pin-toggle";
   pinToggleEl.title = "Pin this folder";
   pinToggleEl.textContent = "\uD83D\uDCCC";
+  const newFolderEl = document.createElement("button");
+  newFolderEl.type = "button";
+  newFolderEl.className = "ib-control ib-icon ib-newfolder";
+  newFolderEl.title = "New folder";
+  newFolderEl.textContent = "\uD83D\uDCC1+";
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, pinToggleEl, sortEl, refreshEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, pinToggleEl, newFolderEl, sortEl, refreshEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -1302,6 +1311,7 @@ function openImageBrowser() {
     scrollHost.scrollTop = 0;
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
+  newFolderEl.addEventListener("click", () => void onNewFolder());
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
   pinToggleEl.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
@@ -1616,7 +1626,9 @@ function openImageBrowser() {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
       b.classList.toggle("is-active", b.dataset.type === state.type);
     }
-    selectToggleEl.style.display = SANDBOXED_TYPES.includes(state.type) ? "" : "none";
+    const canWrite = SANDBOXED_TYPES.includes(state.type);
+    selectToggleEl.style.display = canWrite ? "" : "none";
+    newFolderEl.style.display = canWrite ? "" : "none";
   }
   function renderPins() {
     const pins = loadPins();
@@ -2106,6 +2118,37 @@ ${when}`;
       }
     } catch (e) {
       reportError("Move failed", e);
+    }
+  }
+  async function onNewFolder() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const existing = new Set(state.dirs.map((d) => d.name));
+    const name = await promptInShell(modal, {
+      title: "New folder",
+      label: `Create in ${state.type}${state.subfolder ? `/${state.subfolder}` : ""}`,
+      value: "",
+      confirmLabel: "Create",
+      validate: (v) => {
+        if (!v)
+          return "Folder name required";
+        if (v.includes("/") || v.includes("\\"))
+          return "No slashes allowed";
+        if (v === "." || v === "..")
+          return "Invalid name";
+        if (existing.has(v))
+          return "A folder with that name already exists";
+        return null;
+      }
+    });
+    if (!name)
+      return;
+    try {
+      await makeDir(state.type, state.subfolder, name);
+      await loadAndRender({ preserveScroll: true });
+      notify({ severity: "success", summary: "Folder created", detail: `"${name}"` });
+    } catch (e) {
+      reportError("Create folder failed", e);
     }
   }
   async function onDeleteDir(name) {

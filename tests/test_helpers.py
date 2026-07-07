@@ -194,6 +194,70 @@ class TestRmdirEndpoint:
         resp = self._call({"type": "output", "subfolder": "", "name": "nope"})
         assert resp.status == 404
 
+
+class TestMkdirEndpoint:
+    """Drive the real /mkdir handler against a tmp dir (folder_paths stubbed).
+
+    Shares the sandboxed-dir write perimeter with /rmdir; here we cover the
+    happy path plus the collision (409) and missing-parent (404) contracts.
+    """
+
+    def _call(self, body):
+        return asyncio.run(ib.image_browser_mkdir(_FakeRequest(body)))
+
+    def _sandbox(self, tmp_path, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(tmp_path), raising=False
+        )
+
+    def test_creates_folder(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"type": "output", "subfolder": "", "name": "new"})
+        assert resp._body["ok"] is True
+        assert resp._body["name"] == "new"
+        assert (tmp_path / "new").is_dir()
+
+    def test_creates_nested_folder_under_existing_subfolder(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "sub").mkdir()
+        resp = self._call({"type": "output", "subfolder": "sub", "name": "child"})
+        assert resp._body["ok"] is True
+        assert (tmp_path / "sub" / "child").is_dir()
+
+    def test_existing_target_409s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "dup").mkdir()
+        resp = self._call({"type": "output", "subfolder": "", "name": "dup"})
+        assert resp.status == 409
+        assert resp._body["ok"] is False
+
+    def test_collision_with_existing_file_409s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "a.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "name": "a.png"})
+        assert resp.status == 409
+        assert (tmp_path / "a.png").is_file()  # untouched
+
+    def test_missing_parent_404s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"type": "output", "subfolder": "gone", "name": "child"})
+        assert resp.status == 404
+        assert not (tmp_path / "gone").exists()
+
+    def test_rejects_path_type(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"type": "path", "subfolder": "", "name": "new"})
+        assert resp.status == 400
+        assert "input/output/temp" in resp._body["error"]
+
+    def test_rejects_traversal_name(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"type": "output", "subfolder": "", "name": "../escape"})
+        assert resp.status == 400
+        assert not (tmp_path.parent / "escape").exists()
+
     def test_path_type_rejected(self, tmp_path, monkeypatch):
         self._sandbox(tmp_path, monkeypatch)
         resp = self._call({"type": "path", "subfolder": "", "name": "x"})
@@ -281,6 +345,10 @@ class TestBatchEndpointsRegistered:
     def test_rmdir_route_present(self):
         registered = PromptServer.instance.routes.registered
         assert any(r.method == "POST" and r.path == "/image_browser/rmdir" for r in registered)
+
+    def test_mkdir_route_present(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(r.method == "POST" and r.path == "/image_browser/mkdir" for r in registered)
 
 
 # Imported at the bottom so the class above can reference the stubbed server

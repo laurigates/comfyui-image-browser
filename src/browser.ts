@@ -34,6 +34,7 @@ import {
   imageThumbURL,
   joinAbs,
   type ListingFile,
+  makeDir,
   moveFile,
   moveMany,
   RATING_URL,
@@ -280,11 +281,28 @@ export function openImageBrowser(): ModalShellController {
   pinToggleEl.title = "Pin this folder";
   pinToggleEl.textContent = "📌";
 
+  // Create a folder in the current directory; hidden on the browse-only path
+  // tab (folder creation is a sandboxed write, like delete/rename/move).
+  const newFolderEl = document.createElement("button");
+  newFolderEl.type = "button";
+  newFolderEl.className = "ib-control ib-icon ib-newfolder";
+  newFolderEl.title = "New folder";
+  newFolderEl.textContent = "📁+";
+
   // One-tap navigation chips for the pinned folders; hidden while empty.
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
 
-  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, pinToggleEl, sortEl, refreshEl, pinsEl);
+  modal.toolbarEl.append(
+    tabsEl,
+    crumbsEl,
+    selectToggleEl,
+    pinToggleEl,
+    newFolderEl,
+    sortEl,
+    refreshEl,
+    pinsEl,
+  );
 
   // ---- Grid ------------------------------------------------------
   const gridEl = document.createElement("div");
@@ -427,6 +445,7 @@ export function openImageBrowser(): ModalShellController {
     scrollHost.scrollTop = 0;
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
+  newFolderEl.addEventListener("click", () => void onNewFolder());
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
   pinToggleEl.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
@@ -748,8 +767,11 @@ export function openImageBrowser(): ModalShellController {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
       b.classList.toggle("is-active", (b as HTMLElement).dataset.type === state.type);
     }
-    // The browse…/path tab is read-only — no selection to toggle there.
-    selectToggleEl.style.display = SANDBOXED_TYPES.includes(state.type) ? "" : "none";
+    // The browse…/path tab is read-only — no selection to toggle and no folder
+    // to create there (both are sandboxed writes).
+    const canWrite = SANDBOXED_TYPES.includes(state.type);
+    selectToggleEl.style.display = canWrite ? "" : "none";
+    newFolderEl.style.display = canWrite ? "" : "none";
   }
 
   function renderPins(): void {
@@ -1303,6 +1325,34 @@ export function openImageBrowser(): ModalShellController {
       }
     } catch (e) {
       reportError("Move failed", e);
+    }
+  }
+
+  async function onNewFolder(): Promise<void> {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const existing = new Set(state.dirs.map((d) => d.name));
+    const name = await promptInShell(modal, {
+      title: "New folder",
+      label: `Create in ${state.type}${state.subfolder ? `/${state.subfolder}` : ""}`,
+      value: "",
+      confirmLabel: "Create",
+      validate: (v) => {
+        if (!v) return "Folder name required";
+        if (v.includes("/") || v.includes("\\")) return "No slashes allowed";
+        if (v === "." || v === "..") return "Invalid name";
+        if (existing.has(v)) return "A folder with that name already exists";
+        return null;
+      },
+    });
+    if (!name) return;
+    try {
+      await makeDir(state.type, state.subfolder, name);
+      // Re-list so the new folder appears sorted among the others (and lands at
+      // its correct alphabetical slot) without flinging the view to the top.
+      await loadAndRender({ preserveScroll: true });
+      notify({ severity: "success", summary: "Folder created", detail: `"${name}"` });
+    } catch (e) {
+      reportError("Create folder failed", e);
     }
   }
 
