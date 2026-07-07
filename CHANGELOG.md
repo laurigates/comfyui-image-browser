@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.8...comfyui-image-browser-v0.1.9) (2026-07-07)
+
+
+### Features
+
+* add create-folder affordance ([#24](https://github.com/laurigates/comfyui-image-browser/issues/24)) ([c25a04e](https://github.com/laurigates/comfyui-image-browser/commit/c25a04e19308ff9f8c62e7dbe8dc5202f6ebe2c1))
+
 ## [0.1.8](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.7...comfyui-image-browser-v0.1.8) (2026-07-06)
 
 
