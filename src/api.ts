@@ -11,6 +11,7 @@ const DELETE_URL = "/image_browser/delete";
 const DELETE_MANY_URL = "/image_browser/delete_many";
 const RENAME_URL = "/image_browser/rename";
 const MOVE_URL = "/image_browser/move";
+const MOVE_DIR_URL = "/image_browser/move_dir";
 const MOVE_MANY_URL = "/image_browser/move_many";
 const RMDIR_URL = "/image_browser/rmdir";
 const MKDIR_URL = "/image_browser/mkdir";
@@ -222,6 +223,25 @@ export function moveFile(
   destSubfolder: string,
 ): Promise<void> {
   return postJSON(MOVE_URL, {
+    type,
+    subfolder,
+    name,
+    dest_type: destType,
+    dest_subfolder: destSubfolder,
+  });
+}
+
+// Move a folder (with its whole subtree) into another sandboxed root/subfolder.
+// The folder keeps its name; only its parent changes. Backend refuses moving a
+// folder into itself or a descendant (409/400 surfaces as a rejected promise).
+export function moveDir(
+  type: BrowseType,
+  subfolder: string,
+  name: string,
+  destType: BrowseType,
+  destSubfolder: string,
+): Promise<void> {
+  return postJSON(MOVE_DIR_URL, {
     type,
     subfolder,
     name,

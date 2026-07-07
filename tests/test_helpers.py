@@ -264,6 +264,183 @@ class TestMkdirEndpoint:
         assert resp.status == 400
 
 
+class TestMoveDirEndpoint:
+    """Drive the real /move_dir handler against a tmp dir (folder_paths stubbed).
+
+    All roots (input/output/temp) map to the same tmp_path here, so a move
+    between "roots" is a move between subfolders of one tree — enough to cover
+    the containment, self-nesting, collision and missing-dest contracts without
+    a real ComfyUI folder layout.
+    """
+
+    def _call(self, body):
+        return asyncio.run(ib.image_browser_move_dir(_FakeRequest(body)))
+
+    def _sandbox(self, tmp_path, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(tmp_path), raising=False
+        )
+
+    def test_moves_folder_into_subfolder(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        src = tmp_path / "album"
+        (src / "nested").mkdir(parents=True)
+        (src / "a.png").write_bytes(b"x")
+        (tmp_path / "dest").mkdir()
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "dest",
+            }
+        )
+        assert resp._body["ok"] is True
+        assert not src.exists()
+        assert (tmp_path / "dest" / "album" / "a.png").is_file()
+        assert (tmp_path / "dest" / "album" / "nested").is_dir()
+
+    def test_self_nesting_rejected(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "album" / "inner").mkdir(parents=True)
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "album/inner",
+            }
+        )
+        assert resp.status == 400
+        assert "into itself" in resp._body["error"]
+        assert (tmp_path / "album").is_dir()  # untouched
+
+    def test_same_source_and_dest_rejected(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "album").mkdir()
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "",
+            }
+        )
+        assert resp.status == 400
+        assert (tmp_path / "album").is_dir()
+
+    def test_collision_at_dest_409s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "album").mkdir()
+        (tmp_path / "dest" / "album").mkdir(parents=True)
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "dest",
+            }
+        )
+        assert resp.status == 409
+        assert (tmp_path / "album").is_dir()  # source untouched
+
+    def test_missing_dest_folder_404s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "album").mkdir()
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "gone",
+            }
+        )
+        assert resp.status == 404
+        assert (tmp_path / "album").is_dir()
+
+    def test_missing_source_404s(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "dest").mkdir()
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "nope",
+                "dest_type": "output",
+                "dest_subfolder": "dest",
+            }
+        )
+        assert resp.status == 404
+
+    def test_rejects_symlinked_source(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        outside = tmp_path / "real"
+        outside.mkdir()
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+        (tmp_path / "dest").mkdir()
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "link",
+                "dest_type": "output",
+                "dest_subfolder": "dest",
+            }
+        )
+        assert resp.status == 400
+        assert outside.is_dir()
+        assert not (tmp_path / "dest" / "link").exists()
+
+    def test_rejects_path_type_source(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call(
+            {
+                "type": "path",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "",
+            }
+        )
+        assert resp.status == 400
+        assert "input/output/temp" in resp._body["error"]
+
+    def test_rejects_path_type_dest(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "album").mkdir()
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "path",
+                "dest_subfolder": "",
+            }
+        )
+        assert resp.status == 400
+        assert "destination" in resp._body["error"]
+
+    def test_rejects_traversal_name(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "../escape",
+                "dest_type": "output",
+                "dest_subfolder": "",
+            }
+        )
+        assert resp.status == 400
+
+
 class TestParseRating:
     def test_accepts_star_range(self):
         for r in range(6):
@@ -341,6 +518,10 @@ class TestBatchEndpointsRegistered:
     def test_move_many_route_present(self):
         registered = PromptServer.instance.routes.registered
         assert any(r.method == "POST" and r.path == "/image_browser/move_many" for r in registered)
+
+    def test_move_dir_route_present(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(r.method == "POST" and r.path == "/image_browser/move_dir" for r in registered)
 
     def test_rmdir_route_present(self):
         registered = PromptServer.instance.routes.registered

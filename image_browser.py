@@ -18,7 +18,8 @@ Endpoint surface (all under /image_browser/):
     POST /delete       {type, subfolder, name}                      delete a file
     POST /delete_many  {items:[{type,subfolder,name}, …]}           batch delete
     POST /rename       {type, subfolder, name, new_name}            rename in place
-    POST /move         {type, subfolder, name, dest_type, dest_subfolder}   move
+    POST /move         {type, subfolder, name, dest_type, dest_subfolder}   move a file
+    POST /move_dir     {type, subfolder, name, dest_type, dest_subfolder}   move a folder
     POST /move_many    {items:[{type,subfolder,name}, …], dest_type, dest_subfolder} batch move
     POST /rmdir        {type, subfolder, name, recursive}           delete a folder
     POST /mkdir        {type, subfolder, name}                       create a folder
@@ -522,6 +523,74 @@ async def image_browser_move(request: web.Request) -> web.Response:
         shutil.move(src, dst)
     except OSError as exc:
         log.exception("move failed for %s -> %s", src, dst)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    return web.json_response({"ok": True})
+
+
+@PromptServer.instance.routes.post("/image_browser/move_dir")
+async def image_browser_move_dir(request: web.Request) -> web.Response:
+    """Move a folder (with its whole subtree) between sandboxed roots/subfolders.
+
+    Body: ``{type, subfolder, name, dest_type, dest_subfolder}``. The folder keeps
+    its name; only its parent changes. Same write perimeter as the file move plus
+    the folder resolver (``_resolve_sandboxed_dir``: sandboxed types only, bare
+    traversal-free name, containment) minus the media-extension gate — directories
+    have no extension. Symlinked source folders are rejected (moving through a link
+    could reach outside the sandbox), and the destination may not be the folder
+    itself or any descendant of it — moving a tree into its own subtree is refused
+    before ``shutil.move`` can create a loop or leave a partial copy behind.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+
+    name = body.get("name", "")
+    src, err = _resolve_sandboxed_dir(body.get("type", ""), body.get("subfolder") or "", name)
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert src is not None
+
+    # Destination keeps the same folder name; only the parent changes.
+    dst, err = _resolve_sandboxed_dir(
+        body.get("dest_type", ""), body.get("dest_subfolder") or "", name
+    )
+    if err:
+        return web.json_response({"ok": False, "error": f"destination: {err}"}, status=400)
+    assert dst is not None
+
+    if os.path.islink(src):
+        return web.json_response({"ok": False, "error": "refusing to move a symlink"}, status=400)
+    if not os.path.isdir(src):
+        return web.json_response({"ok": False, "error": "folder not found"}, status=404)
+
+    src_abs = os.path.abspath(src)
+    dst_abs = os.path.abspath(dst)
+    if src_abs == dst_abs:
+        return web.json_response(
+            {"ok": False, "error": "source and destination are the same"}, status=400
+        )
+    dst_dir = os.path.dirname(dst_abs)
+    # Refuse moving a folder into itself or any descendant — shutil.move would
+    # otherwise recurse into the just-created copy (or raise mid-copy, leaving a
+    # partial tree). commonpath == src means dst_dir is at or below src.
+    if os.path.commonpath([src_abs, dst_dir]) == src_abs:
+        return web.json_response(
+            {"ok": False, "error": "cannot move a folder into itself"}, status=400
+        )
+    if os.path.exists(dst_abs):
+        return web.json_response(
+            {"ok": False, "error": "a folder with that name already exists at the destination"},
+            status=409,
+        )
+    if not os.path.isdir(dst_dir):
+        return web.json_response(
+            {"ok": False, "error": "destination folder does not exist"}, status=404
+        )
+    try:
+        shutil.move(src, dst)
+    except OSError as exc:
+        log.exception("move_dir failed for %s -> %s", src, dst)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True})
 

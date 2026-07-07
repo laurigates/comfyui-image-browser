@@ -58,12 +58,13 @@ describe("touch multi-select affordances", () => {
     await new Promise((r) => setTimeout(r, 20));
   });
 
-  it("renders a selection checkbox per file card and a delete button per dir card", async () => {
+  it("renders a selection checkbox per file card and move+delete buttons per dir card", async () => {
     stubListing({ files: TWO_FILES, dirs: [{ name: "sub" }] });
     const modal = openShell();
     await openLoaded(modal);
     expect(modal.bodyEl.querySelectorAll(".ib-card.is-file .ib-check").length).toBe(2);
     expect(modal.bodyEl.querySelectorAll(".ib-card.is-dir .ib-dir-del").length).toBe(1);
+    expect(modal.bodyEl.querySelectorAll(".ib-card.is-dir .ib-dir-move").length).toBe(1);
     modal.close();
   });
 
@@ -337,6 +338,89 @@ describe("create folder affordance", () => {
     await vi.waitFor(() => {
       const btn = modal.dialog.querySelector(".ib-newfolder");
       if (btn.style.display !== "none") throw new Error("still visible");
+    });
+    modal.close();
+  });
+});
+
+describe("move folder", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it("the picker hides the source folder and POSTs /move_dir to the chosen destination", async () => {
+    // Records the /move_dir POST; answers /list for the grid and the picker's
+    // navigation (root shows album+dest; inside dest shows nothing).
+    const calls = [];
+    const listResp = (subfolder, dirs, files = []) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        type: "output",
+        subfolder,
+        path: `/out/${subfolder}`,
+        dirs,
+        files,
+        exists: true,
+      }),
+    });
+    const fetchFn = vi.fn(async (url, init) => {
+      calls.push({ url, init });
+      const s = String(url);
+      if (s.includes("/image_browser/move_dir")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      // Picker descends into "dest"; everything else is the root listing.
+      if (s.includes("subfolder=dest")) return listResp("dest", []);
+      return listResp("", [{ name: "album" }, { name: "dest" }], TWO_FILES);
+    });
+    vi.stubGlobal("fetch", fetchFn);
+
+    const modal = openShell();
+    await openLoaded(modal);
+
+    // Open the picker from the "album" folder's move button.
+    const albumCard = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-dir")).find(
+      (c) => c.dataset.name === "album",
+    );
+    albumCard.querySelector(".ib-dir-move").click();
+
+    // The picker lists "dest" but hides the source "album".
+    await vi.waitFor(() => {
+      const rows = Array.from(modal.dialog.querySelectorAll(".ib-move-card .ib-move-row"));
+      const names = rows.map((r) => r.dataset.name).filter(Boolean);
+      if (!names.includes("dest")) throw new Error("dest row missing");
+      if (names.includes("album")) throw new Error("source folder not hidden");
+    });
+
+    // Descend into "dest" and confirm the move.
+    Array.from(modal.dialog.querySelectorAll(".ib-move-card .ib-move-row"))
+      .find((r) => r.dataset.name === "dest")
+      .click();
+    const primary = await vi.waitFor(() => {
+      const p = modal.dialog.querySelector(".ib-move-card .cmp-ov-primary");
+      if (p?.textContent !== "Move to output/dest") throw new Error("picker did not descend");
+      if (p.disabled) throw new Error("move button disabled");
+      return p;
+    });
+    primary.click();
+
+    const move = await vi.waitFor(() => {
+      const c = calls.find((x) => String(x.url).includes("/image_browser/move_dir"));
+      if (!c) throw new Error("move_dir not called");
+      return c;
+    });
+    expect(move.init.method).toBe("POST");
+    expect(JSON.parse(move.init.body)).toEqual({
+      type: "output",
+      subfolder: "",
+      name: "album",
+      dest_type: "output",
+      dest_subfolder: "dest",
     });
     modal.close();
   });
