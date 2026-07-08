@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.10...comfyui-image-browser-v0.1.11) (2026-07-08)
+
+
+### Features
+
+* merge folder move into a same-named destination folder ([#28](https://github.com/laurigates/comfyui-image-browser/issues/28)) ([6f36bed](https://github.com/laurigates/comfyui-image-browser/commit/6f36bed073ae35cfbc28e68190a0bf8d965c345b))
+
 ## [0.1.10](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.9...comfyui-image-browser-v0.1.10) (2026-07-07)
 
 
