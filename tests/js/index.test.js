@@ -424,6 +424,79 @@ describe("move folder", () => {
     });
     modal.close();
   });
+
+  it("a merge with file conflicts keeps the source folder and surfaces the count", async () => {
+    // /move_dir merges into a same-named folder but reports a colliding file;
+    // the source folder is left behind, so it must remain in the grid after the
+    // handler re-lists (unlike a clean move, which removes the card).
+    const listResp = (subfolder, dirs, files = []) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        type: "output",
+        subfolder,
+        path: `/out/${subfolder}`,
+        dirs,
+        files,
+        exists: true,
+      }),
+    });
+    const fetchFn = vi.fn(async (url) => {
+      const s = String(url);
+      if (s.includes("/image_browser/move_dir")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            merged: true,
+            errors: [{ name: "clash.png", error: "already exists at the destination" }],
+          }),
+        };
+      }
+      if (s.includes("subfolder=dest")) return listResp("dest", []);
+      // The source "album" is still present after the merge (it kept the conflict).
+      return listResp("", [{ name: "album" }, { name: "dest" }], TWO_FILES);
+    });
+    vi.stubGlobal("fetch", fetchFn);
+
+    const modal = openShell();
+    await openLoaded(modal);
+
+    Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-dir"))
+      .find((c) => c.dataset.name === "album")
+      .querySelector(".ib-dir-move")
+      .click();
+
+    const destRow = await vi.waitFor(() => {
+      const r = Array.from(modal.dialog.querySelectorAll(".ib-move-card .ib-move-row")).find(
+        (row) => row.dataset.name === "dest",
+      );
+      if (!r) throw new Error("dest row missing");
+      return r;
+    });
+    destRow.click();
+    const primary = await vi.waitFor(() => {
+      const p = modal.dialog.querySelector(".ib-move-card .cmp-ov-primary");
+      if (p?.textContent !== "Move to output/dest") throw new Error("picker did not descend");
+      return p;
+    });
+    primary.click();
+
+    // The source folder survives the merge (conflict left in place) and a toast
+    // reports the leftover count.
+    await vi.waitFor(() => {
+      const stillThere = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-dir")).some(
+        (c) => c.dataset.name === "album",
+      );
+      if (!stillThere) throw new Error("source folder was removed despite the conflict");
+      if (!document.body.textContent.includes("left in place")) {
+        throw new Error("conflict count not surfaced");
+      }
+    });
+    modal.close();
+  });
 });
 
 describe("comfyui-image-browser standalone modal", () => {

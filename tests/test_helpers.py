@@ -334,10 +334,71 @@ class TestMoveDirEndpoint:
         assert resp.status == 400
         assert (tmp_path / "album").is_dir()
 
-    def test_collision_at_dest_409s(self, tmp_path, monkeypatch):
+    def test_same_named_folder_merges(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        # Source and an existing same-named destination folder hold disjoint files
+        # (plus a shared subfolder with its own disjoint files) — a clean merge.
+        src = tmp_path / "album"
+        (src / "sub").mkdir(parents=True)
+        (src / "new.png").write_bytes(b"n")
+        (src / "sub" / "deep.png").write_bytes(b"d")
+        existing = tmp_path / "dest" / "album"
+        (existing / "sub").mkdir(parents=True)
+        (existing / "old.png").write_bytes(b"o")
+        (existing / "sub" / "keep.png").write_bytes(b"k")
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "dest",
+            }
+        )
+        assert resp._body["ok"] is True
+        assert resp._body["merged"] is True
+        assert resp._body["errors"] == []
+        assert not src.exists()  # fully drained, so removed
+        # Both sides' files now live under the one destination folder.
+        assert (existing / "new.png").is_file()
+        assert (existing / "old.png").is_file()
+        assert (existing / "sub" / "deep.png").is_file()
+        assert (existing / "sub" / "keep.png").is_file()
+
+    def test_merge_file_collision_left_in_source(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        src = tmp_path / "album"
+        src.mkdir()
+        (src / "clash.png").write_bytes(b"src")
+        (src / "fresh.png").write_bytes(b"src")
+        existing = tmp_path / "dest" / "album"
+        existing.mkdir(parents=True)
+        (existing / "clash.png").write_bytes(b"dst")
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "album",
+                "dest_type": "output",
+                "dest_subfolder": "dest",
+            }
+        )
+        assert resp._body["ok"] is True
+        assert resp._body["merged"] is True
+        assert [e["name"] for e in resp._body["errors"]] == ["clash.png"]
+        # Non-colliding file moved; colliding one stayed put and was NOT clobbered.
+        assert (existing / "fresh.png").is_file()
+        assert (existing / "clash.png").read_bytes() == b"dst"
+        assert src.is_dir()  # not removed — still holds the conflict
+        assert (src / "clash.png").read_bytes() == b"src"
+        assert not (src / "fresh.png").exists()
+
+    def test_same_named_file_at_dest_409s(self, tmp_path, monkeypatch):
         self._sandbox(tmp_path, monkeypatch)
         (tmp_path / "album").mkdir()
-        (tmp_path / "dest" / "album").mkdir(parents=True)
+        # A *file* (not a folder) named "album" blocks the destination.
+        (tmp_path / "dest").mkdir()
+        (tmp_path / "dest" / "album").write_bytes(b"x")
         resp = self._call(
             {
                 "type": "output",

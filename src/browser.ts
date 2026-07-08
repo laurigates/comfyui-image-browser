@@ -1377,8 +1377,20 @@ export function openImageBrowser(): ModalShellController {
     );
     if (!dest) return;
     try {
-      await moveDir(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      const result = await moveDir(state.type, state.subfolder, name, dest.type, dest.subfolder);
       saveDest(dest);
+      const conflicts = result.errors ?? [];
+      if (conflicts.length > 0) {
+        // Merged into an existing folder, but some files already existed there —
+        // they were left in the source, so the folder still exists. Re-list to
+        // show what actually moved (keep pins: the source path is still live).
+        await loadAndRender({ preserveScroll: true });
+        reportError(
+          `Folder merged, ${conflicts.length} item(s) left in place`,
+          new Error(conflicts.map((c) => c.name).join(", ")),
+        );
+        return;
+      }
       state.dirs = state.dirs.filter((d) => d.name !== name);
       // A pin at (or under) the moved folder now points at a dead path — the
       // folder lives elsewhere. Drop it (same treatment as folder delete).
@@ -1393,7 +1405,7 @@ export function openImageBrowser(): ModalShellController {
       renderGrid();
       notify({
         severity: "success",
-        summary: "Folder moved",
+        summary: result.merged ? "Folder merged" : "Folder moved",
         detail: `"${name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`,
       });
     } catch (e) {

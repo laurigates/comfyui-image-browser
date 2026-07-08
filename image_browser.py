@@ -527,6 +527,36 @@ async def image_browser_move(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+def _merge_move_dir(src: str, dst: str) -> list[str]:
+    """Recursively move the contents of ``src`` into an existing directory ``dst``.
+
+    Both paths are absolute and ``dst`` already exists as a directory. Entries that
+    don't collide are moved with ``shutil.move`` (a fast rename on the same volume);
+    a subdirectory that collides with an existing destination subdirectory is merged
+    recursively; any other collision (file-vs-anything, or a source symlink) is left
+    untouched in the source and reported so nothing is silently overwritten. Returns
+    the source-relative paths of the entries that could not be merged. ``src`` is
+    removed only once it has been fully drained — a leftover conflict keeps it (and
+    the conflicting entries) in place.
+    """
+    conflicts: list[str] = []
+    for entry in os.listdir(src):
+        s = os.path.join(src, entry)
+        d = os.path.join(dst, entry)
+        if os.path.exists(d):
+            # Two real directories of the same name merge; anything else is a
+            # collision we refuse rather than clobber.
+            if os.path.isdir(d) and os.path.isdir(s) and not os.path.islink(s):
+                conflicts.extend(os.path.join(entry, c) for c in _merge_move_dir(s, d))
+            else:
+                conflicts.append(entry)
+        else:
+            shutil.move(s, d)
+    if not os.listdir(src):
+        os.rmdir(src)
+    return conflicts
+
+
 @PromptServer.instance.routes.post("/image_browser/move_dir")
 async def image_browser_move_dir(request: web.Request) -> web.Response:
     """Move a folder (with its whole subtree) between sandboxed roots/subfolders.
@@ -539,6 +569,13 @@ async def image_browser_move_dir(request: web.Request) -> web.Response:
     could reach outside the sandbox), and the destination may not be the folder
     itself or any descendant of it — moving a tree into its own subtree is refused
     before ``shutil.move`` can create a loop or leave a partial copy behind.
+
+    When a folder of the same name already exists at the destination the two are
+    **merged** (``ok:true`` with ``merged:true``): the source's contents move into
+    the existing folder, matching subdirectories merge recursively, and any entry
+    that would overwrite an existing file is left in the source and reported in
+    ``errors`` so nothing is clobbered. A same-named *file* at the destination is
+    still a hard collision (**409**).
     """
     body, err_resp = await _read_json(request)
     if err_resp:
@@ -579,10 +616,21 @@ async def image_browser_move_dir(request: web.Request) -> web.Response:
             {"ok": False, "error": "cannot move a folder into itself"}, status=400
         )
     if os.path.exists(dst_abs):
-        return web.json_response(
-            {"ok": False, "error": "a folder with that name already exists at the destination"},
-            status=409,
-        )
+        if not os.path.isdir(dst_abs):
+            # A same-named *file* blocks the folder — nowhere to merge into.
+            return web.json_response(
+                {"ok": False, "error": "a file with that name already exists at the destination"},
+                status=409,
+            )
+        # A same-named folder already exists — merge the source's contents into it
+        # instead of refusing. Colliding files are left in the source and reported.
+        try:
+            conflicts = _merge_move_dir(src_abs, dst_abs)
+        except OSError as exc:
+            log.exception("move_dir merge failed for %s -> %s", src, dst)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        errors = [{"name": c, "error": "already exists at the destination"} for c in conflicts]
+        return web.json_response({"ok": True, "merged": True, "errors": errors})
     if not os.path.isdir(dst_dir):
         return web.json_response(
             {"ok": False, "error": "destination folder does not exist"}, status=404

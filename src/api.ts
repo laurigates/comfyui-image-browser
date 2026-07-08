@@ -233,15 +233,26 @@ export function moveFile(
 
 // Move a folder (with its whole subtree) into another sandboxed root/subfolder.
 // The folder keeps its name; only its parent changes. Backend refuses moving a
-// folder into itself or a descendant (409/400 surfaces as a rejected promise).
+// folder into itself or a descendant (400/409 surfaces as a rejected promise).
+// When a folder of the same name already exists at the destination the two are
+// MERGED (ok:true, merged:true): non-colliding entries move in, matching
+// subfolders merge recursively, and any file that would be overwritten is left
+// in the source and reported in errors[] — so a merge with conflicts is NOT a
+// throw (like the batch endpoints).
+interface MoveDirResult {
+  ok: boolean;
+  merged?: boolean;
+  errors?: BatchError[];
+}
+
 export function moveDir(
   type: BrowseType,
   subfolder: string,
   name: string,
   destType: BrowseType,
   destSubfolder: string,
-): Promise<void> {
-  return postJSON(MOVE_DIR_URL, {
+): Promise<MoveDirResult> {
+  return postJSONBatch<MoveDirResult>(MOVE_DIR_URL, {
     type,
     subfolder,
     name,
