@@ -996,7 +996,7 @@ function moveFile(type, subfolder, name, destType, destSubfolder) {
   });
 }
 function moveDir(type, subfolder, name, destType, destSubfolder) {
-  return postJSON(MOVE_DIR_URL, {
+  return postJSONBatch(MOVE_DIR_URL, {
     type,
     subfolder,
     name,
@@ -2174,15 +2174,21 @@ ${when}`;
     if (!dest)
       return;
     try {
-      await moveDir(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      const result = await moveDir(state.type, state.subfolder, name, dest.type, dest.subfolder);
       saveDest(dest);
+      const conflicts = result.errors ?? [];
+      if (conflicts.length > 0) {
+        await loadAndRender({ preserveScroll: true });
+        reportError(`Folder merged, ${conflicts.length} item(s) left in place`, new Error(conflicts.map((c) => c.name).join(", ")));
+        return;
+      }
       state.dirs = state.dirs.filter((d) => d.name !== name);
       savePins(loadPins().filter((p) => p.type !== state.type || p.subfolder !== srcSub && !p.subfolder.startsWith(`${srcSub}/`)));
       renderPins();
       renderGrid();
       notify({
         severity: "success",
-        summary: "Folder moved",
+        summary: result.merged ? "Folder merged" : "Folder moved",
         detail: `"${name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`
       });
     } catch (e) {
