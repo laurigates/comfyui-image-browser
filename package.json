@@ -2,9 +2,9 @@
   "name": "comfyui-image-browser",
   "private": true,
   "type": "module",
-  "description": "Full-canvas file explorer for browsing and managing images across ComfyUI's input, output, temp and arbitrary paths — thumbnails plus delete, rename and move. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
+  "description": "Full-canvas file explorer for browsing and managing images across ComfyUI's input, output, temp and arbitrary paths \u2014 thumbnails plus delete, rename and move. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
   "scripts": {
-    "build": "bun build ./src/index.ts --target browser --format esm --outdir web/dist --external '/scripts/*'",
+    "build": "bun build ./src/index.ts --target browser --format esm --banner '/* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */' --outdir web/dist --external '/scripts/*'",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
