@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.11...comfyui-image-browser-v0.1.12) (2026-07-17)
+
+
+### Bug Fixes
+
+* **registry:** shrink registry tarball scan surface + hygiene guard ([#30](https://github.com/laurigates/comfyui-image-browser/issues/30)) ([c2ed7c8](https://github.com/laurigates/comfyui-image-browser/commit/c2ed7c8b64f24306046cb5ca5a2b6cb1010be118))
+
 ## [0.1.11](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.10...comfyui-image-browser-v0.1.11) (2026-07-08)
 
 
