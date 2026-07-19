@@ -12,7 +12,7 @@
     "knip": "knip"
   },
   "dependencies": {
-    "@laurigates/comfy-modal-kit": "^0.6.0"
+    "@laurigates/comfy-modal-kit": "^0.7.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
