@@ -7,7 +7,7 @@ repos:
       - id: ruff-format
 
   - repo: https://github.com/biomejs/pre-commit
-    rev: v0.6.1
+    rev: v2.5.5
     hooks:
       - id: biome-check
         # Match the biome.json schema (2.4.x) and CI's setup-biome pin so the
