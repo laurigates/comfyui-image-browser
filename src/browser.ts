@@ -69,6 +69,7 @@ interface BrowserState {
   sortKey: string;
   sortDir: string;
   query: string;
+  viewMode: ViewMode;
 }
 
 interface SavedSort {
@@ -90,6 +91,29 @@ function loadSavedSort(): SavedSort | null {
 function saveSort(key: string, dir: string): void {
   try {
     localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
+  } catch {
+    /* private-mode / disabled storage — non-fatal */
+  }
+}
+
+// View mode: "folder" is the classic one-directory-at-a-time grid; "flat"
+// recursively merges the current subfolder's whole subtree into one grid, each
+// card labelled with its relative subpath (for finding recent renders wherever
+// they landed). Persisted so the preference survives reopening the browser.
+type ViewMode = "folder" | "flat";
+const VIEW_STORAGE_KEY = "comfyui-image-browser:view";
+
+function loadSavedView(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder";
+  } catch {
+    return "folder";
+  }
+}
+
+function saveView(mode: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, mode);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -192,6 +216,7 @@ export function openImageBrowser(): ModalShellController {
     sortKey: "mtime",
     sortDir: "desc",
     query: "",
+    viewMode: loadSavedView(),
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -266,6 +291,15 @@ export function openImageBrowser(): ModalShellController {
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
 
+  // Flat view toggle: fold the whole subtree into one grid. Sandboxed roots
+  // only (recursion over an arbitrary base path is out of scope), so it hides
+  // on the browse-only path tab like the other write-gated controls.
+  const viewToggleEl = document.createElement("button");
+  viewToggleEl.type = "button";
+  viewToggleEl.className = "ib-control ib-icon ib-view-toggle";
+  viewToggleEl.title = "Flat view (all subfolders)";
+  viewToggleEl.textContent = "≣";
+
   // Touch entry point into multi-select — the keyboard path (Space / v) has no
   // affordance on a phone. Hidden on the browse-only path tab (renderTabs).
   const selectToggleEl = document.createElement("button");
@@ -297,6 +331,7 @@ export function openImageBrowser(): ModalShellController {
   modal.toolbarEl.append(
     tabsEl,
     crumbsEl,
+    viewToggleEl,
     selectToggleEl,
     pinToggleEl,
     newFolderEl,
@@ -352,10 +387,32 @@ export function openImageBrowser(): ModalShellController {
   modal.headerEl.appendChild(selectedBadge);
 
   // ---- Navigation helpers ---------------------------------------
+  // Flat view is only in effect on a sandboxed root — the toggle is hidden on
+  // the path tab and the backend ignores `recursive` there, so guard both.
+  function isFlat(): boolean {
+    return state.viewMode === "flat" && SANDBOXED_TYPES.includes(state.type);
+  }
+
+  // A file's effective subfolder: in folder view every file lives in
+  // state.subfolder; in flat view each carries its own subpath, joined onto the
+  // request subfolder. Every per-file address (thumbnail, open, delete, rename,
+  // move, rating, selection key) routes through this so both views share one
+  // code path.
+  function fileSub(f: ListingFile): string {
+    const sp = f.subpath || "";
+    if (!sp) return state.subfolder;
+    const base = state.subfolder.replace(/\/+$/, "");
+    return base ? `${base}/${sp}` : sp;
+  }
+
   // Key for the CURRENT location's scroll-memory slot. Distinct namespaces
   // for the sandboxed roots (`type:subfolder`) and path mode (`path:/abs`).
+  // Flat view gets its own slot so toggling doesn't restore the wrong offset.
   function locationKey(): string {
-    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}`;
+    const view = isFlat() ? ":flat" : "";
+    return state.type === "path"
+      ? `path:${state.absPath}`
+      : `${state.type}:${state.subfolder}${view}`;
   }
 
   // Called on every navigation BEFORE the location mutates, so returning to
@@ -447,6 +504,15 @@ export function openImageBrowser(): ModalShellController {
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
+  viewToggleEl.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    rememberScroll();
+    state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
+    saveView(state.viewMode);
+    // Flat needs a recursive re-fetch; the folder→flat and flat→folder slots
+    // are distinct in scrollMemory, so loadAndRender lands each at its own place.
+    loadAndRender();
+  });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
   pinToggleEl.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
@@ -532,10 +598,22 @@ export function openImageBrowser(): ModalShellController {
       navigateInto(card.dataset.name as string);
       return;
     }
-    // File card.
-    const name = card.dataset.name as string;
-    const ext = card.dataset.ext || "";
+    // File card. Resolve the exact file by index — in flat view a bare name is
+    // not unique across subfolders, so every handler takes the file object.
     const idx = Number(card.dataset.idx);
+    const f = renderedFiles[idx];
+    // Subpath label (flat view) — a tap jumps to that folder in folder view.
+    const subEl = target.closest(".ib-subpath") as HTMLElement | null;
+    if (subEl) {
+      e.stopPropagation();
+      rememberScroll();
+      state.viewMode = "folder";
+      saveView("folder");
+      state.subfolder = subEl.dataset.sub || "";
+      loadAndRender();
+      return;
+    }
+    if (!f) return;
     // Checkbox tap — toggle selection (drag-selects are handled on pointermove
     // and suppress this click).
     if (target.closest("[data-check]")) {
@@ -551,16 +629,16 @@ export function openImageBrowser(): ModalShellController {
       // the defensive gate keeps a stale DOM from posting a path write.
       if (!row || !SANDBOXED_TYPES.includes(state.type)) return;
       const cur = Number(row.dataset.rating || "0");
-      setStarRating(name, row, nextRating(cur, Number(star.dataset.val)));
+      setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
       return;
     }
     if (actionBtn) {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
-      if (action === "open") openFull(name, ext);
-      else if (action === "delete") onDelete(name);
-      else if (action === "rename") onRename(name);
-      else if (action === "move") onMove(name);
+      if (action === "open") openFull(f);
+      else if (action === "delete") onDelete(f);
+      else if (action === "rename") onRename(f);
+      else if (action === "move") onMove(f);
       return;
     }
     // In select mode a card tap toggles selection instead of opening.
@@ -568,7 +646,7 @@ export function openImageBrowser(): ModalShellController {
       toggleSelectionAt(idx);
       return;
     }
-    openFull(name, ext);
+    openFull(f);
   });
 
   // ---- Touch gestures: long-press → select mode; drag over ☑ → range select
@@ -673,54 +751,58 @@ export function openImageBrowser(): ModalShellController {
   });
 
   // ---- File actions ---------------------------------------------
-  function setStarRating(name: string, row: HTMLElement, next: number): void {
+  // Every handler takes the ListingFile (not a bare name) so it addresses the
+  // right file in flat view, where names repeat across subfolders. fileSub(f)
+  // resolves the file's real subfolder; view updates filter by object identity
+  // (x !== f) so a same-named sibling in another folder is never touched.
+  function setStarRating(f: ListingFile, row: HTMLElement, next: number): void {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
-    const f = state.files.find((x) => x.name === name);
-    if (f) f.rating = next;
+    f.rating = next;
     const addr: RatingAddress = {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
       absDir: state.absPath,
-      name,
+      name: f.name,
     };
     postRating(RATING_URL, addr, next)
       .then((confirmed) => {
         if (confirmed !== next) {
           applyStars(row, confirmed);
-          if (f) f.rating = confirmed;
+          f.rating = confirmed;
         }
       })
       .catch((e) => {
         reportError("Rating failed", e);
         applyStars(row, prev);
-        if (f) f.rating = prev;
+        f.rating = prev;
       });
   }
 
-  function openFull(name: string, _ext: string): void {
-    const url = fullSrcURL(state.type, state.subfolder, name, state.absPath);
+  function openFull(f: ListingFile): void {
+    const url = fullSrcURL(state.type, fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
 
-  async function onDelete(name: string): Promise<void> {
+  async function onDelete(f: ListingFile): Promise<void> {
     const ok = await confirmInShell(modal, {
       title: "Delete file?",
-      message: `Permanently delete "${name}"? This cannot be undone.`,
+      message: `Permanently delete "${f.name}"? This cannot be undone.`,
       confirmLabel: "Delete",
       danger: true,
     });
     if (!ok) return;
     try {
-      await deleteFile(state.type, state.subfolder, name);
-      state.files = state.files.filter((f) => f.name !== name);
+      await deleteFile(state.type, fileSub(f), f.name);
+      state.files = state.files.filter((x) => x !== f);
       renderGrid();
     } catch (e) {
       reportError("Delete failed", e);
     }
   }
 
-  async function onRename(name: string): Promise<void> {
+  async function onRename(f: ListingFile): Promise<void> {
+    const name = f.name;
     const dot = name.lastIndexOf(".");
     const ext = dot >= 0 ? name.slice(dot) : "";
     const newName = await promptInShell(modal, {
@@ -738,30 +820,29 @@ export function openImageBrowser(): ModalShellController {
     });
     if (!newName || newName === name) return;
     try {
-      await renameFile(state.type, state.subfolder, name, newName);
-      const f = state.files.find((x) => x.name === name);
-      if (f) f.name = newName;
+      await renameFile(state.type, fileSub(f), name, newName);
+      f.name = newName;
       renderGrid();
     } catch (e) {
       reportError("Rename failed", e);
     }
   }
 
-  async function onMove(name: string): Promise<void> {
+  async function onMove(f: ListingFile): Promise<void> {
     const dest = await pickDestination(modal, {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
     });
     if (!dest) return;
     try {
-      await moveFile(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      await moveFile(state.type, fileSub(f), f.name, dest.type, dest.subfolder);
       saveDest(dest);
-      state.files = state.files.filter((f) => f.name !== name);
+      state.files = state.files.filter((x) => x !== f);
       renderGrid();
       notify({
         severity: "success",
         summary: "Moved",
-        detail: `"${name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`,
+        detail: `"${f.name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`,
       });
     } catch (e) {
       reportError("Move failed", e);
@@ -774,10 +855,14 @@ export function openImageBrowser(): ModalShellController {
       b.classList.toggle("is-active", (b as HTMLElement).dataset.type === state.type);
     }
     // The browse…/path tab is read-only — no selection to toggle and no folder
-    // to create there (both are sandboxed writes).
+    // to create there (both are sandboxed writes). Flat view is likewise
+    // sandboxed-only, so its toggle hides there too.
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     selectToggleEl.style.display = canWrite ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
+    viewToggleEl.style.display = canWrite ? "" : "none";
+    viewToggleEl.classList.toggle("is-active", isFlat());
+    viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
   }
 
   function renderPins(): void {
@@ -853,10 +938,18 @@ export function openImageBrowser(): ModalShellController {
         type: state.type,
         subfolder: state.subfolder,
         path: state.absPath,
+        recursive: isFlat(),
       });
       state.dirs = data.dirs || [];
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
+      if (data.truncated) {
+        notify({
+          severity: "warn",
+          summary: "Showing the first files",
+          detail: `This folder has more than ${state.files.length} files; the flat view is truncated.`,
+        });
+      }
     } catch (e) {
       // Surface via the copyable notify() popup (reportError) in addition to
       // the inline status text — a list-load failure was previously
@@ -878,22 +971,17 @@ export function openImageBrowser(): ModalShellController {
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
     const ext = (f.ext || "").toLowerCase();
+    const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
       return {
         kind: "img",
-        src: imageThumbURL(
-          state.type,
-          state.subfolder,
-          f.name,
-          state.absPath,
-          thumbVersion(f.mtime, f.size),
-        ),
+        src: imageThumbURL(state.type, sub, f.name, state.absPath, thumbVersion(f.mtime, f.size)),
       };
     }
     if (VIDEO_EXTS.has(ext)) {
       return {
         kind: "video",
-        src: videoSrcURL(state.type, state.subfolder, f.name, state.absPath),
+        src: videoSrcURL(state.type, sub, f.name, state.absPath),
       };
     }
     return { kind: "icon", text: "📄" };
@@ -907,8 +995,11 @@ export function openImageBrowser(): ModalShellController {
     const savedScrollTop = scrollHost.scrollTop;
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
+    // Flat view collapses the subtree into files only — no ".." card and no
+    // folder cards (the backend returns dirs:[] recursively anyway).
+    const flat = isFlat();
 
-    const showUp = canGoUp();
+    const showUp = !flat && canGoUp();
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ib-card is-up";
@@ -916,28 +1007,33 @@ export function openImageBrowser(): ModalShellController {
       gridEl.appendChild(up);
     }
 
-    for (const d of state.dirs) {
-      if (q && !d.name.toLowerCase().includes(q)) continue;
-      const c = document.createElement("div");
-      c.className = "ib-card is-dir";
-      c.dataset.name = d.name;
-      // Folder move/delete ride the same write gate as the file mutations. Move
-      // opens the destination picker (excluding the folder's own subtree); an
-      // empty folder deletes outright, a non-empty one confirms with the nested
-      // file count (see onMoveDir / onDeleteDir).
-      const dirBtns = canWrite
-        ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` +
-          `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">🗑</button>`
-        : "";
-      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">📁</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
-      gridEl.appendChild(c);
+    if (!flat) {
+      for (const d of state.dirs) {
+        if (q && !d.name.toLowerCase().includes(q)) continue;
+        const c = document.createElement("div");
+        c.className = "ib-card is-dir";
+        c.dataset.name = d.name;
+        // Folder move/delete ride the same write gate as the file mutations. Move
+        // opens the destination picker (excluding the folder's own subtree); an
+        // empty folder deletes outright, a non-empty one confirms with the nested
+        // file count (see onMoveDir / onDeleteDir).
+        const dirBtns = canWrite
+          ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` +
+            `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">🗑</button>`
+          : "";
+        c.innerHTML = `<div class="ib-thumb ib-thumb-icon">📁</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
+        gridEl.appendChild(c);
+      }
     }
 
     let files = state.files;
     if (q) {
       const scored: { f: ListingFile; score: number }[] = [];
       for (const f of files) {
-        const r = fuzzyScore(q, f.name);
+        // In flat view the query matches "subpath/name" so you can filter by
+        // folder too; folder view matches the bare filename as before.
+        const hay = flat && f.subpath ? `${f.subpath}/${f.name}` : f.name;
+        const r = fuzzyScore(q, hay);
         if (r) scored.push({ f, score: r.score });
       }
       scored.sort((a, b) => b.score - a.score);
@@ -956,6 +1052,9 @@ export function openImageBrowser(): ModalShellController {
       if (!f) continue;
       const c = document.createElement("div");
       c.className = "ib-card is-file";
+      // Flat cards carry a subpath row above the thumb — the marker lets CSS
+      // drop the selection checkbox below it so the two don't overlap.
+      if (flat) c.classList.add("is-flat");
       if (fi === focusIndex) c.classList.add("is-focused");
       if (isSelected(f)) c.classList.add("is-selected");
       c.dataset.name = f.name;
@@ -993,7 +1092,16 @@ export function openImageBrowser(): ModalShellController {
       const checkBtn = canWrite
         ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>`
         : "";
+      // Flat view: show the file's folder above the thumbnail. It's a button —
+      // tapping it drops back to folder view at that directory. Top-level files
+      // (subpath "") get a muted "/" so the row height stays consistent.
+      const subLabel = flat
+        ? f.subpath
+          ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
+          : `<div class="ib-subpath is-root" title="Top level">/</div>`
+        : "";
       c.innerHTML = `
+        ${subLabel}
         ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
@@ -1067,7 +1175,7 @@ export function openImageBrowser(): ModalShellController {
 
   function isSelected(f: ListingFile): boolean {
     if (state.type === "path") return false;
-    return selected.has(selectionKey(state.type, state.subfolder, f.name));
+    return selected.has(selectionKey(state.type, fileSub(f), f.name));
   }
 
   function fileCards(): HTMLElement[] {
@@ -1144,9 +1252,10 @@ export function openImageBrowser(): ModalShellController {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     const f = renderedFiles[i];
     if (!f) return;
-    const key = selectionKey(state.type, state.subfolder, f.name);
+    const sub = fileSub(f);
+    const key = selectionKey(state.type, sub, f.name);
     if (selected.has(key)) selected.delete(key);
-    else selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+    else selected.set(key, { file: f, type: state.type, subfolder: sub });
     refreshSelectionClasses();
     updateSelectedCount();
   }
@@ -1158,8 +1267,9 @@ export function openImageBrowser(): ModalShellController {
     for (let i = lo; i <= hi; i++) {
       const f = renderedFiles[i];
       if (!f) continue;
-      const key = selectionKey(state.type, state.subfolder, f.name);
-      if (on) selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+      const sub = fileSub(f);
+      const key = selectionKey(state.type, sub, f.name);
+      if (on) selected.set(key, { file: f, type: state.type, subfolder: sub });
       else selected.delete(key);
     }
     refreshSelectionClasses();
@@ -1173,9 +1283,9 @@ export function openImageBrowser(): ModalShellController {
     for (let k = lo; k <= hi; k++) {
       const f = renderedFiles[k];
       if (!f) continue;
-      const key = selectionKey(state.type, state.subfolder, f.name);
-      if (!selected.has(key))
-        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+      const sub = fileSub(f);
+      const key = selectionKey(state.type, sub, f.name);
+      if (!selected.has(key)) selected.set(key, { file: f, type: state.type, subfolder: sub });
     }
     refreshSelectionClasses();
     updateSelectedCount();
@@ -1184,9 +1294,9 @@ export function openImageBrowser(): ModalShellController {
   function selectAllVisible(): void {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     for (const f of renderedFiles) {
-      const key = selectionKey(state.type, state.subfolder, f.name);
-      if (!selected.has(key))
-        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+      const sub = fileSub(f);
+      const key = selectionKey(state.type, sub, f.name);
+      if (!selected.has(key)) selected.set(key, { file: f, type: state.type, subfolder: sub });
     }
     refreshSelectionClasses();
     updateSelectedCount();
@@ -1220,7 +1330,7 @@ export function openImageBrowser(): ModalShellController {
     }
     const f = renderedFiles[focusIndex];
     if (!f || state.type === "path") return [];
-    return [{ type: state.type, subfolder: state.subfolder, name: f.name }];
+    return [{ type: state.type, subfolder: fileSub(f), name: f.name }];
   }
 
   function setPending(op: "d" | "y" | "g"): void {
@@ -1261,18 +1371,18 @@ export function openImageBrowser(): ModalShellController {
     try {
       const result = await deleteMany(items);
       const errored = new Set((result.errors ?? []).map((e) => e.name));
-      // items span all folders (selection persists across tabs); state.files is
-      // only the current folder — so scope the view removal to items that match
-      // this folder, not by bare name (a same-named file elsewhere must stay).
-      const removedHere = new Set(
+      // items span all folders (selection persists across tabs, and flat view
+      // shows many at once); state.files is only what's on screen — so scope the
+      // view removal by full selection key (type+subfolder+name), not bare name,
+      // so a same-named file in another folder is never removed by mistake.
+      const succeeded = new Set(
         items
-          .filter(
-            (it) =>
-              it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name),
-          )
-          .map((it) => it.name),
+          .filter((it) => it.type === state.type && !errored.has(it.name))
+          .map((it) => selectionKey(it.type, it.subfolder, it.name)),
       );
-      state.files = state.files.filter((f) => !removedHere.has(f.name));
+      state.files = state.files.filter(
+        (f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)),
+      );
       for (const it of items) {
         if (!errored.has(it.name)) selected.delete(selectionKey(it.type, it.subfolder, it.name));
       }
@@ -1306,19 +1416,20 @@ export function openImageBrowser(): ModalShellController {
       }
       updateSelectedCount();
       if (result.moved > 0) saveDest(dest);
-      if (dest.type === state.type && dest.subfolder === state.subfolder) {
-        // Files may have arrived INTO the current folder — re-list it.
+      if (isFlat() || (dest.type === state.type && dest.subfolder === state.subfolder)) {
+        // Flat view spans the whole subtree (a moved file may still be in view),
+        // and in folder view files may have arrived INTO the current folder —
+        // either way the surgical removal below can't be trusted, so re-list.
         await loadAndRender({ preserveScroll: true });
       } else {
-        const removedHere = new Set(
+        const succeeded = new Set(
           items
-            .filter(
-              (it) =>
-                it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name),
-            )
-            .map((it) => it.name),
+            .filter((it) => it.type === state.type && !errored.has(it.name))
+            .map((it) => selectionKey(it.type, it.subfolder, it.name)),
         );
-        state.files = state.files.filter((f) => !removedHere.has(f.name));
+        state.files = state.files.filter(
+          (f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)),
+        );
         renderGrid();
       }
       if (result.errors && result.errors.length > 0) {
@@ -1741,13 +1852,13 @@ export function openImageBrowser(): ModalShellController {
       case "o":
         e.preventDefault();
         e.stopPropagation();
-        if (f) openFull(f.name, f.ext || "");
+        if (f) openFull(f);
         break;
       case "r":
         if (SANDBOXED_TYPES.includes(state.type) && f) {
           e.preventDefault();
           e.stopPropagation();
-          void onRename(f.name);
+          void onRename(f);
         }
         break;
       case "m":
@@ -2117,6 +2228,18 @@ const BROWSER_CSS = `
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 .ib-meta { padding: 0 8px 4px; font-size: 10.5px; color: #888; }
+/* Flat-view folder label above the thumbnail — a tap jumps to that folder. */
+.ib-subpath {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
+    color: #8a9bb5; background: transparent; border: 0;
+    border-bottom: 1px solid #2a2a32;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; cursor: pointer;
+}
+.ib-subpath:hover { color: #9ec6ff; background: #23232e; }
+.ib-subpath.is-root { color: #555; cursor: default; }
+.ib-subpath.is-root:hover { background: transparent; color: #555; }
 .ib-stars { display: flex; justify-content: center; gap: 1px; padding: 0 6px 4px; }
 .ib-star {
     appearance: none; background: transparent; border: 0; padding: 5px 4px;
@@ -2174,6 +2297,9 @@ const BROWSER_CSS = `
 .ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
 .ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
 .ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.ib-view-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+/* Keep the selection checkbox over the thumbnail corner, below the subpath row. */
+.ib-card.is-flat .ib-check { top: 30px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
 /* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
    order:10 keeps them below the crumbs row when the toolbar wraps on phones. */

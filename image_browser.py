@@ -72,6 +72,13 @@ STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
 
 SANDBOXED_TYPES = ("input", "output", "temp")
 
+# Upper bound on files a recursive ("flat") listing returns before it stops
+# walking and flags the response ``truncated``. A flat view over a deep output
+# tree does one PIL header read + one XMP probe per file, so an unbounded walk
+# on a pathological tree could hang the request; the cap keeps it responsive and
+# lets the frontend surface "showing the first N".
+FLAT_LIST_CAP = 5000
+
 # Cover the common cases mimetypes.guess_type misses on some distros.
 mimetypes.add_type("image/webp", ".webp")
 mimetypes.add_type("image/avif", ".avif")
@@ -219,6 +226,95 @@ async def image_browser_base(request: web.Request) -> web.Response:
     )
 
 
+def _scan_file_entry(
+    path: str, name: str, ext: str, st: os.stat_result, image_subset: set[str]
+) -> dict[str, Any]:
+    """Build a listing dict for one file (size + rating probes, shared by the
+    flat and recursive listers so both emit the identical file shape)."""
+    width: int | None = None
+    height: int | None = None
+    if ext in image_subset:
+        try:
+            # PIL.Image.open is lazy — only the header is read until pixel
+            # access, so .size is cheap.
+            with Image.open(path) as im:
+                width, height = im.size
+        except Exception as exc:
+            # Corrupt/unreadable image header — omit dimensions but keep
+            # listing the file.
+            log.debug("size probe failed for %s: %s", path, exc)
+    try:
+        rating = xmp_meta.read_rating_cached(path, st)
+    except Exception as exc:
+        # Bad/absent XMP packet — treat as unrated (0) but record why the
+        # probe failed.
+        log.debug("rating probe failed for %s: %s", path, exc)
+        rating = 0
+    return {
+        "name": name,
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+        "width": width,
+        "height": height,
+        "ext": ext,
+        "rating": rating,
+    }
+
+
+def _walk_files(
+    base: str, exts: set[str], image_subset: set[str], cap: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Recursively collect files under ``base`` for the flat view.
+
+    Each file dict carries a ``subpath`` (forward-slashed, relative to ``base``,
+    "" at the top level) so the frontend can address its thumbnail and mutations.
+    Symlinks are never followed (``follow_symlinks=False`` on every probe), so
+    the walk stays inside the resolved sandbox root. Hidden entries and the
+    ``clipspace`` / ``__pycache__`` dirs are skipped just like the flat lister.
+    Returns ``(files, truncated)``; ``truncated`` is True once ``cap`` is hit.
+    """
+    files: list[dict[str, Any]] = []
+    # DFS over scandir (not os.walk) so each directory keeps DirEntry's cheap,
+    # symlink-safe is_dir/is_file/stat — the same guards the flat lister uses.
+    stack: list[tuple[str, str]] = [("", base)]
+    while stack:
+        subpath, directory = stack.pop()
+        try:
+            with os.scandir(directory) as it:
+                subdirs: list[tuple[str, str]] = []
+                for entry in it:
+                    try:
+                        if entry.name.startswith("."):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name in ("clipspace", "__pycache__"):
+                                continue
+                            child = f"{subpath}/{entry.name}" if subpath else entry.name
+                            subdirs.append((child, entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(entry.name)[1].lower()
+                            if ext not in exts:
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            fd = _scan_file_entry(entry.path, entry.name, ext, st, image_subset)
+                            fd["subpath"] = subpath
+                            files.append(fd)
+                            if len(files) >= cap:
+                                return files, True
+                    except OSError:
+                        continue
+                # Descend in name order (reversed onto the LIFO stack) so a
+                # truncated walk stops at a predictable, stable frontier.
+                subdirs.sort(key=lambda s: s[0].lower(), reverse=True)
+                stack.extend(subdirs)
+        except OSError:
+            # An unreadable subdirectory is skipped, not fatal — a flat view
+            # should surface everything it can reach rather than 403/500 on one
+            # bad dir.
+            continue
+    return files, False
+
+
 @PromptServer.instance.routes.get("/image_browser/list")
 async def image_browser_list(request: web.Request) -> web.Response:
     q = request.rel_url.query
@@ -227,6 +323,10 @@ async def image_browser_list(request: web.Request) -> web.Response:
     abs_path = q.get("path", "")
     exts = _parse_extensions(q.get("extensions", ""))
     image_subset = exts & IMG_EXTS
+    # Flat/recursive listing is a sandboxed-root affordance only — recursing an
+    # arbitrary base path (type=path, e.g. models/) is out of scope and could be
+    # enormous, so the flag is ignored there.
+    recursive = q.get("recursive", "") in ("1", "true", "yes") and type_name in SANDBOXED_TYPES
 
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
@@ -243,63 +343,43 @@ async def image_browser_list(request: web.Request) -> web.Response:
                 "dirs": [],
                 "files": [],
                 "exists": False,
+                "truncated": False,
             }
         )
 
     dirs: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
-    try:
-        with os.scandir(base) as it:
-            for entry in it:
-                try:
-                    if entry.name.startswith("."):
+    truncated = False
+
+    if recursive:
+        # Flat view: no folder cards, files carry their relative subpath.
+        files, truncated = _walk_files(base, exts, image_subset, FLAT_LIST_CAP)
+    else:
+        try:
+            with os.scandir(base) as it:
+                for entry in it:
+                    try:
+                        if entry.name.startswith("."):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name in ("clipspace", "__pycache__"):
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            dirs.append({"name": entry.name, "mtime": st.st_mtime})
+                        elif entry.is_file(follow_symlinks=False):
+                            ext = os.path.splitext(entry.name)[1].lower()
+                            if ext not in exts:
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            files.append(
+                                _scan_file_entry(entry.path, entry.name, ext, st, image_subset)
+                            )
+                    except OSError:
                         continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if entry.name in ("clipspace", "__pycache__"):
-                            continue
-                        st = entry.stat(follow_symlinks=False)
-                        dirs.append({"name": entry.name, "mtime": st.st_mtime})
-                    elif entry.is_file(follow_symlinks=False):
-                        ext = os.path.splitext(entry.name)[1].lower()
-                        if ext not in exts:
-                            continue
-                        st = entry.stat(follow_symlinks=False)
-                        width: int | None = None
-                        height: int | None = None
-                        if ext in image_subset:
-                            try:
-                                # PIL.Image.open is lazy — only the header is read
-                                # until pixel access, so .size is cheap.
-                                with Image.open(entry.path) as im:
-                                    width, height = im.size
-                            except Exception as exc:
-                                # Corrupt/unreadable image header — omit
-                                # dimensions but keep listing the file.
-                                log.debug("size probe failed for %s: %s", entry.path, exc)
-                        try:
-                            rating = xmp_meta.read_rating_cached(entry.path, st)
-                        except Exception as exc:
-                            # Bad/absent XMP packet — treat as unrated (0) but
-                            # record why the probe failed.
-                            log.debug("rating probe failed for %s: %s", entry.path, exc)
-                            rating = 0
-                        files.append(
-                            {
-                                "name": entry.name,
-                                "mtime": st.st_mtime,
-                                "size": st.st_size,
-                                "width": width,
-                                "height": height,
-                                "ext": ext,
-                                "rating": rating,
-                            }
-                        )
-                except OSError:
-                    continue
-    except PermissionError as exc:
-        return web.json_response({"ok": False, "error": str(exc)}, status=403)
-    except OSError as exc:
-        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except PermissionError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=403)
+        except OSError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     dirs.sort(key=lambda d: d["name"].lower())
     files.sort(key=lambda f: f["mtime"], reverse=True)
@@ -313,6 +393,7 @@ async def image_browser_list(request: web.Request) -> web.Response:
             "dirs": dirs,
             "files": files,
             "exists": True,
+            "truncated": truncated,
         }
     )
 

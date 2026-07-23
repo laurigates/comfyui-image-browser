@@ -47,6 +47,65 @@ async function openLoaded(modal) {
   });
 }
 
+// The two files a recursive ("flat") /list returns: one nested under sub/deep,
+// one at the top level (subpath ""). Newest-first, like the backend sorts.
+const FLAT_FILES = [
+  {
+    name: "deep.png",
+    ext: ".png",
+    mtime: 3,
+    size: 10,
+    width: 8,
+    height: 8,
+    rating: 0,
+    subpath: "sub/deep",
+  },
+  { name: "top.png", ext: ".png", mtime: 2, size: 10, width: 8, height: 8, rating: 0, subpath: "" },
+];
+
+/**
+ * Fetch stub that answers /base, folder /list, recursive /list (recursive=1 →
+ * FLAT_FILES with subpaths, dirs:[]), and records every call so a test can
+ * assert on the request URL/body. Non-list POSTs (move/…) resolve ok:true.
+ */
+function recursiveListFetch(calls = []) {
+  return vi.fn(async (url, init) => {
+    const s = String(url);
+    calls.push({ url: s, init });
+    if (s.includes("/image_browser/base")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          base_path: "/",
+          input_dir: "",
+          output_dir: "",
+          temp_dir: "",
+        }),
+      };
+    }
+    if (s.includes("/image_browser/list")) {
+      const recursive = s.includes("recursive=1");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "output",
+          subfolder: "",
+          path: "/out",
+          dirs: recursive ? [] : [{ name: "sub" }],
+          files: recursive ? FLAT_FILES : TWO_FILES,
+          exists: true,
+          truncated: false,
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  });
+}
+
 describe("touch multi-select affordances", () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -499,6 +558,136 @@ describe("move folder", () => {
   });
 });
 
+describe("flat (recursive) view", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it("the flat toggle re-fetches with recursive=1 and labels each card with its subpath", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", recursiveListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+    // Folder view first — no subpath labels.
+    expect(modal.bodyEl.querySelector(".ib-subpath")).toBeNull();
+
+    modal.dialog.querySelector(".ib-view-toggle").click();
+    await vi.waitFor(() => {
+      if (!modal.bodyEl.querySelector(".ib-subpath")) throw new Error("no subpath label");
+    });
+    // A recursive listing was requested.
+    expect(calls.some((c) => c.url.includes("recursive=1"))).toBe(true);
+    // The nested file shows its folder as a clickable label carrying the full
+    // effective subfolder in data-sub (for the jump-to-folder affordance).
+    const label = Array.from(modal.bodyEl.querySelectorAll(".ib-subpath")).find(
+      (e) => e.textContent === "sub/deep",
+    );
+    expect(label).toBeTruthy();
+    expect(label.dataset.sub).toBe("sub/deep");
+    // The toggle reads as engaged.
+    expect(modal.dialog.querySelector(".ib-view-toggle").classList.contains("is-active")).toBe(
+      true,
+    );
+    modal.close();
+  });
+
+  it("tapping a subpath label drops back to folder view at that directory", async () => {
+    localStorage.setItem("comfyui-image-browser:view", "flat");
+    vi.stubGlobal("fetch", recursiveListFetch());
+    const modal = openShell();
+    await openLoaded(modal);
+
+    const label = await vi.waitFor(() => {
+      const e = Array.from(modal.bodyEl.querySelectorAll(".ib-subpath")).find(
+        (x) => x.textContent === "sub/deep",
+      );
+      if (!e) throw new Error("subpath label not rendered");
+      return e;
+    });
+    label.click();
+    // Folder view at output/sub/deep — crumbs reflect the descent, labels gone.
+    await vi.waitFor(() => {
+      const crumbs = Array.from(modal.dialog.querySelectorAll(".ib-crumbs .ib-crumb")).map(
+        (c) => c.textContent,
+      );
+      if (crumbs.join("/") !== "output/sub/deep") throw new Error(`crumbs: ${crumbs}`);
+      if (modal.bodyEl.querySelector(".ib-subpath")) throw new Error("still in flat view");
+    });
+    modal.close();
+  });
+
+  it("a flat-view card's move sends the file's real (nested) subfolder", async () => {
+    localStorage.setItem("comfyui-image-browser:view", "flat");
+    localStorage.setItem(
+      "comfyui-image-browser:pins",
+      JSON.stringify([{ type: "input", subfolder: "keep" }]),
+    );
+    const calls = [];
+    vi.stubGlobal("fetch", recursiveListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+
+    const deepCard = await vi.waitFor(() => {
+      const c = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-file")).find(
+        (card) => card.querySelector(".ib-subpath")?.textContent === "sub/deep",
+      );
+      if (!c) throw new Error("deep card not rendered");
+      return c;
+    });
+    deepCard.querySelector('[data-action="move"]').click();
+
+    const pinRow = await vi.waitFor(() => {
+      const r = modal.dialog.querySelector(".ib-move-row.is-pin");
+      if (!r) throw new Error("pin row missing");
+      return r;
+    });
+    pinRow.click();
+    const primary = await vi.waitFor(() => {
+      const p = modal.dialog.querySelector(".ib-move-card .cmp-ov-primary");
+      if (p?.textContent !== "Move to input/keep") throw new Error("picker did not jump");
+      return p;
+    });
+    primary.click();
+
+    const move = await vi.waitFor(() => {
+      const c = calls.find(
+        (x) => x.url.includes("/image_browser/move") && !x.url.includes("move_"),
+      );
+      if (!c) throw new Error("move not called");
+      return c;
+    });
+    expect(JSON.parse(move.init.body)).toEqual({
+      type: "output",
+      subfolder: "sub/deep",
+      name: "deep.png",
+      dest_type: "input",
+      dest_subfolder: "keep",
+    });
+    modal.close();
+  });
+
+  it("hides the flat toggle on the browse-only path tab", async () => {
+    localStorage.setItem("comfyui-image-browser:view", "flat");
+    vi.stubGlobal("fetch", recursiveListFetch());
+    const modal = openShell();
+    await openLoaded(modal);
+    expect(modal.dialog.querySelector(".ib-view-toggle").style.display).not.toBe("none");
+
+    modal.dialog.querySelector('.ib-tab[data-type="path"]').click();
+    await vi.waitFor(() => {
+      if (modal.dialog.querySelector(".ib-view-toggle").style.display !== "none") {
+        throw new Error("flat toggle still visible on path tab");
+      }
+      // Path tab is never recursive even with the flat preference set.
+      if (modal.bodyEl.querySelector(".ib-subpath")) throw new Error("flat labels on path tab");
+    });
+    modal.close();
+  });
+});
+
 describe("comfyui-image-browser standalone modal", () => {
   it("mounts the full-canvas browser scaffold into the modal shell", () => {
     const modal = openShell();
@@ -510,6 +699,8 @@ describe("comfyui-image-browser standalone modal", () => {
     // Toolbar tabs for the sandboxed roots + arbitrary path mode.
     const tabs = modal.dialog.querySelectorAll(".ib-tab");
     expect(tabs.length).toBe(4);
+    // The flat-view toggle is part of the toolbar scaffold.
+    expect(modal.dialog.querySelector(".ib-view-toggle")).not.toBeNull();
     modal.close();
   });
 

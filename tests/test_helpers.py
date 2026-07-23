@@ -9,6 +9,7 @@ folder_paths and is covered by the live smoke matrix.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import image_browser as ib
 
@@ -131,6 +132,100 @@ class _FakeRequest:
 
     async def json(self):
         return self._body
+
+
+class _FakeGetRequest:
+    """Stand-in for a GET aiohttp.web.Request — /list reads .rel_url.query."""
+
+    def __init__(self, query):
+        self.rel_url = SimpleNamespace(query=query)
+
+
+class TestListRecursive:
+    """Drive the real /list handler in flat (recursive) mode against a tmp tree.
+
+    /list is a GET reading .rel_url.query, so it needs the query-shaped fake
+    above (not the json-body _FakeRequest the POST endpoints use)."""
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def test_recursive_lists_descendants_with_subpath(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "top.png").write_bytes(b"x")
+        deep = tmp_path / "sub" / "deep"
+        deep.mkdir(parents=True)
+        (deep / "nested.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        assert resp._body["ok"] is True
+        # Flat view returns files only — no folder cards.
+        assert resp._body["dirs"] == []
+        assert resp._body["truncated"] is False
+        by_name = {f["name"]: f for f in resp._body["files"]}
+        assert by_name["top.png"]["subpath"] == ""
+        assert by_name["nested.png"]["subpath"] == "sub/deep"
+
+    def test_non_recursive_is_single_level_without_subpath(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "top.png").write_bytes(b"x")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "nested.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": ""})
+        names = {f["name"] for f in resp._body["files"]}
+        assert names == {"top.png"}  # the nested file is not surfaced
+        assert "subpath" not in resp._body["files"][0]
+        assert [d["name"] for d in resp._body["dirs"]] == ["sub"]
+
+    def test_recursive_prunes_hidden_and_pycache(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "keep.png").write_bytes(b"x")
+        (tmp_path / ".hidden.png").write_bytes(b"x")
+        cache = tmp_path / "__pycache__"
+        cache.mkdir()
+        (cache / "junk.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        names = {f["name"] for f in resp._body["files"]}
+        assert names == {"keep.png"}
+
+    def test_recursive_does_not_follow_symlinked_dir(self, tmp_path, monkeypatch):
+        base = tmp_path / "root"
+        base.mkdir()
+        self._sandbox(base, monkeypatch)
+        outside = tmp_path / "outside"  # sibling of base — reachable only via the link
+        outside.mkdir()
+        (outside / "secret.png").write_bytes(b"x")
+        inner = base / "inner"
+        inner.mkdir()
+        (inner / "link").symlink_to(outside, target_is_directory=True)
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        names = {f["name"] for f in resp._body["files"]}
+        assert "secret.png" not in names
+
+    def test_recursive_ignored_for_path_type(self, tmp_path, monkeypatch):
+        # recursive is a sandboxed-root affordance; type=path stays single-level.
+        (tmp_path / "top.png").write_bytes(b"x")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "nested.png").write_bytes(b"x")
+        resp = self._call({"type": "path", "path": str(tmp_path), "recursive": "1"})
+        names = {f["name"] for f in resp._body["files"]}
+        assert names == {"top.png"}
+        assert [d["name"] for d in resp._body["dirs"]] == ["sub"]
+
+    def test_recursive_truncates_at_cap(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "FLAT_LIST_CAP", 3)
+        for i in range(5):
+            (tmp_path / f"f{i}.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        assert resp._body["truncated"] is True
+        assert len(resp._body["files"]) == 3
 
 
 class TestRmdirEndpoint:

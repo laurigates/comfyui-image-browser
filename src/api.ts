@@ -68,6 +68,11 @@ export interface ListingFile {
   width?: number;
   height?: number;
   rating?: number;
+  // Present only in a recursive ("flat") listing: the file's directory relative
+  // to the requested subfolder (forward-slashed, "" for a top-level file). The
+  // grid labels the card with it and joins it onto the request subfolder to
+  // address the file's thumbnail and mutations.
+  subpath?: string;
 }
 
 interface ListResponse {
@@ -79,12 +84,17 @@ interface ListResponse {
   dirs: ListingDir[];
   files: ListingFile[];
   exists: boolean;
+  // True when a recursive listing hit the backend's file cap and stopped early.
+  truncated?: boolean;
 }
 
 interface ListParams {
   type: BrowseType;
   subfolder?: string;
   path?: string;
+  // Flat view: walk the subfolder recursively and return every descendant file
+  // (each tagged with its subpath). Sandboxed roots only — ignored for path mode.
+  recursive?: boolean;
 }
 
 let BASE_PATHS: BasePaths | null = null;
@@ -114,6 +124,7 @@ export async function fetchListing(p: ListParams): Promise<ListResponse> {
   } else {
     params.set("type", p.type);
     params.set("subfolder", p.subfolder || "");
+    if (p.recursive) params.set("recursive", "1");
   }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
