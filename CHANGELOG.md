@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.12...comfyui-image-browser-v0.1.13) (2026-07-23)
+
+
+### Features
+
+* flat (recursive) thumbnail view across subfolders ([#33](https://github.com/laurigates/comfyui-image-browser/issues/33)) ([8f1ba0f](https://github.com/laurigates/comfyui-image-browser/commit/8f1ba0f87e9fbcdd426e5ebbbe3abee61912fc83))
+
 ## [0.1.12](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.11...comfyui-image-browser-v0.1.12) (2026-07-17)
 
 
