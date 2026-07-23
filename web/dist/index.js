@@ -926,6 +926,8 @@ async function fetchListing(p) {
   } else {
     params.set("type", p.type);
     params.set("subfolder", p.subfolder || "");
+    if (p.recursive)
+      params.set("recursive", "1");
   }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok)
@@ -1085,6 +1087,19 @@ function saveSort(key, dir) {
     localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
   } catch {}
 }
+var VIEW_STORAGE_KEY = "comfyui-image-browser:view";
+function loadSavedView() {
+  try {
+    return localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder";
+  } catch {
+    return "folder";
+  }
+}
+function saveView(mode) {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {}
+}
 var MOVE_DEST_STORAGE_KEY = "comfyui-image-browser:move-dest";
 function loadSavedDest() {
   try {
@@ -1143,7 +1158,8 @@ function openImageBrowser() {
     files: [],
     sortKey: "mtime",
     sortDir: "desc",
-    query: ""
+    query: "",
+    viewMode: loadSavedView()
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -1200,6 +1216,11 @@ function openImageBrowser() {
   refreshEl.className = "ib-control ib-icon";
   refreshEl.title = "Refresh";
   refreshEl.textContent = "⟳";
+  const viewToggleEl = document.createElement("button");
+  viewToggleEl.type = "button";
+  viewToggleEl.className = "ib-control ib-icon ib-view-toggle";
+  viewToggleEl.title = "Flat view (all subfolders)";
+  viewToggleEl.textContent = "≣";
   const selectToggleEl = document.createElement("button");
   selectToggleEl.type = "button";
   selectToggleEl.className = "ib-control ib-icon ib-select-toggle";
@@ -1217,7 +1238,7 @@ function openImageBrowser() {
   newFolderEl.textContent = "\uD83D\uDCC1+";
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, selectToggleEl, pinToggleEl, newFolderEl, sortEl, refreshEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, sortEl, refreshEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -1249,8 +1270,19 @@ function openImageBrowser() {
   selectedBadge.className = "ib-selected-badge";
   selectedBadge.style.display = "none";
   modal.headerEl.appendChild(selectedBadge);
+  function isFlat() {
+    return state.viewMode === "flat" && SANDBOXED_TYPES.includes(state.type);
+  }
+  function fileSub(f) {
+    const sp = f.subpath || "";
+    if (!sp)
+      return state.subfolder;
+    const base = state.subfolder.replace(/\/+$/, "");
+    return base ? `${base}/${sp}` : sp;
+  }
   function locationKey() {
-    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}`;
+    const view = isFlat() ? ":flat" : "";
+    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}${view}`;
   }
   function rememberScroll() {
     scrollMemory.set(locationKey(), scrollHost.scrollTop);
@@ -1324,6 +1356,14 @@ function openImageBrowser() {
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
+  viewToggleEl.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    rememberScroll();
+    state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
+    saveView(state.viewMode);
+    loadAndRender();
+  });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
   pinToggleEl.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type))
@@ -1420,9 +1460,20 @@ function openImageBrowser() {
       navigateInto(card.dataset.name);
       return;
     }
-    const name = card.dataset.name;
-    const ext = card.dataset.ext || "";
     const idx = Number(card.dataset.idx);
+    const f = renderedFiles[idx];
+    const subEl = target.closest(".ib-subpath");
+    if (subEl) {
+      e.stopPropagation();
+      rememberScroll();
+      state.viewMode = "folder";
+      saveView("folder");
+      state.subfolder = subEl.dataset.sub || "";
+      loadAndRender();
+      return;
+    }
+    if (!f)
+      return;
     if (target.closest("[data-check]")) {
       e.stopPropagation();
       toggleSelectionAt(idx);
@@ -1435,27 +1486,27 @@ function openImageBrowser() {
       if (!row || !SANDBOXED_TYPES.includes(state.type))
         return;
       const cur = Number(row.dataset.rating || "0");
-      setStarRating(name, row, nextRating(cur, Number(star.dataset.val)));
+      setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
       return;
     }
     if (actionBtn) {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
       if (action === "open")
-        openFull(name, ext);
+        openFull(f);
       else if (action === "delete")
-        onDelete(name);
+        onDelete(f);
       else if (action === "rename")
-        onRename(name);
+        onRename(f);
       else if (action === "move")
-        onMove(name);
+        onMove(f);
       return;
     }
     if (selectMode && SANDBOXED_TYPES.includes(state.type)) {
       toggleSelectionAt(idx);
       return;
     }
-    openFull(name, ext);
+    openFull(f);
   });
   let suppressClick = false;
   let dragSel = null;
@@ -1540,53 +1591,50 @@ function openImageBrowser() {
     if (selectMode || suppressClick || lpTimer)
       e.preventDefault();
   });
-  function setStarRating(name, row, next) {
+  function setStarRating(f, row, next) {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
-    const f = state.files.find((x) => x.name === name);
-    if (f)
-      f.rating = next;
+    f.rating = next;
     const addr = {
       type: state.type,
-      subfolder: state.subfolder,
+      subfolder: fileSub(f),
       absDir: state.absPath,
-      name
+      name: f.name
     };
     postRating(RATING_URL, addr, next).then((confirmed) => {
       if (confirmed !== next) {
         applyStars(row, confirmed);
-        if (f)
-          f.rating = confirmed;
+        f.rating = confirmed;
       }
     }).catch((e) => {
       reportError("Rating failed", e);
       applyStars(row, prev);
-      if (f)
-        f.rating = prev;
+      f.rating = prev;
     });
   }
-  function openFull(name, _ext) {
-    const url = fullSrcURL(state.type, state.subfolder, name, state.absPath);
+  function openFull(f) {
+    const url = fullSrcURL(state.type, fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
-  async function onDelete(name) {
+  async function onDelete(f) {
     const ok = await confirmInShell(modal, {
       title: "Delete file?",
-      message: `Permanently delete "${name}"? This cannot be undone.`,
+      message: `Permanently delete "${f.name}"? This cannot be undone.`,
       confirmLabel: "Delete",
       danger: true
     });
     if (!ok)
       return;
     try {
-      await deleteFile(state.type, state.subfolder, name);
-      state.files = state.files.filter((f) => f.name !== name);
+      await deleteFile(state.type, fileSub(f), f.name);
+      state.files = state.files.filter((x) => x !== f);
       renderGrid();
     } catch (e) {
       reportError("Delete failed", e);
     }
   }
-  async function onRename(name) {
+  async function onRename(f) {
+    const name = f.name;
     const dot = name.lastIndexOf(".");
     const ext = dot >= 0 ? name.slice(dot) : "";
     const newName = await promptInShell(modal, {
@@ -1609,31 +1657,29 @@ function openImageBrowser() {
     if (!newName || newName === name)
       return;
     try {
-      await renameFile(state.type, state.subfolder, name, newName);
-      const f = state.files.find((x) => x.name === name);
-      if (f)
-        f.name = newName;
+      await renameFile(state.type, fileSub(f), name, newName);
+      f.name = newName;
       renderGrid();
     } catch (e) {
       reportError("Rename failed", e);
     }
   }
-  async function onMove(name) {
+  async function onMove(f) {
     const dest = await pickDestination(modal, {
       type: state.type,
-      subfolder: state.subfolder
+      subfolder: fileSub(f)
     });
     if (!dest)
       return;
     try {
-      await moveFile(state.type, state.subfolder, name, dest.type, dest.subfolder);
+      await moveFile(state.type, fileSub(f), f.name, dest.type, dest.subfolder);
       saveDest(dest);
-      state.files = state.files.filter((f) => f.name !== name);
+      state.files = state.files.filter((x) => x !== f);
       renderGrid();
       notify({
         severity: "success",
         summary: "Moved",
-        detail: `"${name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`
+        detail: `"${f.name}" → ${dest.type}${dest.subfolder ? `/${dest.subfolder}` : ""}`
       });
     } catch (e) {
       reportError("Move failed", e);
@@ -1646,6 +1692,9 @@ function openImageBrowser() {
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     selectToggleEl.style.display = canWrite ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
+    viewToggleEl.style.display = canWrite ? "" : "none";
+    viewToggleEl.classList.toggle("is-active", isFlat());
+    viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
   }
   function renderPins() {
     const pins = loadPins();
@@ -1716,11 +1765,19 @@ function openImageBrowser() {
       const data = await fetchListing({
         type: state.type,
         subfolder: state.subfolder,
-        path: state.absPath
+        path: state.absPath,
+        recursive: isFlat()
       });
       state.dirs = data.dirs || [];
       state.files = data.files || [];
       modal.setStatus(data.exists ? "" : "Directory not found.");
+      if (data.truncated) {
+        notify({
+          severity: "warn",
+          summary: "Showing the first files",
+          detail: `This folder has more than ${state.files.length} files; the flat view is truncated.`
+        });
+      }
     } catch (e) {
       reportError("Failed to load directory", e);
       modal.setStatus(`Error: ${e.message}`);
@@ -1735,16 +1792,17 @@ function openImageBrowser() {
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
+    const sub = fileSub(f);
     if (IMG_EXTS.has(ext)) {
       return {
         kind: "img",
-        src: imageThumbURL(state.type, state.subfolder, f.name, state.absPath, thumbVersion(f.mtime, f.size))
+        src: imageThumbURL(state.type, sub, f.name, state.absPath, thumbVersion(f.mtime, f.size))
       };
     }
     if (VIDEO_EXTS.has(ext)) {
       return {
         kind: "video",
-        src: videoSrcURL(state.type, state.subfolder, f.name, state.absPath)
+        src: videoSrcURL(state.type, sub, f.name, state.absPath)
       };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
@@ -1754,28 +1812,32 @@ function openImageBrowser() {
     const savedScrollTop = scrollHost.scrollTop;
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
-    const showUp = canGoUp();
+    const flat = isFlat();
+    const showUp = !flat && canGoUp();
     if (showUp) {
       const up = document.createElement("div");
       up.className = "ib-card is-up";
       up.innerHTML = `<div class="ib-thumb ib-thumb-icon">↑</div><div class="ib-name">..</div>`;
       gridEl.appendChild(up);
     }
-    for (const d of state.dirs) {
-      if (q && !d.name.toLowerCase().includes(q))
-        continue;
-      const c = document.createElement("div");
-      c.className = "ib-card is-dir";
-      c.dataset.name = d.name;
-      const dirBtns = canWrite ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` + `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
-      c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
-      gridEl.appendChild(c);
+    if (!flat) {
+      for (const d of state.dirs) {
+        if (q && !d.name.toLowerCase().includes(q))
+          continue;
+        const c = document.createElement("div");
+        c.className = "ib-card is-dir";
+        c.dataset.name = d.name;
+        const dirBtns = canWrite ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` + `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
+        c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
+        gridEl.appendChild(c);
+      }
     }
     let files = state.files;
     if (q) {
       const scored = [];
       for (const f of files) {
-        const r = fuzzyScore(q, f.name);
+        const hay = flat && f.subpath ? `${f.subpath}/${f.name}` : f.name;
+        const r = fuzzyScore(q, hay);
         if (r)
           scored.push({ f, score: r.score });
       }
@@ -1798,6 +1860,8 @@ function openImageBrowser() {
         continue;
       const c = document.createElement("div");
       c.className = "ib-card is-file";
+      if (flat)
+        c.classList.add("is-flat");
       if (fi === focusIndex)
         c.classList.add("is-focused");
       if (isSelected(f))
@@ -1819,7 +1883,9 @@ ${when}`;
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
       const starsRow = canWrite ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
       const checkBtn = canWrite ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>` : "";
+      const subLabel = flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
+        ${subLabel}
         ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
@@ -1884,7 +1950,7 @@ ${when}`;
   function isSelected(f) {
     if (state.type === "path")
       return false;
-    return selected.has(selectionKey(state.type, state.subfolder, f.name));
+    return selected.has(selectionKey(state.type, fileSub(f), f.name));
   }
   function fileCards() {
     return Array.from(gridEl.querySelectorAll(".ib-card.is-file"));
@@ -1962,11 +2028,12 @@ ${when}`;
     const f = renderedFiles[i];
     if (!f)
       return;
-    const key = selectionKey(state.type, state.subfolder, f.name);
+    const sub = fileSub(f);
+    const key = selectionKey(state.type, sub, f.name);
     if (selected.has(key))
       selected.delete(key);
     else
-      selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+      selected.set(key, { file: f, type: state.type, subfolder: sub });
     refreshSelectionClasses();
     updateSelectedCount();
   }
@@ -1979,9 +2046,10 @@ ${when}`;
       const f = renderedFiles[i];
       if (!f)
         continue;
-      const key = selectionKey(state.type, state.subfolder, f.name);
+      const sub = fileSub(f);
+      const key = selectionKey(state.type, sub, f.name);
       if (on)
-        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+        selected.set(key, { file: f, type: state.type, subfolder: sub });
       else
         selected.delete(key);
     }
@@ -1997,9 +2065,10 @@ ${when}`;
       const f = renderedFiles[k];
       if (!f)
         continue;
-      const key = selectionKey(state.type, state.subfolder, f.name);
+      const sub = fileSub(f);
+      const key = selectionKey(state.type, sub, f.name);
       if (!selected.has(key))
-        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+        selected.set(key, { file: f, type: state.type, subfolder: sub });
     }
     refreshSelectionClasses();
     updateSelectedCount();
@@ -2008,9 +2077,10 @@ ${when}`;
     if (!SANDBOXED_TYPES.includes(state.type))
       return;
     for (const f of renderedFiles) {
-      const key = selectionKey(state.type, state.subfolder, f.name);
+      const sub = fileSub(f);
+      const key = selectionKey(state.type, sub, f.name);
       if (!selected.has(key))
-        selected.set(key, { file: f, type: state.type, subfolder: state.subfolder });
+        selected.set(key, { file: f, type: state.type, subfolder: sub });
     }
     refreshSelectionClasses();
     updateSelectedCount();
@@ -2045,7 +2115,7 @@ ${when}`;
     const f = renderedFiles[focusIndex];
     if (!f || state.type === "path")
       return [];
-    return [{ type: state.type, subfolder: state.subfolder, name: f.name }];
+    return [{ type: state.type, subfolder: fileSub(f), name: f.name }];
   }
   function setPending(op) {
     clearPending();
@@ -2078,8 +2148,8 @@ ${when}`;
     try {
       const result = await deleteMany(items);
       const errored = new Set((result.errors ?? []).map((e) => e.name));
-      const removedHere = new Set(items.filter((it) => it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name)).map((it) => it.name));
-      state.files = state.files.filter((f) => !removedHere.has(f.name));
+      const succeeded = new Set(items.filter((it) => it.type === state.type && !errored.has(it.name)).map((it) => selectionKey(it.type, it.subfolder, it.name)));
+      state.files = state.files.filter((f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)));
       for (const it of items) {
         if (!errored.has(it.name))
           selected.delete(selectionKey(it.type, it.subfolder, it.name));
@@ -2116,11 +2186,11 @@ ${when}`;
       updateSelectedCount();
       if (result.moved > 0)
         saveDest(dest);
-      if (dest.type === state.type && dest.subfolder === state.subfolder) {
+      if (isFlat() || dest.type === state.type && dest.subfolder === state.subfolder) {
         await loadAndRender({ preserveScroll: true });
       } else {
-        const removedHere = new Set(items.filter((it) => it.type === state.type && it.subfolder === state.subfolder && !errored.has(it.name)).map((it) => it.name));
-        state.files = state.files.filter((f) => !removedHere.has(f.name));
+        const succeeded = new Set(items.filter((it) => it.type === state.type && !errored.has(it.name)).map((it) => selectionKey(it.type, it.subfolder, it.name)));
+        state.files = state.files.filter((f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)));
         renderGrid();
       }
       if (result.errors && result.errors.length > 0) {
@@ -2515,13 +2585,13 @@ ${when}`;
         e.preventDefault();
         e.stopPropagation();
         if (f)
-          openFull(f.name, f.ext || "");
+          openFull(f);
         break;
       case "r":
         if (SANDBOXED_TYPES.includes(state.type) && f) {
           e.preventDefault();
           e.stopPropagation();
-          onRename(f.name);
+          onRename(f);
         }
         break;
       case "m":
@@ -2819,6 +2889,18 @@ var BROWSER_CSS = `
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 .ib-meta { padding: 0 8px 4px; font-size: 10.5px; color: #888; }
+/* Flat-view folder label above the thumbnail — a tap jumps to that folder. */
+.ib-subpath {
+    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
+    color: #8a9bb5; background: transparent; border: 0;
+    border-bottom: 1px solid #2a2a32;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; cursor: pointer;
+}
+.ib-subpath:hover { color: #9ec6ff; background: #23232e; }
+.ib-subpath.is-root { color: #555; cursor: default; }
+.ib-subpath.is-root:hover { background: transparent; color: #555; }
 .ib-stars { display: flex; justify-content: center; gap: 1px; padding: 0 6px 4px; }
 .ib-star {
     appearance: none; background: transparent; border: 0; padding: 5px 4px;
@@ -2876,6 +2958,9 @@ var BROWSER_CSS = `
 .ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
 .ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
 .ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.ib-view-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+/* Keep the selection checkbox over the thumbnail corner, below the subpath row. */
+.ib-card.is-flat .ib-check { top: 30px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
 /* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
    order:10 keeps them below the crumbs row when the toolbar wraps on phones. */
