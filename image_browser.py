@@ -72,12 +72,19 @@ STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
 
 SANDBOXED_TYPES = ("input", "output", "temp")
 
-# Upper bound on files a recursive ("flat") listing returns before it stops
-# walking and flags the response ``truncated``. A flat view over a deep output
-# tree does one PIL header read + one XMP probe per file, so an unbounded walk
-# on a pathological tree could hang the request; the cap keeps it responsive and
-# lets the frontend surface "showing the first N".
+# Upper bound on files a recursive ("flat") listing RETURNS. The walk itself
+# always covers the whole subtree (see FLAT_WALK_CAP) and the cap is applied
+# after an mtime sort, so a truncated response holds the newest N files — not
+# whichever N a directory-order walk happened to reach first. That ordering is
+# the point of the flat view (find a recent render wherever it landed), and it
+# also means the expensive per-file probes run only on files that ship.
 FLAT_LIST_CAP = 5000
+
+# Backstop on the cheap enumeration pass. Phase 1 only stats entries (no file
+# opens), so this is far higher than FLAT_LIST_CAP and exists purely so a
+# pathological tree cannot make the request unbounded. Hitting it also marks the
+# response truncated, since the newest-N guarantee no longer holds.
+FLAT_WALK_CAP = 200_000
 
 # Cover the common cases mimetypes.guess_type misses on some distros.
 mimetypes.add_type("image/webp", ".webp")
@@ -264,20 +271,40 @@ def _scan_file_entry(
 def _walk_files(
     base: str, exts: set[str], image_subset: set[str], cap: int
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Recursively collect files under ``base`` for the flat view.
+    """Recursively collect the ``cap`` NEWEST files under ``base`` for the flat view.
+
+    Two phases, because the two costs are wildly different:
+
+    1. **Enumerate** the whole subtree, keeping only what ``os.scandir`` already
+       hands over — name, subpath, extension, and a ``stat`` (a syscall, no file
+       open). Bounded by ``FLAT_WALK_CAP`` purely so a pathological tree cannot
+       make the request unbounded.
+    2. **Sort by mtime (newest first), slice to ``cap``, then probe.** Only the
+       survivors pay ``_scan_file_entry``'s two file opens (PIL header for the
+       dimensions, XMP read for the rating).
+
+    Doing it the other way round — probing during the walk and stopping at
+    ``cap`` — truncates in *directory* order, so on a subtree larger than the cap
+    the flat view silently omits whatever the alphabetical descent hadn't reached
+    yet. The newest render, the one the flat view exists to surface, is exactly
+    as likely as any other file to be in the missing tail. Sorting first also
+    means the expensive probes run only on files that actually ship.
 
     Each file dict carries a ``subpath`` (forward-slashed, relative to ``base``,
     "" at the top level) so the frontend can address its thumbnail and mutations.
     Symlinks are never followed (``follow_symlinks=False`` on every probe), so
     the walk stays inside the resolved sandbox root. Hidden entries and the
     ``clipspace`` / ``__pycache__`` dirs are skipped just like the flat lister.
-    Returns ``(files, truncated)``; ``truncated`` is True once ``cap`` is hit.
+    Returns ``(files, truncated)``; ``truncated`` is True when files were
+    dropped — either by the newest-N slice or by the enumeration backstop.
     """
-    files: list[dict[str, Any]] = []
+    # Phase 1 — cheap enumeration. (mtime, subpath, name, ext, path, stat).
+    found: list[tuple[float, str, str, str, str, os.stat_result]] = []
+    walk_truncated = False
     # DFS over scandir (not os.walk) so each directory keeps DirEntry's cheap,
     # symlink-safe is_dir/is_file/stat — the same guards the flat lister uses.
     stack: list[tuple[str, str]] = [("", base)]
-    while stack:
+    while stack and not walk_truncated:
         subpath, directory = stack.pop()
         try:
             with os.scandir(directory) as it:
@@ -296,15 +323,14 @@ def _walk_files(
                             if ext not in exts:
                                 continue
                             st = entry.stat(follow_symlinks=False)
-                            fd = _scan_file_entry(entry.path, entry.name, ext, st, image_subset)
-                            fd["subpath"] = subpath
-                            files.append(fd)
-                            if len(files) >= cap:
-                                return files, True
+                            found.append((st.st_mtime, subpath, entry.name, ext, entry.path, st))
+                            if len(found) >= FLAT_WALK_CAP:
+                                walk_truncated = True
+                                break
                     except OSError:
                         continue
-                # Descend in name order (reversed onto the LIFO stack) so a
-                # truncated walk stops at a predictable, stable frontier.
+                # Descend in name order (reversed onto the LIFO stack) so the
+                # enumeration frontier is predictable if the backstop ever bites.
                 subdirs.sort(key=lambda s: s[0].lower(), reverse=True)
                 stack.extend(subdirs)
         except OSError:
@@ -312,7 +338,18 @@ def _walk_files(
             # should surface everything it can reach rather than 403/500 on one
             # bad dir.
             continue
-    return files, False
+
+    # Phase 2 — newest first, then probe only what we keep. Ties break on
+    # subpath/name so the slice is deterministic for same-mtime files (a batch
+    # render writes many files within the same clock tick).
+    found.sort(key=lambda f: (-f[0], f[1], f[2]))
+    truncated = walk_truncated or len(found) > cap
+    files: list[dict[str, Any]] = []
+    for _mtime, subpath, name, ext, path, st in found[:cap]:
+        fd = _scan_file_entry(path, name, ext, st, image_subset)
+        fd["subpath"] = subpath
+        files.append(fd)
+    return files, truncated
 
 
 @PromptServer.instance.routes.get("/image_browser/list")

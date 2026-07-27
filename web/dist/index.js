@@ -1795,8 +1795,8 @@ function openImageBrowser() {
       if (data.truncated) {
         notify({
           severity: "warn",
-          summary: "Showing the first files",
-          detail: `This folder has more than ${state.files.length} files; the flat view is truncated.`
+          summary: `Showing the newest ${state.files.length}`,
+          detail: "This folder's subtree has more files than the flat view returns; older ones are not listed."
         });
       }
     } catch (e) {
