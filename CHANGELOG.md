@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.14](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.13...comfyui-image-browser-v0.1.14) (2026-07-27)
+
+
+### Bug Fixes
+
+* make the flat view's cap keep the newest files, not the first walked ([#38](https://github.com/laurigates/comfyui-image-browser/issues/38)) ([d468ba2](https://github.com/laurigates/comfyui-image-browser/commit/d468ba2bc16e55f417e6826b85f5468d017eb824))
+* stop flat view loading every thumbnail at once ([#36](https://github.com/laurigates/comfyui-image-browser/issues/36)) ([81e7dc5](https://github.com/laurigates/comfyui-image-browser/commit/81e7dc5282c57c5304880078bad70e93794579ac))
+
 ## [0.1.13](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.12...comfyui-image-browser-v0.1.13) (2026-07-23)
 
 
