@@ -102,18 +102,46 @@ function saveSort(key: string, dir: string): void {
 // they landed). Persisted so the preference survives reopening the browser.
 type ViewMode = "folder" | "flat";
 const VIEW_STORAGE_KEY = "comfyui-image-browser:view";
+// Breadcrumb set while a flat load is in flight and cleared once the grid has
+// painted. If it is STILL set at open time, the previous flat attempt never
+// finished — the tab died under it — so the persisted preference would reopen
+// straight into the same failure with no way to reach the toggle. Recovering to
+// folder view keeps the preference from becoming a trap.
+const VIEW_PENDING_KEY = "comfyui-image-browser:view-pending";
 
-function loadSavedView(): ViewMode {
+interface SavedView {
+  mode: ViewMode;
+  recovered: boolean;
+}
+
+function loadSavedView(): SavedView {
   try {
-    return localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder";
+    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
+      localStorage.removeItem(VIEW_PENDING_KEY);
+      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
+      return { mode: "folder", recovered: true };
+    }
+    return {
+      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
+      recovered: false,
+    };
   } catch {
-    return "folder";
+    return { mode: "folder", recovered: false };
   }
 }
 
 function saveView(mode: ViewMode): void {
   try {
     localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {
+    /* private-mode / disabled storage — non-fatal */
+  }
+}
+
+function markFlatPending(pending: boolean): void {
+  try {
+    if (pending) localStorage.setItem(VIEW_PENDING_KEY, "1");
+    else localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -207,6 +235,7 @@ interface ThumbDescriptor {
 export function openImageBrowser(): ModalShellController {
   ensureStyleOnce(STYLE_ID, BROWSER_CSS);
 
+  const savedView = loadSavedView();
   const state: BrowserState = {
     type: "output",
     subfolder: "",
@@ -216,7 +245,7 @@ export function openImageBrowser(): ModalShellController {
     sortKey: "mtime",
     sortDir: "desc",
     query: "",
-    viewMode: loadSavedView(),
+    viewMode: savedView.mode,
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -243,6 +272,10 @@ export function openImageBrowser(): ModalShellController {
       // Remember where this folder was scrolled to so reopening the browser
       // (scrollMemory is module-level) resumes in place.
       rememberScroll();
+      // Closing mid-load is a deliberate exit, not a crash — don't leave the
+      // breadcrumb armed or the next open falls back to folder view for nothing.
+      markFlatPending(false);
+      thumbObserver?.disconnect();
       window.removeEventListener("keydown", onWindowKey, true);
       window.removeEventListener("popstate", onPopState);
       // Pop the back-button sentinel unless back itself closed the browser.
@@ -933,6 +966,10 @@ export function openImageBrowser(): ModalShellController {
     renderCrumbs();
     modal.setBusy(true);
     modal.setStatus("Loading…");
+    // Arm the recovery breadcrumb around the whole flat load+render. It is
+    // cleared below once the grid has painted, so only an attempt that never
+    // got there (a tab the render killed) leaves it set.
+    markFlatPending(isFlat());
     try {
       const data = await fetchListing({
         type: state.type,
@@ -961,6 +998,7 @@ export function openImageBrowser(): ModalShellController {
     }
     modal.setBusy(false);
     renderGrid();
+    markFlatPending(false);
     renderPins();
     // Navigating restores the folder's remembered scroll position (0 for a
     // never-visited one) — each directory keeps its own place while you
@@ -1127,10 +1165,24 @@ export function openImageBrowser(): ModalShellController {
     scrollHost.scrollTop = savedScrollTop;
   }
 
+  // Observer for the current render. Kept so the next render can disconnect it
+  // instead of leaking one observer (still holding every detached card) per
+  // delete / rename / sort / search keystroke.
+  let thumbObserver: IntersectionObserver | null = null;
+
   function installLazyThumbs(rootEl: HTMLElement): void {
+    thumbObserver?.disconnect();
+    thumbObserver = null;
     if (typeof IntersectionObserver === "undefined") return;
     const els = rootEl.querySelectorAll("img[data-src], video[data-src]");
     if (!els.length) return;
+    // The root MUST be the scrolling ancestor (.cmp-body / scrollHost), NOT the
+    // grid. `.ib-grid` has no overflow clip, so with the grid as root the root
+    // rectangle is the grid's whole bounding box — every card in the listing
+    // reports as intersecting on the first callback and the "lazy" load fires
+    // for ALL of them at once. That is survivable in folder view (tens of
+    // files) but in flat view it means thousands of simultaneous /thumb
+    // requests plus a <video> element per clip, which OOMs the tab.
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
@@ -1145,9 +1197,10 @@ export function openImageBrowser(): ModalShellController {
           io.unobserve(el);
         }
       },
-      { root: rootEl, rootMargin: "300px" },
+      { root: scrollHost, rootMargin: "300px" },
     );
     for (const el of els) io.observe(el);
+    thumbObserver = io;
   }
 
   function reportError(summary: string, e: unknown): void {
@@ -1892,6 +1945,13 @@ export function openImageBrowser(): ModalShellController {
   window.addEventListener("keydown", onWindowKey, true);
 
   loadAndRender();
+  if (savedView.recovered) {
+    notify({
+      severity: "warn",
+      summary: "Reopened in folder view",
+      detail: "The last flat-view load didn't finish, so the browser fell back to folder view.",
+    });
+  }
   return modal;
 }
 
