@@ -1088,16 +1088,33 @@ function saveSort(key, dir) {
   } catch {}
 }
 var VIEW_STORAGE_KEY = "comfyui-image-browser:view";
+var VIEW_PENDING_KEY = "comfyui-image-browser:view-pending";
 function loadSavedView() {
   try {
-    return localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder";
+    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
+      localStorage.removeItem(VIEW_PENDING_KEY);
+      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
+      return { mode: "folder", recovered: true };
+    }
+    return {
+      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
+      recovered: false
+    };
   } catch {
-    return "folder";
+    return { mode: "folder", recovered: false };
   }
 }
 function saveView(mode) {
   try {
     localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {}
+}
+function markFlatPending(pending) {
+  try {
+    if (pending)
+      localStorage.setItem(VIEW_PENDING_KEY, "1");
+    else
+      localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {}
 }
 var MOVE_DEST_STORAGE_KEY = "comfyui-image-browser:move-dest";
@@ -1150,6 +1167,7 @@ function savePins(pins) {
 }
 function openImageBrowser() {
   ensureStyleOnce(STYLE_ID4, BROWSER_CSS);
+  const savedView = loadSavedView();
   const state = {
     type: "output",
     subfolder: "",
@@ -1159,7 +1177,7 @@ function openImageBrowser() {
     sortKey: "mtime",
     sortDir: "desc",
     query: "",
-    viewMode: loadSavedView()
+    viewMode: savedView.mode
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -1176,6 +1194,8 @@ function openImageBrowser() {
     footerRightHTML: '<span class="ib-count"></span>',
     onClose: () => {
       rememberScroll();
+      markFlatPending(false);
+      thumbObserver?.disconnect();
       window.removeEventListener("keydown", onWindowKey, true);
       window.removeEventListener("popstate", onPopState);
       if (!closedByBack)
@@ -1761,6 +1781,7 @@ function openImageBrowser() {
     renderCrumbs();
     modal.setBusy(true);
     modal.setStatus("Loading…");
+    markFlatPending(isFlat());
     try {
       const data = await fetchListing({
         type: state.type,
@@ -1786,6 +1807,7 @@ function openImageBrowser() {
     }
     modal.setBusy(false);
     renderGrid();
+    markFlatPending(false);
     renderPins();
     if (!opts?.preserveScroll)
       scrollHost.scrollTop = scrollMemory.get(locationKey()) ?? 0;
@@ -1908,7 +1930,10 @@ ${when}`;
     installLazyThumbs(gridEl);
     scrollHost.scrollTop = savedScrollTop;
   }
+  let thumbObserver = null;
   function installLazyThumbs(rootEl) {
+    thumbObserver?.disconnect();
+    thumbObserver = null;
     if (typeof IntersectionObserver === "undefined")
       return;
     const els = rootEl.querySelectorAll("img[data-src], video[data-src]");
@@ -1928,9 +1953,10 @@ ${when}`;
         }
         io.unobserve(el);
       }
-    }, { root: rootEl, rootMargin: "300px" });
+    }, { root: scrollHost, rootMargin: "300px" });
     for (const el of els)
       io.observe(el);
+    thumbObserver = io;
   }
   function reportError(summary, e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -2617,6 +2643,13 @@ ${when}`;
   }
   window.addEventListener("keydown", onWindowKey, true);
   loadAndRender();
+  if (savedView.recovered) {
+    notify({
+      severity: "warn",
+      summary: "Reopened in folder view",
+      detail: "The last flat-view load didn't finish, so the browser fell back to folder view."
+    });
+  }
   return modal;
 }
 function pickDestination(modal, start, exclude) {

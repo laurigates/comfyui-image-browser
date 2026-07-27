@@ -686,6 +686,73 @@ describe("flat (recursive) view", () => {
     });
     modal.close();
   });
+
+  // A flat listing is thousands of cards. If the lazy-thumb observer's root is
+  // the grid — which has no overflow clip — the root rectangle is the grid's
+  // whole bounding box, so EVERY card reports as intersecting on the first
+  // callback and every thumbnail (plus a <video> per clip) loads at once,
+  // OOM-ing the tab. The root must be the scrolling ancestor, .cmp-body.
+  it("observes thumbnails against the scroll container, not the grid", async () => {
+    const roots = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(_cb, opts) {
+          roots.push(opts?.root);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    stubListing({ files: TWO_FILES });
+    const modal = openShell();
+    await openLoaded(modal);
+    expect(roots.length).toBeGreaterThan(0);
+    for (const root of roots) {
+      expect(root).toBe(modal.bodyEl);
+      expect(root.classList.contains("cmp-body")).toBe(true);
+      expect(root.classList.contains("ib-grid")).toBe(false);
+    }
+    modal.close();
+  });
+
+  // The view preference persists, so a flat load heavy enough to kill the tab
+  // would reopen straight into the same failure with the toggle unreachable.
+  // The pending breadcrumb makes that state self-healing.
+  it("recovers to folder view when the previous flat load never finished", async () => {
+    localStorage.setItem("comfyui-image-browser:view", "flat");
+    localStorage.setItem("comfyui-image-browser:view-pending", "1");
+    const calls = [];
+    vi.stubGlobal("fetch", recursiveListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+    const lists = calls.filter((c) => c.url.includes("/image_browser/list"));
+    expect(lists.length).toBeGreaterThan(0);
+    // Recovered: the reopen listed the folder, not the whole subtree.
+    expect(lists.every((c) => !c.url.includes("recursive=1"))).toBe(true);
+    expect(modal.bodyEl.querySelector(".ib-subpath")).toBeNull();
+    // Both the breadcrumb and the poisoned preference are cleared, so the next
+    // open is a normal folder-view open and the toggle is reachable again.
+    expect(localStorage.getItem("comfyui-image-browser:view-pending")).toBeNull();
+    expect(localStorage.getItem("comfyui-image-browser:view")).toBe("folder");
+    modal.close();
+  });
+
+  // The other half of the contract: a flat load that DOES complete must clear
+  // the breadcrumb, or every subsequent open would falsely "recover".
+  it("clears the pending breadcrumb once the flat grid has rendered", async () => {
+    vi.stubGlobal("fetch", recursiveListFetch());
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.dialog.querySelector(".ib-view-toggle").click();
+    await vi.waitFor(() => {
+      if (!modal.bodyEl.querySelector(".ib-subpath")) throw new Error("no subpath label");
+    });
+    expect(localStorage.getItem("comfyui-image-browser:view-pending")).toBeNull();
+    expect(localStorage.getItem("comfyui-image-browser:view")).toBe("flat");
+    modal.close();
+  });
 });
 
 describe("comfyui-image-browser standalone modal", () => {
