@@ -9,6 +9,7 @@ folder_paths and is covered by the live smoke matrix.
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 
 import image_browser as ib
@@ -226,6 +227,86 @@ class TestListRecursive:
         resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
         assert resp._body["truncated"] is True
         assert len(resp._body["files"]) == 3
+
+    def test_truncation_keeps_the_newest_not_the_first_walked(self, tmp_path, monkeypatch):
+        """The cap must bite by mtime, not by directory-walk order.
+
+        The walk descends alphabetically, so a cap applied during the walk would
+        return a/ and b/ and never reach z/ — silently hiding the newest file,
+        which is the one thing the flat view exists to surface.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "FLAT_LIST_CAP", 2)
+        for folder, name, mtime in (
+            ("a", "oldest.png", 1000),
+            ("b", "middle.png", 2000),
+            ("z", "newest.png", 3000),
+        ):
+            d = tmp_path / folder
+            d.mkdir()
+            f = d / name
+            f.write_bytes(b"x")
+            os.utime(f, (mtime, mtime))
+
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        assert resp._body["truncated"] is True
+        names = {f["name"] for f in resp._body["files"]}
+        # The two newest survive; the alphabetically-first, oldest file is cut.
+        assert names == {"newest.png", "middle.png"}
+        assert "oldest.png" not in names
+        # Subpaths still address the real nested folders.
+        by_name = {f["name"]: f for f in resp._body["files"]}
+        assert by_name["newest.png"]["subpath"] == "z"
+
+    def test_untruncated_walk_covers_the_whole_subtree(self, tmp_path, monkeypatch):
+        """Under the cap, nothing is dropped and truncated stays False."""
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "FLAT_LIST_CAP", 10)
+        for folder in ("a", "m", "z"):
+            d = tmp_path / folder
+            d.mkdir()
+            (d / f"{folder}.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        assert resp._body["truncated"] is False
+        assert {f["name"] for f in resp._body["files"]} == {"a.png", "m.png", "z.png"}
+
+    def test_probes_run_only_on_files_that_ship(self, tmp_path, monkeypatch):
+        """Sorting before probing is also what keeps a truncated walk cheap.
+
+        _scan_file_entry opens each file twice (PIL header + XMP rating). Under
+        a cap it must run cap times, not once per file in the subtree.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "FLAT_LIST_CAP", 2)
+        probed: list[str] = []
+        real = ib._scan_file_entry
+
+        def counting(path, name, ext, st, image_subset):
+            probed.append(name)
+            return real(path, name, ext, st, image_subset)
+
+        monkeypatch.setattr(ib, "_scan_file_entry", counting)
+        for i in range(6):
+            f = tmp_path / f"f{i}.png"
+            f.write_bytes(b"x")
+            os.utime(f, (1000 + i, 1000 + i))
+
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        assert len(resp._body["files"]) == 2
+        # Six files enumerated, two probed — and they are the two newest.
+        assert sorted(probed) == ["f4.png", "f5.png"]
+
+    def test_enumeration_backstop_marks_truncated(self, tmp_path, monkeypatch):
+        """FLAT_WALK_CAP bounds the cheap pass; hitting it drops the newest-N
+        guarantee, so the response must still say truncated."""
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "FLAT_WALK_CAP", 2)
+        monkeypatch.setattr(ib, "FLAT_LIST_CAP", 100)
+        for i in range(5):
+            (tmp_path / f"f{i}.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": "", "recursive": "1"})
+        assert resp._body["truncated"] is True
+        assert len(resp._body["files"]) == 2
 
 
 class TestRmdirEndpoint:
