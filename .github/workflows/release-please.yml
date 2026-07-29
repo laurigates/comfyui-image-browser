@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
+    # Pure GitHub-API job (no build) — 1-CPU slim runner is 3x cheaper.
+    runs-on: ubuntu-slim
     steps:
       - name: Generate GitHub App Token
         id: app-token
