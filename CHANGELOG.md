@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.17](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.16...comfyui-image-browser-v0.1.17) (2026-07-30)
+
+
+### Bug Fixes
+
+* **assets:** move the Assets section out of the Live smoke section ([#49](https://github.com/laurigates/comfyui-image-browser/issues/49)) ([18b719b](https://github.com/laurigates/comfyui-image-browser/commit/18b719b69ca8aefb1a1a3a49b2d17660367606cc))
+* **scroll:** store the offset before the dialog detaches, and re-assert the restore ([#51](https://github.com/laurigates/comfyui-image-browser/issues/51)) ([960f429](https://github.com/laurigates/comfyui-image-browser/commit/960f429fe1f128fe075e9c6e5632349647723d5a))
+
 ## [0.1.16](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.15...comfyui-image-browser-v0.1.16) (2026-07-30)
 
 
