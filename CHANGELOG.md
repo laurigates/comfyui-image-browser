@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.16](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.15...comfyui-image-browser-v0.1.16) (2026-07-30)
+
+
+### Features
+
+* **metadata:** view and copy an image's generation metadata ([#47](https://github.com/laurigates/comfyui-image-browser/issues/47)) ([5238160](https://github.com/laurigates/comfyui-image-browser/commit/52381603ac82f25683a23fef021c0c0afc2d12b6))
+
 ## [0.1.15](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.14...comfyui-image-browser-v0.1.15) (2026-07-30)
 
 
