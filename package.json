@@ -22,7 +22,7 @@
     "@playwright/test": "1.56.0",
     "jsdom": "^29.0.0",
     "knip": "^5.0.0",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.0",
     "vitest": "^4.1.7"
   }
 }
