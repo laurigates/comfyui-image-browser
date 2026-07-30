@@ -10,6 +10,7 @@ import type { ModalShellController, RatingAddress } from "@laurigates/comfy-moda
 import {
   applyStars,
   confirmInShell,
+  copyTextToClipboard,
   ensureStyleOnce,
   fuzzyScore,
   nextRating,
@@ -29,12 +30,17 @@ import {
   EXT_NAME,
   fetchBasePaths,
   fetchListing,
+  fetchMetadata,
   fullSrcURL,
   IMG_EXTS,
+  type ImageMetadata,
   imageThumbURL,
   joinAbs,
   type ListingFile,
+  type MetaRow,
   makeDir,
+  metaClipboardText,
+  metaRows,
   moveDir,
   moveFile,
   moveMany,
@@ -263,7 +269,8 @@ export function openImageBrowser(): ModalShellController {
     // Fill the whole viewport — the browser stands in for the canvas.
     width: "100vw",
     height: "100vh",
-    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+    footerLeftHTML:
+      "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     // Fires on EVERY teardown path (Esc, × button, backdrop, coordinator
     // dismiss) — the controller.close wrapper does not, so keyboard cleanup
@@ -669,6 +676,7 @@ export function openImageBrowser(): ModalShellController {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
       if (action === "open") openFull(f);
+      else if (action === "meta") void openMetadata(f);
       else if (action === "delete") onDelete(f);
       else if (action === "rename") onRename(f);
       else if (action === "move") onMove(f);
@@ -815,6 +823,165 @@ export function openImageBrowser(): ModalShellController {
   function openFull(f: ListingFile): void {
     const url = fullSrcURL(state.type, fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
+  }
+
+  // Copy feedback lives on the button itself: label → "Copied ✓" → back.
+  // DELIBERATELY no notify() toast on success — the toast stack is a child of
+  // <body> above the dialog, so on the installed kit a toast raised over an open
+  // overlay parks its ✕ on top of the shell's, and tapping it dismisses the whole
+  // browser. The label flip is also the clearer confirmation: it names which
+  // field went to the clipboard. copyTextToClipboard (not navigator.clipboard
+  // directly) carries the non-secure-context fallback plain-http LAN ComfyUI needs.
+  //
+  // `restore` is PASSED IN, never read back off the button: reading
+  // btn.textContent at click time captures the TRANSIENT label whenever a second
+  // click lands inside the 1500 ms window, so the feedback latches permanently —
+  // and in the fail-then-succeed order the button settles on "Copy failed" after
+  // a copy that worked, i.e. it lies about whether the value is on the clipboard.
+  // One feedback slot per button (copyFeedback): a new click supersedes the
+  // previous click's pending restore AND its late-resolving promise (the `seq`
+  // check), so the label always shows the LAST copy's outcome and then `restore`.
+  const copyFeedback = new WeakMap<
+    HTMLButtonElement,
+    { seq: number; timer: ReturnType<typeof setTimeout> | null }
+  >();
+  function copyInto(btn: HTMLButtonElement, text: string, restore: string): void {
+    let fb = copyFeedback.get(btn);
+    if (!fb) {
+      fb = { seq: 0, timer: null };
+      copyFeedback.set(btn, fb);
+    }
+    const slot = fb;
+    const seq = ++slot.seq;
+    // Hold the current feedback until this copy answers — no flicker back to
+    // `restore` mid-flight — but drop the stale restore timer that would fire
+    // out of order once this click's own timer is armed.
+    if (slot.timer !== null) {
+      clearTimeout(slot.timer);
+      slot.timer = null;
+    }
+    void copyTextToClipboard(text).then((ok) => {
+      if (slot.seq !== seq) return; // a later click owns the label now
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      btn.classList.toggle("is-copied", ok);
+      slot.timer = setTimeout(() => {
+        slot.timer = null;
+        btn.textContent = restore;
+        btn.classList.remove("is-copied");
+      }, 1500);
+    });
+  }
+
+  // Embedded generation metadata for one image, in an IN-DIALOG overlay
+  // (openShellOverlay — a second openModalShell would break single-modal
+  // discipline and close the browser under itself).
+  async function openMetadata(f: ListingFile): Promise<void> {
+    // The overlay is dismissible while the read is in flight, so a late response
+    // must not paint into a closed card.
+    let live = true;
+    const ov = openShellOverlay(modal, {
+      onDismiss: () => {
+        live = false;
+      },
+    });
+    ov.card.classList.add("ib-meta-card");
+    const close = (): void => {
+      live = false;
+      ov.close();
+    };
+    const title = `Metadata — ${escHTML(f.name)}`;
+    // Painted synchronously: an overlay that appears only after the read would
+    // feel like a dead button on a big file / slow disk.
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ib-meta-body"><div class="ib-meta-status">Reading metadata…</div></div>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+
+    let data: ImageMetadata;
+    try {
+      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+    } catch (e) {
+      // Close FIRST, then report: the copyable error toast must not land on an
+      // open overlay (same toast-over-dialog constraint as copyInto above).
+      close();
+      reportError("Metadata read failed", e);
+      return;
+    }
+    if (!live) return;
+
+    const rows: MetaRow[] = metaRows(data.summary);
+    const rawKeys = Object.keys(data.raw);
+    const srcLabel =
+      data.source === "comfyui"
+        ? "ComfyUI"
+        : data.source === "a1111"
+          ? "A1111"
+          : "no generation data";
+    const rowsHTML = rows
+      .map(
+        (r, i) => `
+        <div class="ib-meta-row">
+          <div class="ib-meta-k">${escHTML(r.label)}</div>
+          <div class="ib-meta-v">${escHTML(r.value)}</div>
+          <button type="button" class="ib-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`,
+      )
+      .join("");
+    // Never invent a row. With nothing recognised the honest report is which of
+    // the two cases it is: no embedded text at all, or text we couldn't map (in
+    // which case the raw disclosure below is the whole answer).
+    const emptyHTML = rows.length
+      ? ""
+      : `<div class="ib-meta-empty">${
+          rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."
+        }</div>`;
+    const rawJSON = JSON.stringify(data.raw, null, 2);
+    const rawHTML = rawKeys.length
+      ? `
+        <details class="ib-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escHTML(rawJSON)}</pre>
+          <button type="button" class="ib-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>`
+      : "";
+    const noteHTML = data.truncated
+      ? `<div class="ib-meta-note">Some values were truncated by the server.</div>`
+      : "";
+    const copyAll = rows.length
+      ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>`
+      : "";
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ib-meta-body">
+        <div class="ib-meta-src">${escHTML(srcLabel)}${
+          data.format ? `<span class="ib-meta-fmt">${escHTML(data.format)}</span>` : ""
+        }</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}
+      </div>
+      <div class="cmp-ov-actions">
+        ${copyAll}
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    // Each restore label is read ONCE here, off the freshly painted markup —
+    // never inside the click handler, where a mid-feedback label would stick.
+    for (const btn of ov.card.querySelectorAll<HTMLButtonElement>("[data-copy-row]")) {
+      const row = rows[Number(btn.dataset.copyRow)];
+      const label = btn.textContent || "Copy";
+      if (row) btn.addEventListener("click", () => copyInto(btn, row.value, label));
+    }
+    const rawBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-raw]");
+    const rawLabel = rawBtn?.textContent || "Copy JSON";
+    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
+    const allBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-all]");
+    const allLabel = allBtn?.textContent || "Copy all";
+    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
   }
 
   async function onDelete(f: ListingFile): Promise<void> {
@@ -1109,6 +1276,14 @@ export function openImageBrowser(): ModalShellController {
           : t.kind === "video"
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
             : `<div class="ib-thumb-icon">${t.text}</div>`;
+      // The ⓘ metadata button is the ONE card control deliberately outside the
+      // canWrite mirror: /metadata is a READ and accepts type=path, so it belongs
+      // on the browse…/path tab too. Don't "fix" this into canWrite. It is gated
+      // on image-ness instead — same ext source thumbForFile uses — because the
+      // endpoint's own gate is IMG_EXTS (a video would just 400).
+      const metaBtn = IMG_EXTS.has((f.ext || "").toLowerCase())
+        ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>`
+        : "";
       // Move is only offered for the sandboxed roots (backend rejects path writes).
       const moveBtn = canWrite
         ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>`
@@ -1148,6 +1323,7 @@ export function openImageBrowser(): ModalShellController {
         ${starsRow}
         <div class="ib-actions">
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
+          ${metaBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -1748,6 +1924,7 @@ export function openImageBrowser(): ModalShellController {
           <div class="ib-help-h">Other</div>
           <dl>
             <dt>Enter / o</dt><dd>open preview</dd>
+            <dt>i</dt><dd>metadata</dd>
             <dt>/</dt><dd>focus search</dd>
             <dt>?</dt><dd>this help</dd>
             <dt>Esc</dt><dd>close (priority)</dd>
@@ -1907,6 +2084,12 @@ export function openImageBrowser(): ModalShellController {
         e.preventDefault();
         e.stopPropagation();
         if (f) openFull(f);
+        break;
+      case "i":
+        // Same gate as the ⓘ button: images only, every tab (a read, not a write).
+        e.preventDefault();
+        e.stopPropagation();
+        if (f && IMG_EXTS.has((f.ext || "").toLowerCase())) void openMetadata(f);
         break;
       case "r":
         if (SANDBOXED_TYPES.includes(state.type) && f) {
@@ -2438,4 +2621,58 @@ const BROWSER_CSS = `
     font-size: 11.5px; color: #ffd866;
 }
 .ib-help-body dd { margin: 0 0 4px 0; font-size: 11.5px; color: #b8b8c0; }
+/* Metadata overlay (the ⓘ card). The ib-meta-* namespace is distinct from the
+   card's own .ib-meta dimensions line — class selectors match whole tokens, so
+   .ib-meta never catches .ib-meta-row and vice versa. */
+.ib-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ib-meta-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; padding: 8px 0; -webkit-overflow-scrolling: touch;
+}
+.ib-meta-status { padding: 14px 2px; font-size: 12.5px; color: #888; font-style: italic; }
+.ib-meta-src {
+    display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: #9ec6ff;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ib-meta-fmt { color: #777; text-transform: none; letter-spacing: 0; }
+.ib-meta-row { display: grid; grid-template-columns: 84px 1fr auto; gap: 8px; align-items: start; }
+.ib-meta-k {
+    padding-top: 7px; font-size: 11px; color: #8a8a92;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.ib-meta-v {
+    /* A long positive prompt scrolls inside its own box instead of pushing the
+       Copy buttons and the overlay actions off the card. Selectable: the card is
+       a reading surface, unlike the grid (which suppresses selection for
+       long-press). */
+    max-height: 7.5em; overflow-y: auto;
+    padding: 6px 8px; font-size: 12px; line-height: 1.45; color: #d8d8dc;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+.ib-meta-copy {
+    background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
+    padding: 0 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;
+}
+.ib-meta-copy:hover { background: #3a3a4a; color: #fff; }
+.ib-meta-copy.is-copied { background: #25402f; color: #8fe0a8; border-color: #37624a; }
+.ib-meta-empty { padding: 16px 2px; font-size: 12.5px; color: #777; font-style: italic; }
+.ib-meta-note { font-size: 11.5px; color: #c8a95c; }
+.ib-meta-raw > summary {
+    padding: 7px 0; font-size: 12px; color: #9ec6ff; cursor: pointer; min-height: 32px;
+}
+.ib-meta-raw pre {
+    margin: 4px 0 8px; padding: 8px; max-height: 30vh; overflow: auto;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-size: 11px; color: #b8b8c0; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+@media (max-width: 600px) {
+    /* Stack the label above the value — an 84px gutter leaves the prompt column
+       unreadably narrow on a phone. */
+    .ib-meta-row { grid-template-columns: 1fr auto; }
+    .ib-meta-k { grid-column: 1 / -1; padding-top: 0; }
+}
 `;

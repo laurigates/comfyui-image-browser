@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Vitest transpiles TypeScript, so the test imports the `.ts` source directly
 // (no build step). Importing the module also runs the registerExtension wiring
 // against tests/js/__mocks__/app.js. The standalone modal is launched from the
@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // pure-helper unit tests but ships a blank dialog — so it is asserted here.
 // The initial fetch fires asynchronously and (harmlessly) fails under jsdom;
 // the synchronous scaffold (root + toolbar tabs + grid) is what we assert on.
+import { fetchMetadata, META_FIELDS, metaClipboardText, metaRows } from "../../src/api.ts";
 import { openShell } from "../../src/index.ts";
 
 /** Dispatch a real keydown on window (capture phase, cancelable). */
@@ -751,6 +752,369 @@ describe("flat (recursive) view", () => {
     });
     expect(localStorage.getItem("comfyui-image-browser:view-pending")).toBeNull();
     expect(localStorage.getItem("comfyui-image-browser:view")).toBe("flat");
+    modal.close();
+  });
+});
+
+describe("image metadata helpers", () => {
+  it("emits META_FIELDS order regardless of the response's own key order", () => {
+    // The backend serialises in parser order, which differs between the ComfyUI
+    // graph walk and the A1111 block — display order must come from META_FIELDS.
+    const rows = metaRows({
+      scheduler: "karras",
+      seed: "42",
+      positive: "a cat",
+      model: "sd15.safetensors",
+    });
+    expect(rows.map((r) => r.key)).toEqual(["positive", "model", "seed", "scheduler"]);
+    const order = META_FIELDS.map((f) => f.key);
+    for (let i = 1; i < rows.length; i++) {
+      expect(order.indexOf(rows[i].key)).toBeGreaterThan(order.indexOf(rows[i - 1].key));
+    }
+  });
+
+  it("omits absent keys — an unknown field is never rendered", () => {
+    const rows = metaRows({ seed: "1" });
+    expect(rows).toEqual([{ key: "seed", label: "Seed", value: "1" }]);
+  });
+
+  it("drops empty and whitespace-only values (never a bare 'Negative:' row)", () => {
+    expect(metaRows({ positive: "cat", negative: "", steps: "   " })).toEqual([
+      { key: "positive", label: "Positive", value: "cat" },
+    ]);
+  });
+
+  it("coerces non-string values and survives null/undefined/empty input", () => {
+    expect(metaRows({ steps: 20, cfg: 7.5 }).map((r) => r.value)).toEqual(["20", "7.5"]);
+    expect(metaRows(null)).toEqual([]);
+    expect(metaRows(undefined)).toEqual([]);
+    expect(metaRows({})).toEqual([]);
+  });
+
+  it("metaClipboardText joins 'Label: value' and keeps a multi-line prompt verbatim", () => {
+    const rows = metaRows({ positive: "line one\nline two", seed: "5" });
+    expect(metaClipboardText(rows)).toBe("Positive: line one\nline two\nSeed: 5");
+    expect(metaClipboardText([])).toBe("");
+  });
+
+  it("addresses /metadata like /thumb — type=path switches to an absolute path", async () => {
+    const calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        calls.push(String(url));
+        return { ok: true, status: 200, json: async () => ({ ok: true, source: "none" }) };
+      }),
+    );
+    await fetchMetadata("output", "sub", "a.png", "/ignored");
+    expect(calls[0]).toBe("/image_browser/metadata?type=output&subfolder=sub&name=a.png");
+    await fetchMetadata("path", "", "a.png", "/abs/dir");
+    expect(calls[1]).toBe("/image_browser/metadata?path=%2Fabs%2Fdir%2Fa.png");
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces the backend's error message from a 4xx body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({ ok: false, error: "unsupported file type" }),
+      })),
+    );
+    await expect(fetchMetadata("output", "", "a.mp4", "/")).rejects.toThrow(
+      "unsupported file type",
+    );
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("metadata overlay", () => {
+  // The kit's toast stack is a body-level singleton that outlives a test, and
+  // two of these tests assert on toast presence/absence — start from a clean one.
+  beforeEach(() => {
+    document.getElementById("cmn-notify-container")?.remove();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  /** /list + /metadata fetch stub; `meta` is the /metadata response body. */
+  function metadataFetch(meta, type = "output") {
+    return vi.fn(async (url) => {
+      const s = String(url);
+      if (s.includes("/image_browser/metadata")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, ...meta }) };
+      }
+      if (s.includes("/image_browser/base")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            base_path: "/",
+            input_dir: "",
+            output_dir: "",
+            temp_dir: "",
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type,
+          subfolder: "",
+          path: "/out",
+          dirs: [],
+          files: TWO_FILES,
+          exists: true,
+        }),
+      };
+    });
+  }
+
+  const COMFY_META = {
+    format: "png",
+    source: "comfyui",
+    summary: {
+      positive: "a cat",
+      negative: "blurry",
+      seed: "42",
+      steps: "20",
+      cfg: "8",
+      sampler: "euler",
+      scheduler: "normal",
+      model: "sd15.safetensors",
+    },
+    raw: { prompt: '{"1": {}}' },
+    truncated: false,
+  };
+
+  it("'i' on the focused card opens the overlay with a Copy per field and no toast", async () => {
+    vi.stubGlobal("fetch", metadataFetch(COMFY_META));
+    const modal = openShell();
+    await openLoaded(modal);
+    // The shell autofocuses its search input; a real tap would have moved focus
+    // off it, but a jsdom synthetic click does not — blur so 'i' reaches the grid.
+    document.activeElement?.blur?.();
+    pressKey("i");
+
+    const card = await vi.waitFor(() => {
+      const c = modal.dialog.querySelector(".ib-meta-card .ib-meta-row");
+      if (!c) throw new Error("metadata overlay not rendered");
+      return modal.dialog.querySelector(".ib-meta-card");
+    });
+    // One row (and one Copy) per known field, in META_FIELDS order.
+    const labels = Array.from(card.querySelectorAll(".ib-meta-k")).map((e) => e.textContent);
+    expect(labels).toEqual([
+      "Positive",
+      "Negative",
+      "Model",
+      "Seed",
+      "Steps",
+      "CFG",
+      "Sampler",
+      "Scheduler",
+    ]);
+    expect(card.querySelectorAll(".ib-meta-row .ib-meta-copy").length).toBe(8);
+    expect(card.querySelector(".ib-meta-src").textContent).toContain("ComfyUI");
+    expect(card.querySelector("[data-copy-all]")).not.toBeNull();
+    // The raw disclosure is present but collapsed.
+    expect(card.querySelector("details.ib-meta-raw")?.hasAttribute("open")).toBe(false);
+    // No notify() toast: a toast over an open overlay parks its ✕ on the shell's.
+    expect(document.querySelector(".cmn-toast")).toBeNull();
+    modal.close();
+  });
+
+  it("a per-field Copy button writes the value and flips its label to 'Copied ✓'", async () => {
+    const writes = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: async (t) => void writes.push(t) },
+      configurable: true,
+    });
+    vi.stubGlobal("fetch", metadataFetch(COMFY_META));
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.bodyEl.querySelector('[data-action="meta"]').click();
+
+    const btn = await vi.waitFor(() => {
+      const b = modal.dialog.querySelector('[data-copy-row="0"]');
+      if (!b) throw new Error("copy button not rendered");
+      return b;
+    });
+    btn.click();
+    await vi.waitFor(() => {
+      if (btn.textContent !== "Copied ✓") throw new Error(`label: ${btn.textContent}`);
+    });
+    expect(writes).toEqual(["a cat"]);
+
+    // Copy all joins the whole summary.
+    modal.dialog.querySelector("[data-copy-all]").click();
+    await vi.waitFor(() => {
+      if (writes.length < 2) throw new Error("copy-all did not write");
+    });
+    expect(writes[1]).toContain("Seed: 42");
+    expect(writes[1].split("\n")[0]).toBe("Positive: a cat");
+    modal.close();
+  });
+
+  // Regression: the feedback label must be restored from the button's REAL label,
+  // not from whatever it happened to read at click time. A second click inside
+  // the 1500 ms window used to capture the transient label as the restore target,
+  // latching it forever — and in the fail-then-succeed order it settled on "Copy
+  // failed" after a copy that WORKED, telling the user the opposite of the truth
+  // about their clipboard.
+  it("a second Copy click inside the feedback window still restores 'Copy' and reports the last outcome", async () => {
+    let succeed = false;
+    Object.defineProperty(navigator, "clipboard", {
+      // Rejecting sends copyTextToClipboard down its execCommand fallback, which
+      // jsdom does not implement — so the whole call answers false.
+      value: {
+        writeText: async () => {
+          if (!succeed) throw new Error("clipboard denied");
+        },
+      },
+      configurable: true,
+    });
+    vi.stubGlobal("fetch", metadataFetch(COMFY_META));
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.bodyEl.querySelector('[data-action="meta"]').click();
+    const btn = await vi.waitFor(() => {
+      const b = modal.dialog.querySelector('[data-copy-row="0"]');
+      if (!b) throw new Error("copy button not rendered");
+      return b;
+    });
+
+    // Fake timers only from here: the 1500 ms restore is the thing under test,
+    // and the two clicks have to land at a known offset from each other.
+    vi.useFakeTimers();
+    try {
+      btn.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(btn.textContent).toBe("Copy failed");
+      // Second click at t+500, i.e. while "Copy failed" is still painted.
+      succeed = true;
+      await vi.advanceTimersByTimeAsync(500);
+      btn.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(btn.textContent).toBe("Copied ✓");
+      // Well past both clicks' windows: the button is back to its real label,
+      // never parked on a stale "Copy failed" / "Copied ✓".
+      await vi.advanceTimersByTimeAsync(3600);
+      expect(btn.textContent).toBe("Copy");
+      expect(btn.classList.contains("is-copied")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+    modal.close();
+  });
+
+  it("shows the empty state (no rows, no raw disclosure) when nothing was found", async () => {
+    vi.stubGlobal("fetch", metadataFetch({ format: "", source: "none", summary: {}, raw: {} }));
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.bodyEl.querySelector('[data-action="meta"]').click();
+
+    const empty = await vi.waitFor(() => {
+      const e = modal.dialog.querySelector(".ib-meta-card .ib-meta-empty");
+      if (!e) throw new Error("empty state not rendered");
+      return e;
+    });
+    expect(empty.textContent).toContain("No generation metadata found");
+    const card = modal.dialog.querySelector(".ib-meta-card");
+    expect(card.querySelectorAll(".ib-meta-row").length).toBe(0);
+    expect(card.querySelector("details.ib-meta-raw")).toBeNull();
+    expect(card.querySelector("[data-copy-all]")).toBeNull();
+    modal.close();
+  });
+
+  // Metadata is a READ — /metadata accepts type=path — so ⓘ is the one card
+  // control deliberately outside the canWrite mirror. It IS gated on image-ness.
+  it("renders ⓘ on a path-tab card while the write buttons stay absent", async () => {
+    vi.stubGlobal("fetch", metadataFetch(COMFY_META, "path"));
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.dialog.querySelector('.ib-tab[data-type="path"]').click();
+    await vi.waitFor(() => {
+      if (modal.dialog.querySelector(".ib-view-toggle").style.display !== "none") {
+        throw new Error("still on a sandboxed tab");
+      }
+    });
+    const card = modal.bodyEl.querySelector(".ib-card.is-file");
+    expect(card.querySelector('[data-action="meta"]')).not.toBeNull();
+    for (const action of ["rename", "move", "delete"]) {
+      expect(card.querySelector(`[data-action="${action}"]`)).toBeNull();
+    }
+    modal.close();
+  });
+
+  it("does not render ⓘ on a video card (the endpoint is IMG_EXTS-gated)", async () => {
+    const fetchFn = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        type: "output",
+        subfolder: "",
+        path: "/out",
+        dirs: [],
+        files: [{ name: "clip.mp4", ext: ".mp4", mtime: 3, size: 10 }],
+        exists: true,
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchFn);
+    const modal = openShell();
+    await openLoaded(modal);
+    const card = modal.bodyEl.querySelector(".ib-card.is-file");
+    expect(card.dataset.ext).toBe(".mp4");
+    expect(card.querySelector('[data-action="meta"]')).toBeNull();
+    // The open (↗) button is still there — only the metadata affordance is gated.
+    expect(card.querySelector('[data-action="open"]')).not.toBeNull();
+    modal.close();
+  });
+
+  it("closes the overlay and raises a copyable toast when the read fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        if (String(url).includes("/image_browser/metadata")) {
+          return { ok: false, status: 500, json: async () => ({ ok: false, error: "boom" }) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            type: "output",
+            subfolder: "",
+            path: "/out",
+            dirs: [],
+            files: TWO_FILES,
+            exists: true,
+          }),
+        };
+      }),
+    );
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.bodyEl.querySelector('[data-action="meta"]').click();
+
+    await vi.waitFor(() => {
+      const toasts = Array.from(document.querySelectorAll(".cmn-toast"));
+      if (!toasts.length) throw new Error("no error toast");
+      if (!toasts.some((t) => t.textContent.includes("boom"))) {
+        throw new Error("toast lacks the reason");
+      }
+    });
+    // The overlay closed FIRST, so the toast is not sitting on top of it.
+    expect(modal.dialog.querySelector(".ib-meta-card")).toBeNull();
+    expect(document.querySelector(".ib-dialog")).not.toBeNull();
     modal.close();
   });
 });

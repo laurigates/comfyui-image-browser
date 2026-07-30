@@ -7,6 +7,7 @@ const BASE_URL = "/image_browser/base";
 const LIST_URL = "/image_browser/list";
 const THUMB_URL = "/image_browser/thumb";
 const FILE_URL = "/image_browser/file";
+const METADATA_URL = "/image_browser/metadata";
 const DELETE_URL = "/image_browser/delete";
 const DELETE_MANY_URL = "/image_browser/delete_many";
 const RENAME_URL = "/image_browser/rename";
@@ -192,6 +193,124 @@ export function fullSrcURL(
   }
   const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
   return `/api/view?${p.toString()}`;
+}
+
+// ---- Embedded generation metadata (read-only) --------------------------
+//
+// /metadata is a READ, so it takes the same dual addressing as /thumb — including
+// type=path. It is gated on IMG_EXTS server-side (images only, no video), and it
+// NEVER fabricates: a summary key the backend could not read is simply absent
+// from the response, which is why every field below is optional.
+
+// The recognised generation parameters. Mirrors the backend's summary keys
+// (image_meta.SUMMARY_WIDGETS + the prompt/model resolvers); a key the parser
+// could not fill is omitted from the response rather than sent empty. Module-local
+// on purpose — callers reach these keys through ImageMetadata / MetaRow and never
+// need to name the union, so exporting it would only add an unused export.
+type MetaField =
+  | "positive"
+  | "negative"
+  | "seed"
+  | "steps"
+  | "cfg"
+  | "sampler"
+  | "scheduler"
+  | "model";
+
+export interface ImageMetadata {
+  ok: boolean;
+  // Container label, derived from the extension ("png" / "jpeg" / "webp"); "" for
+  // an image whose format has no parser (a .gif is still a 200 with empty data).
+  format: string;
+  // Which writer's metadata was recognised. "comfyui" is reported whenever the
+  // container carried a Comfy graph, even if the summary came out empty.
+  source: "comfyui" | "a1111" | "none";
+  summary: Partial<Record<MetaField, string>>;
+  // Every embedded text key the container yielded, verbatim (the raw disclosure).
+  raw: Record<string, string>;
+  // True when the backend clipped a value (or the whole payload) at its cap.
+  truncated?: boolean;
+}
+
+export async function fetchMetadata(
+  type: BrowseType,
+  subfolder: string,
+  name: string,
+  absDir: string,
+): Promise<ImageMetadata> {
+  const params =
+    type === "path"
+      ? new URLSearchParams({ path: joinAbs(absDir, name) })
+      : new URLSearchParams({ type, subfolder: subfolder || "", name });
+  const r = await fetch(`${METADATA_URL}?${params.toString()}`, { cache: "no-cache" });
+  // The backend answers its refusals through _err (a JSON body with the reason
+  // AND a 4xx status), so parse the body before deciding the message — a bare
+  // `HTTP 400` would hide "unsupported file type".
+  let data: Partial<ImageMetadata> & { error?: string } = {};
+  try {
+    data = await r.json();
+  } catch {
+    // fall through to status-based error below
+  }
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+  return {
+    ok: true,
+    format: data.format || "",
+    source: data.source || "none",
+    summary: data.summary || {},
+    raw: data.raw || {},
+    truncated: data.truncated === true,
+  };
+}
+
+// Display order for the summary, in one place so the overlay rows and the
+// copy-all clipboard block can never disagree. Prompts first (they are what
+// actually gets copied), then the model, then the numerics.
+export const META_FIELDS: { key: MetaField; label: string }[] = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" },
+];
+
+export interface MetaRow {
+  key: MetaField;
+  label: string;
+  value: string;
+}
+
+// Walk META_FIELDS (not the response's own key order — that is JSON insertion
+// order and varies by writer) and drop anything missing or whitespace-only, so
+// an unknown field never renders as a bare "Negative:" row with a Copy button
+// that copies nothing. Values are String()-coerced defensively: the backend
+// stringifies everything, but a hand-rolled proxy or a future numeric key must
+// not put `[object Object]` — or a throw — in front of the user.
+export function metaRows(
+  summary: Partial<Record<MetaField, unknown>> | null | undefined,
+): MetaRow[] {
+  const rows: MetaRow[] = [];
+  if (!summary || typeof summary !== "object") return rows;
+  const bag = summary as Record<string, unknown>;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null) continue;
+    const value = String(v);
+    if (!value.trim()) continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+
+// The "Copy all" payload. Multi-line prompts stay verbatim (no re-indent, no
+// quoting) so the text can be pasted straight back into a prompt box.
+export function metaClipboardText(rows: MetaRow[]): string {
+  return rows.map((r) => `${r.label}: ${r.value}`).join("\n");
 }
 
 // ---- Mutations (sandboxed roots only) ---------------------------------
