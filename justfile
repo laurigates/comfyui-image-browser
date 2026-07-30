@@ -34,15 +34,24 @@ format:
     uv run ruff check --fix .
     bunx @biomejs/biome@2.4.15 check --write
 
-# Run the full test suite (pytest + Vitest).
+# Run the fast test suites (pytest + Vitest). Neither has a layout engine —
+# see `test-e2e` for the half of the behaviour they structurally cannot see.
 [group: "quality"]
 test:
     uv run pytest -v
     bun run test
 
+# Run the browser suite (Playwright, real Chromium at a phone viewport). This is
+# the only suite that can see the scroll-restore regressions: jsdom performs no
+# layout, so it neither clamps `scrollTop` on assignment nor answers 0 from a
+# detached element. Serves the CURRENT web/dist bundle, so build first.
+[group: "quality"]
+test-e2e: build
+    bun run test:e2e
+
 # Typecheck + build + lint + test in one shot — the local CI gate.
 [group: "quality"]
-check: typecheck build lint test check-xmp-drift check-thumb-cache-drift
+check: typecheck build lint test test-e2e check-xmp-drift check-thumb-cache-drift
 
 ##########
 # Vendored code

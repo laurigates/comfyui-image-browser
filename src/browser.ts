@@ -283,7 +283,13 @@ export function openImageBrowser(): ModalShellController {
       // breadcrumb armed or the next open falls back to folder view for nothing.
       markFlatPending(false);
       thumbObserver?.disconnect();
+      // A restore may still be re-asserting the offset frame by frame; the
+      // dialog is already gone, so cancel it here rather than letting it run
+      // out against a detached element (same reason the observer is
+      // disconnected — nothing scheduled may outlive the modal).
+      cancelScrollRestore();
       window.removeEventListener("keydown", onWindowKey, true);
+      window.removeEventListener("keydown", onScrollKey, true);
       window.removeEventListener("popstate", onPopState);
       // Pop the back-button sentinel unless back itself closed the browser.
       if (!closedByBack) history.back();
@@ -390,6 +396,181 @@ export function openImageBrowser(): ModalShellController {
   // moves, renames and rating changes don't fling the view back to the top.
   const scrollHost = modal.bodyEl;
 
+  // ---- Scroll restore --------------------------------------------
+  // Restoring a remembered offset is NOT one assignment. Three separate things
+  // break `scrollHost.scrollTop = n`, measured in a real engine at a phone
+  // viewport:
+  //
+  //  1. THE READ AT CLOSE IS TAKEN FROM A DETACHED ELEMENT — the actual bug.
+  //     The kit's shell teardown does `backdrop.remove(); dialog.remove();`
+  //     and only THEN calls `onClose`, so onClose's rememberScroll() reads
+  //     scrollTop off a node that is no longer in the document, which every
+  //     real engine answers with 0. Measured: parked at 31185, the one read
+  //     during close reported `{value: 0, connected: false}` — so the Map
+  //     stored 0 and no later restore could undo it. The position was never
+  //     saved, not lost. jsdom returns the last value ASSIGNED whether the
+  //     node is attached or not, which is exactly why the jsdom test is green
+  //     and structurally cannot see this. `liveScrollTop` below is the mirror
+  //     the close path reads instead of the element.
+  //  2. `scrollTop = n` CLAMPS to `scrollHeight - clientHeight` at the instant
+  //     of assignment, silently. Measured: 162370 requested on a 62370-max
+  //     scroller reads back 62370 in the same statement. A single write is
+  //     therefore only as good as the layout that happened to be in force.
+  //  3. Momentum scrolling — iOS keeps decelerating a fling after the finger
+  //     is up and an assignment mid-deceleration is unreliable. DEFENSIVE AND
+  //     UNVERIFIED: this repo's browser harness is Chromium-only
+  //     (`-webkit-overflow-scrolling: touch` is inert outside WebKit), so the
+  //     re-assert loop below is hardening against a reported behaviour, NOT
+  //     something measured here. It is free in Chromium — the loop finds the
+  //     offset already correct and writes nothing.
+  //
+  // Hence restoreScroll(): assign synchronously (the common case, and the one
+  // the lazy-thumb observer must see), then re-assert for a BOUNDED number of
+  // frames against the clamp bound in force at each of them.
+
+  // Mirror of scrollHost.scrollTop. The scroller keeps it fresh itself —
+  // `scroll` fires for touch, wheel, keyboard and programmatic movement alike —
+  // so it is still valid at teardown, when the element has already been
+  // detached and answers 0. One caveat that any new scroll mutator has to
+  // respect: `scroll` is dispatched at the frame's RENDERING step, after that
+  // frame's input events, so a mutator whose result can be read later in the
+  // same frame must write the mirror itself (setScrollTop does; applyFocus's
+  // scrollIntoView has to, and does).
+  let liveScrollTop = 0;
+  // Set by a user gesture: the user has taken the scroller, so a pending
+  // restore stops re-asserting. A wrong offset is better than a scroller that
+  // fights a finger.
+  let userTookOver = false;
+  let restoreRaf = 0;
+
+  scrollHost.addEventListener(
+    "scroll",
+    () => {
+      liveScrollTop = scrollHost.scrollTop;
+    },
+    { passive: true },
+  );
+
+  // The user's input outranks a pending restore, unconditionally. Cancel as
+  // well as flag: `step` checks the flag, but it only gets to check it on the
+  // next frame, and one re-assert against a gesture already in flight is one
+  // too many.
+  function yieldScroller(): void {
+    userTookOver = true;
+    cancelScrollRestore();
+  }
+
+  for (const ev of ["pointerdown", "wheel", "touchstart"]) {
+    // Capture, so a card handler that stops propagation cannot hide the
+    // gesture; passive, so registering on the scroller never costs the engine
+    // its fast path (nothing here calls preventDefault).
+    scrollHost.addEventListener(ev, yieldScroller, { passive: true, capture: true });
+  }
+
+  // Keys that scroll a scroller natively. A keyboard scroll produces NONE of
+  // the events above, so without this the loop fights it — measured, and it
+  // does not merely delay the keypress, it swallows it: End pressed inside the
+  // restore window left the offset pinned at the remembered 31185 across 8
+  // samples spanning ~360 ms, while the identical press 500 ms later (window
+  // expired) reached the bottom at 62370. The listener is on `window` because
+  // the focus is on <body>, not on the scroller — a scroller-level listener
+  // never sees the key. The pack's own vim keys need no entry here: they route
+  // through applyFocus(), which cancels the restore itself.
+  const SCROLL_KEYS = new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    // Space is deliberately absent: onWindowKey claims it for the selection
+    // toggle and preventDefaults it, so it never scrolls the view here. Listing
+    // it would disarm a restore on a keypress that moves nothing.
+  ]);
+  function onScrollKey(e: KeyboardEvent): void {
+    // In a text field these keys move the caret, not the view — and the search
+    // field is autofocused, so treating them as a scroll gesture there would
+    // disarm the restore on every keystroke of a filter.
+    if (!SCROLL_KEYS.has(e.key) || isInInput()) return;
+    yieldScroller();
+  }
+  window.addEventListener("keydown", onScrollKey, true);
+
+  // Honest read of where the view is. While the scroller is in the document the
+  // element is the truth (and refreshes the mirror); once it is detached — the
+  // close path, mechanism 1 above — only the mirror is.
+  function currentScrollTop(): number {
+    if (scrollHost.isConnected) liveScrollTop = scrollHost.scrollTop;
+    return liveScrollTop;
+  }
+
+  function setScrollTop(v: number): void {
+    scrollHost.scrollTop = v;
+    // Read back rather than trusting `v` — this is where a clamp becomes
+    // visible, and the mirror must hold what the engine kept, not what we asked
+    // for.
+    liveScrollTop = scrollHost.scrollTop;
+  }
+
+  function cancelScrollRestore(): void {
+    if (restoreRaf !== 0) {
+      cancelAnimationFrame(restoreRaf);
+      restoreRaf = 0;
+    }
+  }
+
+  // Frames a restore keeps re-asserting for — ~200 ms at 60 Hz. BOUNDED on
+  // purpose: an open-ended loop (or an interval) would outlive the modal the
+  // way a leaked IntersectionObserver used to — see thumbObserver. onClose
+  // cancels whatever is still pending.
+  const RESTORE_FRAMES = 12;
+
+  /**
+   * Put the scroller at `target` and make it stick.
+   *
+   * Contract:
+   *  - the first assignment is SYNCHRONOUS, so callers — and the lazy-thumb
+   *    observer, which is installed after it — see the final viewport
+   *    immediately;
+   *  - `target <= 0` is finished by that one assignment: the top cannot be
+   *    clamped and needs no defending (search, sort and first-visit-to-a-folder
+   *    all land at the top and must STAY there);
+   *  - otherwise the offset is re-asserted once per frame for RESTORE_FRAMES
+   *    frames, each time against the clamp bound in force at that frame;
+   *  - if the target is genuinely out of reach — the folder got shorter because
+   *    files were deleted or a filter narrowed it — it settles at the bottom
+   *    rather than fighting for an offset that no longer exists;
+   *  - any user input that scrolls — pointer, wheel, touch or a native
+   *    keyboard scroll — ends it early, as does the dialog detaching; and
+   *    nothing is left scheduled after RESTORE_FRAMES either way.
+   */
+  function restoreScroll(target: number): void {
+    cancelScrollRestore();
+    userTookOver = false;
+    setScrollTop(target);
+    if (target <= 0) return;
+    // No layout box (jsdom, or a scroller that is not rendered) → nothing
+    // clamps and there are no frames to correct in; the assignment above is the
+    // whole behaviour, which is what keeps the bookkeeping test meaningful.
+    if (typeof requestAnimationFrame !== "function" || scrollHost.clientHeight <= 0) return;
+    let frames = 0;
+    const step = (): void => {
+      restoreRaf = 0;
+      if (userTookOver || !scrollHost.isConnected) return;
+      const max = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+      const reachable = Math.min(target, max);
+      // Sub-pixel differences are the engine's own rounding on a fractional
+      // scroll position, not a lost restore — writing them back would fight
+      // the compositor for nothing.
+      if (Math.abs(scrollHost.scrollTop - reachable) > 1) setScrollTop(reachable);
+      if (++frames >= RESTORE_FRAMES) return;
+      restoreRaf = requestAnimationFrame(step);
+    };
+    restoreRaf = requestAnimationFrame(step);
+  }
+
   // ---- Floating batch-action bar (visible while a selection exists) ----
   const selBar = document.createElement("div");
   selBar.className = "ib-selbar";
@@ -457,8 +638,11 @@ export function openImageBrowser(): ModalShellController {
 
   // Called on every navigation BEFORE the location mutates, so returning to
   // this folder later (up, chip, tab, crumb) lands where the user left off.
+  // Goes through currentScrollTop() — NOT scrollHost.scrollTop — because the
+  // close path calls this after the shell has already detached the dialog, and
+  // a detached element reads 0 (see the scroll-restore block above).
   function rememberScroll(): void {
-    scrollMemory.set(locationKey(), scrollHost.scrollTop);
+    scrollMemory.set(locationKey(), currentScrollTop());
   }
 
   function navigateUp(): void {
@@ -529,18 +713,19 @@ export function openImageBrowser(): ModalShellController {
   // ---- Wiring ----------------------------------------------------
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
-    renderGrid();
     // New filter → read results from the top (renderGrid otherwise restores
-    // the previous scroll position, which is for in-place mutations).
-    scrollHost.scrollTop = 0;
+    // the previous scroll position, which is for in-place mutations). Handed
+    // IN rather than assigned after: renderGrid's restore defends the offset
+    // it was given for a few frames, so a follow-up `scrollTop = 0` would be
+    // a race against it.
+    renderGrid({ scrollTo: 0 });
   });
   sortEl.addEventListener("change", () => {
     const [k, d] = sortEl.value.split(":");
     state.sortKey = k as string;
     state.sortDir = d as string;
     saveSort(k as string, d as string);
-    renderGrid();
-    scrollHost.scrollTop = 0;
+    renderGrid({ scrollTo: 0 });
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
@@ -1165,14 +1350,25 @@ export function openImageBrowser(): ModalShellController {
       state.files = [];
     }
     modal.setBusy(false);
-    renderGrid();
-    markFlatPending(false);
+    // Pins render into the toolbar, which lives INSIDE the scroller — do it
+    // before the grid so the restore below measures the final content height.
     renderPins();
     // Navigating restores the folder's remembered scroll position (0 for a
     // never-visited one) — each directory keeps its own place while you
     // traverse up and down. Refresh-in-place (refresh button, paste/move
     // re-list) keeps the position renderGrid restored.
-    if (!opts?.preserveScroll) scrollHost.scrollTop = scrollMemory.get(locationKey()) ?? 0;
+    //
+    // The destination's offset is handed INTO renderGrid rather than assigned
+    // after it. renderGrid would otherwise restore the offset it captured
+    // before `innerHTML = ""` — which belongs to the folder we just LEFT — and
+    // that write gets clamped into the new listing's range (measured
+    // 31185 → 1865 going up out of a deep folder). It survives today only
+    // because the corrected write lands 0.2 ms later in the same task; that is
+    // a dead write to delete, not a coincidence to rely on.
+    renderGrid({
+      scrollTo: opts?.preserveScroll ? undefined : (scrollMemory.get(locationKey()) ?? 0),
+    });
+    markFlatPending(false);
   }
 
   function thumbForFile(f: ListingFile): ThumbDescriptor {
@@ -1193,12 +1389,14 @@ export function openImageBrowser(): ModalShellController {
     return { kind: "icon", text: "📄" };
   }
 
-  function renderGrid(): void {
+  function renderGrid(opts?: { scrollTo?: number }): void {
     const q = state.query;
     // Re-renders happen after delete/move/rename/sort — wiping innerHTML
     // resets the body's scrollTop, so capture and restore it. Keyboard focus
-    // moves scroll separately via applyFocus.
-    const savedScrollTop = scrollHost.scrollTop;
+    // moves scroll separately via applyFocus. `scrollTo` overrides the capture
+    // for callers that already know where the view belongs (a navigation's
+    // remembered offset, or 0 for a new search/sort) — see loadAndRender.
+    const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     // Flat view collapses the subtree into files only — no ".." card and no
@@ -1338,8 +1536,15 @@ export function openImageBrowser(): ModalShellController {
     }
 
     setCount(visible, state.files.length);
+    // Restore BEFORE installing the observer, so its first pass is computed
+    // against the final viewport. The old order (observe, then scroll) was
+    // latent rather than broken — IntersectionObserver delivers its callbacks
+    // asynchronously, after the task holding the write — but restoreScroll now
+    // also corrects across later frames, and an observer registered against the
+    // pre-restore viewport would have queued the top-of-list band for fetching
+    // before that. In flat view that is thousands of wrong /thumb requests.
+    restoreScroll(targetScrollTop);
     installLazyThumbs(gridEl);
-    scrollHost.scrollTop = savedScrollTop;
   }
 
   // Observer for the current render. Kept so the next render can disconnect it
@@ -1429,7 +1634,18 @@ export function openImageBrowser(): ModalShellController {
       c.classList.toggle("is-focused", i === focusIndex);
     }
     const focused = gridEl.querySelector(".ib-card.is-focused") as HTMLElement | null;
+    // Moving the keyboard focus IS a scroll intent — drop any restore still
+    // re-asserting from the render that preceded it, or the two fight.
+    cancelScrollRestore();
     focused?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // scrollIntoView is the one in-pack scroll mutator that bypasses
+    // setScrollTop, and the `scroll` event that would refresh the mirror is
+    // dispatched at the frame's rendering step — AFTER this task's input
+    // events. A close in the same frame (key autorepeat plus a tap on ✕, or any
+    // long frame while thumbnails decode) would then remember a stale mirror:
+    // measured 12279 on screen, 0 stored. The scroller is attached here by
+    // construction, so this read is the real position.
+    liveScrollTop = scrollHost.scrollTop;
   }
 
   function refreshSelectionClasses(): void {
