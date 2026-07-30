@@ -23,6 +23,8 @@
       "src/**/*.ts",
       "**/web/data/**/*.json",
       "**/tests/js/**/*.js",
+      "**/tests/e2e/**/*.js",
+      "**/tests/e2e/**/*.mjs",
       "vitest.config.js",
       "package.json",
       "knip.json",

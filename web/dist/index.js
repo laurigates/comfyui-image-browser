@@ -1246,7 +1246,9 @@ function openImageBrowser() {
       rememberScroll();
       markFlatPending(false);
       thumbObserver?.disconnect();
+      cancelScrollRestore();
       window.removeEventListener("keydown", onWindowKey, true);
+      window.removeEventListener("keydown", onScrollKey, true);
       window.removeEventListener("popstate", onPopState);
       if (!closedByBack)
         history.back();
@@ -1313,6 +1315,74 @@ function openImageBrowser() {
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
   const scrollHost = modal.bodyEl;
+  let liveScrollTop = 0;
+  let userTookOver = false;
+  let restoreRaf = 0;
+  scrollHost.addEventListener("scroll", () => {
+    liveScrollTop = scrollHost.scrollTop;
+  }, { passive: true });
+  function yieldScroller() {
+    userTookOver = true;
+    cancelScrollRestore();
+  }
+  for (const ev of ["pointerdown", "wheel", "touchstart"]) {
+    scrollHost.addEventListener(ev, yieldScroller, { passive: true, capture: true });
+  }
+  const SCROLL_KEYS = new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End"
+  ]);
+  function onScrollKey(e) {
+    if (!SCROLL_KEYS.has(e.key) || isInInput())
+      return;
+    yieldScroller();
+  }
+  window.addEventListener("keydown", onScrollKey, true);
+  function currentScrollTop() {
+    if (scrollHost.isConnected)
+      liveScrollTop = scrollHost.scrollTop;
+    return liveScrollTop;
+  }
+  function setScrollTop(v) {
+    scrollHost.scrollTop = v;
+    liveScrollTop = scrollHost.scrollTop;
+  }
+  function cancelScrollRestore() {
+    if (restoreRaf !== 0) {
+      cancelAnimationFrame(restoreRaf);
+      restoreRaf = 0;
+    }
+  }
+  const RESTORE_FRAMES = 12;
+  function restoreScroll(target) {
+    cancelScrollRestore();
+    userTookOver = false;
+    setScrollTop(target);
+    if (target <= 0)
+      return;
+    if (typeof requestAnimationFrame !== "function" || scrollHost.clientHeight <= 0)
+      return;
+    let frames = 0;
+    const step = () => {
+      restoreRaf = 0;
+      if (userTookOver || !scrollHost.isConnected)
+        return;
+      const max = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+      const reachable = Math.min(target, max);
+      if (Math.abs(scrollHost.scrollTop - reachable) > 1)
+        setScrollTop(reachable);
+      if (++frames >= RESTORE_FRAMES)
+        return;
+      restoreRaf = requestAnimationFrame(step);
+    };
+    restoreRaf = requestAnimationFrame(step);
+  }
   const selBar = document.createElement("div");
   selBar.className = "ib-selbar";
   selBar.innerHTML = `
@@ -1355,7 +1425,7 @@ function openImageBrowser() {
     return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}${view}`;
   }
   function rememberScroll() {
-    scrollMemory.set(locationKey(), scrollHost.scrollTop);
+    scrollMemory.set(locationKey(), currentScrollTop());
   }
   function navigateUp() {
     rememberScroll();
@@ -1413,16 +1483,14 @@ function openImageBrowser() {
   window.addEventListener("popstate", onPopState);
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
-    renderGrid();
-    scrollHost.scrollTop = 0;
+    renderGrid({ scrollTo: 0 });
   });
   sortEl.addEventListener("change", () => {
     const [k, d] = sortEl.value.split(":");
     state.sortKey = k;
     state.sortDir = d;
     saveSort(k, d);
-    renderGrid();
-    scrollHost.scrollTop = 0;
+    renderGrid({ scrollTo: 0 });
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
@@ -1959,11 +2027,11 @@ function openImageBrowser() {
       state.files = [];
     }
     modal.setBusy(false);
-    renderGrid();
-    markFlatPending(false);
     renderPins();
-    if (!opts?.preserveScroll)
-      scrollHost.scrollTop = scrollMemory.get(locationKey()) ?? 0;
+    renderGrid({
+      scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey()) ?? 0
+    });
+    markFlatPending(false);
   }
   function thumbForFile(f) {
     const ext = (f.ext || "").toLowerCase();
@@ -1982,9 +2050,9 @@ function openImageBrowser() {
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
-  function renderGrid() {
+  function renderGrid(opts) {
     const q = state.query;
-    const savedScrollTop = scrollHost.scrollTop;
+    const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     const flat = isFlat();
@@ -2082,8 +2150,8 @@ ${when}`;
       gridEl.appendChild(el);
     }
     setCount(visible, state.files.length);
+    restoreScroll(targetScrollTop);
     installLazyThumbs(gridEl);
-    scrollHost.scrollTop = savedScrollTop;
   }
   let thumbObserver = null;
   function installLazyThumbs(rootEl) {
@@ -2154,7 +2222,9 @@ ${when}`;
       c.classList.toggle("is-focused", i === focusIndex);
     }
     const focused = gridEl.querySelector(".ib-card.is-focused");
+    cancelScrollRestore();
     focused?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    liveScrollTop = scrollHost.scrollTop;
   }
   function refreshSelectionClasses() {
     for (const [i, c] of fileCards().entries()) {

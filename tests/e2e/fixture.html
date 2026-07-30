@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Mobile-first suite: without this the 390px viewport would be laid out at
+         the 980px default width and the grid would report desktop column counts. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>comfyui-image-browser e2e fixture</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0b10;
+        color: #6a6a74;
+        font: 13px/1.5 system-ui, sans-serif;
+      }
+      /* Stands in for ComfyUI's canvas: the modal is full-viewport and covers
+         this, so it exists only to prove the page under the dialog scrolls
+         nowhere of its own accord. */
+      #canvas-stand-in {
+        height: 300vh;
+        padding: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="canvas-stand-in">canvas stand-in (the browser modal covers this)</div>
+    <script type="module">
+      // Loads the SERVED artifact at its real URL — not the TypeScript source.
+      // A test that imported src/ would prove nothing about what ComfyUI runs:
+      // web/dist/index.js is what ships, and `bun run build` is what produces it.
+      // The module's top-level `app.registerExtension(...)` runs on import,
+      // against the stub served at /scripts/app.js (that import is left
+      // unbundled by design — see ADR-0001).
+      import { openShell } from "/extensions/comfyui-image-browser/index.js";
+
+      // Opening is NOT automatic. Tests need to seed localStorage (saved view
+      // mode, sort, pins — all of which the browser reads at open time) before
+      // the modal mounts, and an auto-open would race that.
+      window.__IB_E2E__ = {
+        open() {
+          this.modal = openShell();
+          return true;
+        },
+        modal: null,
+      };
+      window.__IB_E2E_READY__ = true;
+    </script>
+  </body>
+</html>
