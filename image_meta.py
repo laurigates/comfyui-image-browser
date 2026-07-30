@@ -1023,12 +1023,17 @@ def _ui_to_api_graph(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(node_type, str):
             continue
         inputs: dict[str, Any] = {}
-        sockets = node.get("inputs")
-        for socket in sockets if isinstance(sockets, list) else ():
-            if not isinstance(socket, dict):
+        # ``slot``, not ``socket``: the registry scanner's network tripwire is a
+        # bare ``socket.\w`` match, so a local named ``socket`` gets this pack's
+        # publish flagged for network operations it does not perform (there is a
+        # tests/test_publish_hygiene.py case for exactly this). LiteGraph calls
+        # them input slots anyway.
+        slots = node.get("inputs")
+        for slot in slots if isinstance(slots, list) else ():
+            if not isinstance(slot, dict):
                 continue
-            name = socket.get("name")
-            ref = links.get(str(socket.get("link")))
+            name = slot.get("name")
+            ref = links.get(str(slot.get("link")))
             if isinstance(name, str) and ref is not None:
                 inputs[name] = ref
         if _looks_like_text_node(node_type):
