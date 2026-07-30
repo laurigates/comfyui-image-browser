@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.14...comfyui-image-browser-v0.1.15) (2026-07-30)
+
+
+### Bug Fixes
+
+* **assets:** draw the registry banner and sync the display-assets gate ([#44](https://github.com/laurigates/comfyui-image-browser/issues/44)) ([2c3c794](https://github.com/laurigates/comfyui-image-browser/commit/2c3c794c370741e819117c92f847c4f7725170ac))
+
 ## [0.1.14](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.13...comfyui-image-browser-v0.1.14) (2026-07-27)
 
 
