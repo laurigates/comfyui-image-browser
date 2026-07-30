@@ -867,6 +867,7 @@ var BASE_URL = "/image_browser/base";
 var LIST_URL = "/image_browser/list";
 var THUMB_URL = "/image_browser/thumb";
 var FILE_URL = "/image_browser/file";
+var METADATA_URL = "/image_browser/metadata";
 var DELETE_URL = "/image_browser/delete";
 var DELETE_MANY_URL = "/image_browser/delete_many";
 var RENAME_URL = "/image_browser/rename";
@@ -969,6 +970,55 @@ function fullSrcURL(type, subfolder, name, absDir) {
   }
   const p = new URLSearchParams({ filename: name, type, subfolder: subfolder || "" });
   return `/api/view?${p.toString()}`;
+}
+async function fetchMetadata(type, subfolder, name, absDir) {
+  const params = type === "path" ? new URLSearchParams({ path: joinAbs(absDir, name) }) : new URLSearchParams({ type, subfolder: subfolder || "", name });
+  const r = await fetch(`${METADATA_URL}?${params.toString()}`, { cache: "no-cache" });
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+  return {
+    ok: true,
+    format: data.format || "",
+    source: data.source || "none",
+    summary: data.summary || {},
+    raw: data.raw || {},
+    truncated: data.truncated === true
+  };
+}
+var META_FIELDS = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" }
+];
+function metaRows(summary) {
+  const rows = [];
+  if (!summary || typeof summary !== "object")
+    return rows;
+  const bag = summary;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null)
+      continue;
+    const value = String(v);
+    if (!value.trim())
+      continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+function metaClipboardText(rows) {
+  return rows.map((r) => `${r.label}: ${r.value}`).join(`
+`);
 }
 async function postJSON(url, body) {
   const r = await fetch(url, {
@@ -1190,7 +1240,7 @@ function openImageBrowser() {
     placeholder: "Filter by filename…",
     width: "100vw",
     height: "100vh",
-    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     onClose: () => {
       rememberScroll();
@@ -1514,6 +1564,8 @@ function openImageBrowser() {
       const action = actionBtn.dataset.action;
       if (action === "open")
         openFull(f);
+      else if (action === "meta")
+        openMetadata(f);
       else if (action === "delete")
         onDelete(f);
       else if (action === "rename")
@@ -1635,6 +1687,107 @@ function openImageBrowser() {
   function openFull(f) {
     const url = fullSrcURL(state.type, fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
+  }
+  const copyFeedback = new WeakMap;
+  function copyInto(btn, text, restore) {
+    let fb = copyFeedback.get(btn);
+    if (!fb) {
+      fb = { seq: 0, timer: null };
+      copyFeedback.set(btn, fb);
+    }
+    const slot = fb;
+    const seq = ++slot.seq;
+    if (slot.timer !== null) {
+      clearTimeout(slot.timer);
+      slot.timer = null;
+    }
+    copyTextToClipboard(text).then((ok) => {
+      if (slot.seq !== seq)
+        return;
+      btn.textContent = ok ? "Copied ✓" : "Copy failed";
+      btn.classList.toggle("is-copied", ok);
+      slot.timer = setTimeout(() => {
+        slot.timer = null;
+        btn.textContent = restore;
+        btn.classList.remove("is-copied");
+      }, 1500);
+    });
+  }
+  async function openMetadata(f) {
+    let live = true;
+    const ov = openShellOverlay(modal, {
+      onDismiss: () => {
+        live = false;
+      }
+    });
+    ov.card.classList.add("ib-meta-card");
+    const close = () => {
+      live = false;
+      ov.close();
+    };
+    const title = `Metadata — ${escHTML(f.name)}`;
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ib-meta-body"><div class="ib-meta-status">Reading metadata…</div></div>
+      <div class="cmp-ov-actions">
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    let data;
+    try {
+      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+    } catch (e) {
+      close();
+      reportError("Metadata read failed", e);
+      return;
+    }
+    if (!live)
+      return;
+    const rows = metaRows(data.summary);
+    const rawKeys = Object.keys(data.raw);
+    const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
+    const rowsHTML = rows.map((r, i) => `
+        <div class="ib-meta-row">
+          <div class="ib-meta-k">${escHTML(r.label)}</div>
+          <div class="ib-meta-v">${escHTML(r.value)}</div>
+          <button type="button" class="ib-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`).join("");
+    const emptyHTML = rows.length ? "" : `<div class="ib-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
+    const rawJSON = JSON.stringify(data.raw, null, 2);
+    const rawHTML = rawKeys.length ? `
+        <details class="ib-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escHTML(rawJSON)}</pre>
+          <button type="button" class="ib-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>` : "";
+    const noteHTML = data.truncated ? `<div class="ib-meta-note">Some values were truncated by the server.</div>` : "";
+    const copyAll = rows.length ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>` : "";
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${title}</div>
+      <div class="ib-meta-body">
+        <div class="ib-meta-src">${escHTML(srcLabel)}${data.format ? `<span class="ib-meta-fmt">${escHTML(data.format)}</span>` : ""}</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}
+      </div>
+      <div class="cmp-ov-actions">
+        ${copyAll}
+        <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
+      </div>`;
+    ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
+    for (const btn of ov.card.querySelectorAll("[data-copy-row]")) {
+      const row = rows[Number(btn.dataset.copyRow)];
+      const label = btn.textContent || "Copy";
+      if (row)
+        btn.addEventListener("click", () => copyInto(btn, row.value, label));
+    }
+    const rawBtn = ov.card.querySelector("[data-copy-raw]");
+    const rawLabel = rawBtn?.textContent || "Copy JSON";
+    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
+    const allBtn = ov.card.querySelector("[data-copy-all]");
+    const allLabel = allBtn?.textContent || "Copy all";
+    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
   }
   async function onDelete(f) {
     const ok = await confirmInShell(modal, {
@@ -1899,6 +2052,7 @@ ${dims}
 ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon">${t.text}</div>`;
+      const metaBtn = IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
       const moveBtn = canWrite ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
       const writeBtns = canWrite ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
            ${moveBtn}
@@ -1915,6 +2069,7 @@ ${when}`;
         ${starsRow}
         <div class="ib-actions">
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
+          ${metaBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -2463,6 +2618,7 @@ ${when}`;
           <div class="ib-help-h">Other</div>
           <dl>
             <dt>Enter / o</dt><dd>open preview</dd>
+            <dt>i</dt><dd>metadata</dd>
             <dt>/</dt><dd>focus search</dd>
             <dt>?</dt><dd>this help</dd>
             <dt>Esc</dt><dd>close (priority)</dd>
@@ -2612,6 +2768,12 @@ ${when}`;
         e.stopPropagation();
         if (f)
           openFull(f);
+        break;
+      case "i":
+        e.preventDefault();
+        e.stopPropagation();
+        if (f && IMG_EXTS.has((f.ext || "").toLowerCase()))
+          openMetadata(f);
         break;
       case "r":
         if (SANDBOXED_TYPES.includes(state.type) && f) {
@@ -3071,6 +3233,60 @@ var BROWSER_CSS = `
     font-size: 11.5px; color: #ffd866;
 }
 .ib-help-body dd { margin: 0 0 4px 0; font-size: 11.5px; color: #b8b8c0; }
+/* Metadata overlay (the ⓘ card). The ib-meta-* namespace is distinct from the
+   card's own .ib-meta dimensions line — class selectors match whole tokens, so
+   .ib-meta never catches .ib-meta-row and vice versa. */
+.ib-meta-card { width: min(680px, calc(100% - 24px)); max-height: calc(100% - 24px); }
+.ib-meta-body {
+    display: flex; flex-direction: column; gap: 8px;
+    overflow-y: auto; padding: 8px 0; -webkit-overflow-scrolling: touch;
+}
+.ib-meta-status { padding: 14px 2px; font-size: 12.5px; color: #888; font-style: italic; }
+.ib-meta-src {
+    display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: #9ec6ff;
+    text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ib-meta-fmt { color: #777; text-transform: none; letter-spacing: 0; }
+.ib-meta-row { display: grid; grid-template-columns: 84px 1fr auto; gap: 8px; align-items: start; }
+.ib-meta-k {
+    padding-top: 7px; font-size: 11px; color: #8a8a92;
+    text-transform: uppercase; letter-spacing: 0.4px;
+}
+.ib-meta-v {
+    /* A long positive prompt scrolls inside its own box instead of pushing the
+       Copy buttons and the overlay actions off the card. Selectable: the card is
+       a reading surface, unlike the grid (which suppresses selection for
+       long-press). */
+    max-height: 7.5em; overflow-y: auto;
+    padding: 6px 8px; font-size: 12px; line-height: 1.45; color: #d8d8dc;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+.ib-meta-copy {
+    background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
+    padding: 0 10px; font-size: 12px; cursor: pointer; font-family: inherit; min-height: 32px;
+}
+.ib-meta-copy:hover { background: #3a3a4a; color: #fff; }
+.ib-meta-copy.is-copied { background: #25402f; color: #8fe0a8; border-color: #37624a; }
+.ib-meta-empty { padding: 16px 2px; font-size: 12.5px; color: #777; font-style: italic; }
+.ib-meta-note { font-size: 11.5px; color: #c8a95c; }
+.ib-meta-raw > summary {
+    padding: 7px 0; font-size: 12px; color: #9ec6ff; cursor: pointer; min-height: 32px;
+}
+.ib-meta-raw pre {
+    margin: 4px 0 8px; padding: 8px; max-height: 30vh; overflow: auto;
+    background: #17171e; border: 1px solid #2a2a32; border-radius: 4px;
+    font-size: 11px; color: #b8b8c0; white-space: pre-wrap; overflow-wrap: anywhere;
+    user-select: text; -webkit-user-select: text;
+}
+@media (max-width: 600px) {
+    /* Stack the label above the value — an 84px gutter leaves the prompt column
+       unreadably narrow on a phone. */
+    .ib-meta-row { grid-template-columns: 1fr auto; }
+    .ib-meta-k { grid-column: 1 / -1; padding-top: 0; }
+}
 `;
 
 // src/index.ts
