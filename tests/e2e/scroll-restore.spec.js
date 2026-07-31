@@ -43,6 +43,10 @@ const BULK_FILES = folderSpec(BULK).fileCount;
 // hand-picked constant.
 const RESTORE_FRAMES = 12;
 
+// Renderer slowdown used by the gesture tests to widen the ~200 ms restore window
+// so an out-of-process CDP gesture cannot arrive after the chain has finished.
+const CPU_THROTTLE = 20;
+
 // confirmInShell's OK button is `.cmp-ov-danger` when `danger: true` and
 // `.cmp-ov-primary` otherwise — match either so the driver does not depend on
 // which flavour a given call site chose.
@@ -416,10 +420,21 @@ test("REGRESSION G — a wheel gesture inside the restore window wins", async ({
   expect(remembered).toBeGreaterThan(0);
 
   await page.evaluate(() => window.__IB_PROBE__.reset());
+  // The gesture has to land while the chain is still live, and the chain is only
+  // RESTORE_FRAMES frames (~200 ms) long — while `mouse.wheel` is an
+  // out-of-process CDP round-trip. On a loaded machine the wheel arrived after
+  // the chain had already run all 12 frames ({scheduled:12, ran:12, cancelled:0})
+  // and the test failed having proved nothing. Throttling the RENDERER stretches
+  // the window (frames are renderer-side JS; the dispatch is not), so the wheel
+  // cannot miss it. Deliberately not a sleep and not a retry: both would hide the
+  // race rather than remove it.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: CPU_THROTTLE });
   // The descend's real click leaves the pointer over the grid, which is where
   // `mouse.wheel` dispatches — no extra round-trip inside the window to move it.
   const paint = await descendIntoBulkFast(page);
   await page.mouse.wheel(0, -1500);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
 
   const after = await settleOffset(page);
   const stable = await settleOffset(page);
@@ -462,8 +477,15 @@ test("REGRESSION H — a keyboard scroll inside the restore window is not swallo
   const remembered = await primeBulkOffset(page, thumbs);
 
   await page.evaluate(() => window.__IB_PROBE__.reset());
+  // Same out-of-process race as REGRESSION G, same deterministic answer: throttle
+  // the renderer so the ~200 ms window cannot close before the CDP keypress
+  // arrives. Without it this test flaked — it passed by pressing End after the
+  // chain had already finished, which proves nothing about the guard.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: CPU_THROTTLE });
   const paint = await descendIntoBulkFast(page);
   await page.keyboard.press("End");
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
 
   const after = await settleOffset(page);
   const stable = await settleOffset(page);
