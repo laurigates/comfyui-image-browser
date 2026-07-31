@@ -22,6 +22,10 @@ import {
   ratingOf,
   starsHTML,
 } from "@laurigates/comfy-modal-kit";
+// Runtime import, left unbundled by `bun build --external '/scripts/*'` and
+// resolved against ComfyUI's served module. Used only by loadWorkflow(), which
+// hands a File to the app's own loader rather than reimplementing graph parsing.
+import { app } from "/scripts/app.js";
 import {
   type BatchItem,
   type BrowseType,
@@ -32,6 +36,7 @@ import {
   fetchListing,
   fetchMetadata,
   fullSrcURL,
+  hasEmbeddedWorkflow,
   IMG_EXTS,
   type ImageMetadata,
   imageThumbURL,
@@ -270,7 +275,7 @@ export function openImageBrowser(): ModalShellController {
     width: "100vw",
     height: "100vh",
     footerLeftHTML:
-      "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+      "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>w</kbd> workflow · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     // Fires on EVERY teardown path (Esc, × button, backdrop, coordinator
     // dismiss) — the controller.close wrapper does not, so keyboard cleanup
@@ -862,6 +867,7 @@ export function openImageBrowser(): ModalShellController {
       const action = actionBtn.dataset.action;
       if (action === "open") openFull(f);
       else if (action === "meta") void openMetadata(f);
+      else if (action === "workflow") void loadWorkflow(f);
       else if (action === "delete") onDelete(f);
       else if (action === "rename") onRename(f);
       else if (action === "move") onMove(f);
@@ -1055,6 +1061,50 @@ export function openImageBrowser(): ModalShellController {
         btn.classList.remove("is-copied");
       }, 1500);
     });
+  }
+
+  // Load the graph embedded in an image onto the canvas.
+  //
+  // Two-step on purpose. The /metadata READ is the gate: it seeks past the pixel
+  // data to reach the text chunks, so asking "is there a graph?" costs a fraction
+  // of the full-size bytes, and — more importantly — it lets a workflow-less image
+  // get an honest message. handleFile()'s own no-workflow path is a quiet return,
+  // which would read to the user as a dead button rather than as "this PNG has no
+  // graph in it". Only once the gate passes do we fetch the bytes and hand the
+  // File to ComfyUI's OWN loader, which is also what a drag-and-drop onto the
+  // canvas calls — so workflow-vs-prompt precedence, API-format reconstruction
+  // and the missing-node-types dialog all come from the app, not from us.
+  //
+  // The browser closes first: loadGraphData swaps the canvas underneath, and
+  // leaving a full-viewport modal parked over the graph the user just asked to
+  // see is the wrong end state.
+  async function loadWorkflow(f: ListingFile): Promise<void> {
+    const sub = fileSub(f);
+    try {
+      const meta = await fetchMetadata(state.type, sub, f.name, state.absPath);
+      if (!hasEmbeddedWorkflow(meta)) {
+        notify({
+          severity: "warn",
+          summary: "No workflow in this image",
+          detail: `${f.name} carries no embedded graph. Images saved by another tool (or re-encoded, e.g. by a phone gallery or a chat app) lose ComfyUI's metadata.`,
+        });
+        return;
+      }
+      const res = await fetch(fullSrcURL(state.type, sub, f.name, state.absPath));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      // handleFile keys the workflow's tab name off file.name, so pass the real
+      // filename rather than a synthesized one.
+      const file = new File([blob], f.name, { type: blob.type });
+      modal.close();
+      await app.handleFile(file);
+    } catch (e) {
+      notify({
+        severity: "error",
+        summary: "Could not load workflow",
+        detail: `${f.name}: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
   }
 
   // Embedded generation metadata for one image, in an IN-DIALOG overlay
@@ -1479,8 +1529,18 @@ export function openImageBrowser(): ModalShellController {
       // on the browse…/path tab too. Don't "fix" this into canWrite. It is gated
       // on image-ness instead — same ext source thumbForFile uses — because the
       // endpoint's own gate is IMG_EXTS (a video would just 400).
-      const metaBtn = IMG_EXTS.has((f.ext || "").toLowerCase())
+      const isImage = IMG_EXTS.has((f.ext || "").toLowerCase());
+      const metaBtn = isImage
         ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>`
+        : "";
+      // Load-workflow rides the same gate as ⓘ (both are READS through /metadata,
+      // which accepts type=path), so it appears on the browse…/path tab too and
+      // stays outside the canWrite mirror. It is offered for every image rather
+      // than only for images known to carry a graph: knowing that requires the
+      // per-file metadata read, and doing that for every card in a listing would
+      // cost one request per thumbnail. The click path reads it and says so.
+      const wfBtn = isImage
+        ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>`
         : "";
       // Move is only offered for the sandboxed roots (backend rejects path writes).
       const moveBtn = canWrite
@@ -1522,6 +1582,7 @@ export function openImageBrowser(): ModalShellController {
         <div class="ib-actions">
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
           ${metaBtn}
+          ${wfBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -2141,6 +2202,7 @@ export function openImageBrowser(): ModalShellController {
           <dl>
             <dt>Enter / o</dt><dd>open preview</dd>
             <dt>i</dt><dd>metadata</dd>
+            <dt>w</dt><dd>load workflow</dd>
             <dt>/</dt><dd>focus search</dd>
             <dt>?</dt><dd>this help</dd>
             <dt>Esc</dt><dd>close (priority)</dd>
@@ -2300,6 +2362,12 @@ export function openImageBrowser(): ModalShellController {
         e.preventDefault();
         e.stopPropagation();
         if (f) openFull(f);
+        break;
+      case "w":
+        // Same gate as the ⤓ button: images only, every tab (a read, not a write).
+        e.preventDefault();
+        e.stopPropagation();
+        if (f && IMG_EXTS.has((f.ext || "").toLowerCase())) void loadWorkflow(f);
         break;
       case "i":
         // Same gate as the ⓘ button: images only, every tab (a read, not a write).
