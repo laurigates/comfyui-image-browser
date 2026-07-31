@@ -18,6 +18,7 @@
 import { type ModalShellController, makeLauncher } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { openImageBrowser } from "./browser.js";
+import { installSidebarStars } from "./sidebar-stars.js";
 
 // Exported so the jsdom mount smoke test can open the view without the app
 // chrome and assert the body renders. Delegates to the real explorer.
@@ -25,8 +26,33 @@ export function openShell(): ModalShellController {
   return openImageBrowser();
 }
 
+// Teardown for the sidebar-star injector, kept module-level so the setting's
+// onChange can toggle it. The settings store fires onChange once at
+// registration with the stored value, so the setting IS the lifecycle — there
+// is no separate startup call to keep in sync with it.
+let uninstallSidebarStars: (() => void) | null = null;
+
 app.registerExtension({
   name: "comfy.image-browser",
+  settings: [
+    {
+      id: "ImageBrowser.SidebarStars",
+      category: ["Image Browser", "Sidebar", "Star ratings"],
+      name: "Star ratings on stock Media Assets cards",
+      tooltip:
+        "Adds a 0–5 star row to ComfyUI's own Media Assets sidebar cards, written to the image's XMP — the same rating the Image Browser shows. Injected into stock UI (ComfyUI exposes no extension point for asset cards), so switch this off if a frontend update makes it misbehave.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: (value: boolean) => {
+        if (value && !uninstallSidebarStars) {
+          uninstallSidebarStars = installSidebarStars();
+        } else if (!value && uninstallSidebarStars) {
+          uninstallSidebarStars();
+          uninstallSidebarStars = null;
+        }
+      },
+    },
+  ],
   // Command + shared Extensions > Touch Tools menu entry + action-bar button,
   // built by the kit with the family conventions baked in (kebab command id,
   // PrimeIcons, safe-open with a copyable error toast). Kit ADR-0002.

@@ -737,6 +737,92 @@ class TestValidateBatchItems:
         assert len(items) == 1
 
 
+class TestRatingsBatchRead:
+    """Drive the real /ratings handler against a tmp sandbox.
+
+    The contract the sidebar injector depends on is positional: ratings[i]
+    belongs to items[i], and an unreadable entry is ``None`` rather than 0.
+    Collapsing those two would make the injector paint a confident zero-star
+    row over a file it never read.
+    """
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def _call(self, body):
+        return asyncio.run(ib.image_browser_ratings(_FakeRequest(body)))
+
+    def test_route_present(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(r.method == "POST" and r.path == "/image_browser/ratings" for r in registered)
+
+    def test_returns_one_entry_per_item_in_order(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        for name in ("a.png", "b.png", "c.png"):
+            (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        resp = self._call(
+            {
+                "items": [
+                    {"type": "output", "subfolder": "", "name": n}
+                    for n in ("a.png", "b.png", "c.png")
+                ]
+            }
+        )
+        assert resp.status == 200
+        data = resp._body
+        assert data["ok"] is True
+        assert len(data["ratings"]) == 3
+
+    def test_unreadable_entry_is_none_not_zero(self, tmp_path, monkeypatch):
+        # "unrated" (0) and "could not read" (None) are different facts, and the
+        # frontend retries the latter instead of painting it.
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        resp = self._call(
+            {
+                "items": [
+                    {"type": "output", "subfolder": "", "name": "real.png"},
+                    {"type": "output", "subfolder": "", "name": "missing.png"},
+                ]
+            }
+        )
+        data = resp._body
+        assert data["ratings"][0] == 0
+        assert data["ratings"][1] is None
+
+    def test_rejects_path_type_like_the_rating_write(self, tmp_path, monkeypatch):
+        # Ratings are a sandboxed-roots concept: type=path is refused here for
+        # the same reason the /rating WRITE refuses it (ADR-0002).
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"items": [{"type": "path", "subfolder": "", "name": "a.png"}]})
+        assert resp._body["ratings"] == [None]
+
+    def test_rejects_traversal(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call(
+            {"items": [{"type": "output", "subfolder": "", "name": "../escape.png"}]}
+        )
+        assert resp._body["ratings"] == [None]
+
+    def test_rejects_oversized_batch(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        items = [
+            {"type": "output", "subfolder": "", "name": f"{i}.png"}
+            for i in range(ib.MAX_RATING_BATCH + 1)
+        ]
+        resp = self._call({"items": items})
+        assert resp.status == 400
+
+    def test_rejects_empty_batch(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"items": []})
+        assert resp.status == 400
+
+
 class TestBatchEndpointsRegistered:
     """Sanity: the batch routes are wired on the PromptServer routes table.
 

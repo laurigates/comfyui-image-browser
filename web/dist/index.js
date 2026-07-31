@@ -3477,12 +3477,218 @@ var BROWSER_CSS = `
 }
 `;
 
+// src/sidebar-stars.ts
+var STYLE_ID6 = "ib-sidebar-stars-style";
+var ROW_CLASS = "ibs-stars";
+var DONE_ATTR = "data-ibs";
+var RATINGS_URL = "/image_browser/ratings";
+var MAX_BATCH = 200;
+var SETTLE_MS = 120;
+var ratingCache = new Map;
+var requested = new Set;
+function addressKey(a) {
+  return `${a.type}\x00${a.subfolder}\x00${a.name}`;
+}
+function parseAssetAddress(src) {
+  if (!src)
+    return null;
+  let url;
+  try {
+    url = new URL(src, "http://localhost");
+  } catch {
+    return null;
+  }
+  if (!url.pathname.endsWith("/api/view"))
+    return null;
+  const name = url.searchParams.get("filename");
+  if (!name)
+    return null;
+  const type = url.searchParams.get("type") || "input";
+  if (!SANDBOXED_TYPES.includes(type))
+    return null;
+  return { type, subfolder: url.searchParams.get("subfolder") || "", name, absDir: "" };
+}
+var CARD_SELECTOR = "[data-selected]";
+function cardRootOf(img) {
+  return img.closest(CARD_SELECTOR);
+}
+async function fetchRatings(addrs) {
+  const res = await fetch(RATINGS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: addrs.map((a) => ({ type: a.type, subfolder: a.subfolder, name: a.name }))
+    })
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok || !Array.isArray(data.ratings))
+    throw new Error(data.error || "bad response");
+  return data.ratings;
+}
+function installSidebarStars() {
+  ratingCache.clear();
+  requested.clear();
+  ensureStyleOnce(STYLE_ID6, `
+.${ROW_CLASS} { display: flex; gap: 1px; justify-content: center; padding: 2px 0 0; }
+.${ROW_CLASS} button {
+  background: none; border: 0; padding: 0 1px; cursor: pointer; line-height: 1;
+  /* Big enough to hit on a phone without stretching the stock card's row. */
+  font-size: 13px; min-width: 16px; color: #55555f;
+}
+.${ROW_CLASS} button.is-on { color: #ffb02e; }
+.${ROW_CLASS} button:hover { color: #ffc95e; }
+/* The stock card sets draggable=true; a drag started on a star must not
+   detach the card, and the row must never become a drag handle. */
+.${ROW_CLASS} { -webkit-user-drag: none; user-select: none; touch-action: manipulation; }
+`);
+  let timer = null;
+  let disposed = false;
+  const onClick = (e) => {
+    const target = e.target;
+    const star = target?.closest?.(`.${ROW_CLASS} [data-val]`);
+    if (!star)
+      return;
+    const row = star.closest(`.${ROW_CLASS}`);
+    const card = row ? cardRootOf(row) : null;
+    const img = card?.querySelector("img");
+    const addr = parseAssetAddress(img?.getAttribute("src"));
+    if (!row || !addr)
+      return;
+    e.preventDefault();
+    e.stopPropagation();
+    const prev = Number(row.dataset.rating || "0");
+    const next = nextRating(prev, Number(star.dataset.val));
+    applyStars(row, next);
+    postRating(RATING_URL, addr, next).then((confirmed) => {
+      ratingCache.set(addressKey(addr), confirmed);
+      applyStars(row, confirmed);
+    }).catch((err) => {
+      ratingCache.set(addressKey(addr), prev);
+      applyStars(row, prev);
+      notify({
+        severity: "error",
+        summary: "Rating failed",
+        detail: `${addr.name}: ${err instanceof Error ? err.message : String(err)}`
+      });
+    });
+  };
+  document.addEventListener("click", onClick, true);
+  function paint() {
+    const pending = [];
+    for (const img of document.querySelectorAll(`${CARD_SELECTOR} img`)) {
+      const addr = parseAssetAddress(img.getAttribute("src"));
+      if (!addr)
+        continue;
+      const card = cardRootOf(img);
+      if (!card)
+        continue;
+      const key = addressKey(addr);
+      const known = ratingCache.get(key);
+      let row = card.querySelector(`.${ROW_CLASS}`);
+      if (row && card.getAttribute(DONE_ATTR) !== key) {
+        row.remove();
+        row = null;
+      }
+      if (!row) {
+        const holder = document.createElement("div");
+        holder.innerHTML = starsHTML("ibs", known ?? 0);
+        row = holder.firstElementChild;
+        if (!row)
+          continue;
+        row.classList.add(ROW_CLASS);
+        row.setAttribute("draggable", "false");
+        card.appendChild(row);
+        card.setAttribute(DONE_ATTR, key);
+      }
+      if (known === undefined) {
+        if (!requested.has(key) && pending.length < MAX_BATCH) {
+          requested.add(key);
+          pending.push(addr);
+        }
+      } else {
+        applyStars(row, known);
+      }
+    }
+    if (!pending.length)
+      return;
+    fetchRatings(pending).then((ratings) => {
+      pending.forEach((addr, i) => {
+        const r = ratings[i];
+        if (typeof r === "number")
+          ratingCache.set(addressKey(addr), r);
+        else
+          requested.delete(addressKey(addr));
+      });
+      if (!disposed)
+        schedule();
+    }).catch((err) => {
+      for (const a of pending)
+        requested.delete(addressKey(a));
+      console.warn(`[${EXT_NAME}] sidebar rating read failed`, err);
+    });
+  }
+  function schedule() {
+    if (disposed)
+      return;
+    if (timer !== null)
+      clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        paint();
+      } catch (err) {
+        console.warn(`[${EXT_NAME}] sidebar star pass failed`, err);
+      }
+    }, SETTLE_MS);
+  }
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["src"]
+  });
+  schedule();
+  return () => {
+    disposed = true;
+    if (timer !== null)
+      clearTimeout(timer);
+    observer.disconnect();
+    document.removeEventListener("click", onClick, true);
+    for (const row of document.querySelectorAll(`.${ROW_CLASS}`))
+      row.remove();
+    for (const card of document.querySelectorAll(`[${DONE_ATTR}]`))
+      card.removeAttribute(DONE_ATTR);
+  };
+}
+
 // src/index.ts
 function openShell() {
   return openImageBrowser();
 }
+var uninstallSidebarStars = null;
 app2.registerExtension({
   name: "comfy.image-browser",
+  settings: [
+    {
+      id: "ImageBrowser.SidebarStars",
+      category: ["Image Browser", "Sidebar", "Star ratings"],
+      name: "Star ratings on stock Media Assets cards",
+      tooltip: "Adds a 0–5 star row to ComfyUI's own Media Assets sidebar cards, written to the image's XMP — the same rating the Image Browser shows. Injected into stock UI (ComfyUI exposes no extension point for asset cards), so switch this off if a frontend update makes it misbehave.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: (value) => {
+        if (value && !uninstallSidebarStars) {
+          uninstallSidebarStars = installSidebarStars();
+        } else if (!value && uninstallSidebarStars) {
+          uninstallSidebarStars();
+          uninstallSidebarStars = null;
+        }
+      }
+    }
+  ],
   ...makeLauncher({
     id: "image-browser.open",
     label: "Image Browser",

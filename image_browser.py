@@ -25,6 +25,7 @@ Endpoint surface (all under /image_browser/):
     POST /rmdir        {type, subfolder, name, recursive}           delete a folder
     POST /mkdir        {type, subfolder, name}                       create a folder
     POST /rating       {type, subfolder, name, rating}              0..5 star rating
+    POST /ratings      {items:[{type,subfolder,name}, …]}           batch rating READ
 
 Security posture:
 
@@ -1067,6 +1068,68 @@ async def image_browser_rating(request: web.Request) -> web.Response:
         log.error("rating write failed for %s: %s", target, backend)
         return web.json_response({"ok": False, "error": backend}, status=500)
     return web.json_response({"ok": True, "rating": rating, "backend": backend})
+
+
+#: Ceiling on one batch rating read. The sidebar injector asks only for the
+#: cards currently on screen, so a legitimate batch is tens of items; this is a
+#: backstop against a client asking for a whole output tree in one request,
+#: which would stat-and-parse thousands of files on the event loop.
+MAX_RATING_BATCH = 200
+
+
+@PromptServer.instance.routes.post("/image_browser/ratings")
+async def image_browser_ratings(request: web.Request) -> web.Response:
+    """Read 0..5 ratings for many files in one request (batch READ).
+
+    Body: ``{items: [{type, subfolder, name}, ...]}``. Answers
+    ``{ok, ratings: [...]}`` **index-aligned with items** — position i is the
+    rating for item i.
+
+    Two contracts worth keeping:
+
+    * ``null`` (not ``0``) for any item that could not be read — rejected
+      address, missing file, unreadable XMP. "Unrated" and "unknown" are
+      different facts, and collapsing them would make the injector paint a
+      confident zero-star row over a file it never actually read.
+    * The sandbox gate is ``_resolve_sandboxed_file``, the same resolver the
+      rating WRITE uses, so ``type=path`` is rejected here too. Strictly this
+      is a read and could be laxer, but ratings are a sandboxed-roots concept
+      in this pack and one perimeter is easier to keep correct than two.
+
+    Reads go through ``xmp_meta.read_rating_cached``, so a repeat request for
+    an unchanged file costs a stat rather than a re-parse.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+    items, err_resp = _validate_batch_items(body)
+    if err_resp:
+        return err_resp
+    assert items is not None
+    if len(items) > MAX_RATING_BATCH:
+        return web.json_response(
+            {"ok": False, "error": f"too many items (max {MAX_RATING_BATCH})"}, status=400
+        )
+
+    ratings: list[int | None] = []
+    for item in items:
+        target, err = _resolve_sandboxed_file(
+            item.get("type", ""), item.get("subfolder") or "", item.get("name", "")
+        )
+        if err or target is None:
+            ratings.append(None)
+            continue
+        try:
+            st = os.stat(target)
+            ratings.append(xmp_meta.read_rating_cached(target, st))
+        except OSError as exc:
+            # A missing or unreadable file is a normal race here (the sidebar
+            # can list a file the user deleted a moment ago), so it is a null
+            # entry rather than a 500 that would blank the whole batch.
+            log.debug("batch rating read failed for %s: %s", target, exc)
+            ratings.append(None)
+    return web.json_response({"ok": True, "ratings": ratings})
 
 
 # No custom node — this pack is a pure frontend view. Keeping the mappings empty
