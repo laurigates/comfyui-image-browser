@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.18](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.17...comfyui-image-browser-v0.1.18) (2026-07-31)
+
+
+### Features
+
+* **sidebar:** star ratings on ComfyUI's stock Media Assets cards ([#56](https://github.com/laurigates/comfyui-image-browser/issues/56)) ([4bc9f4e](https://github.com/laurigates/comfyui-image-browser/commit/4bc9f4e136025690b8c8bc0dc5b7797c96c81d5f))
+* **workflow:** load an image's embedded graph from a card ([#55](https://github.com/laurigates/comfyui-image-browser/issues/55)) ([52fb089](https://github.com/laurigates/comfyui-image-browser/commit/52fb0897fef92d9d666734cbcc109602311b3d62))
+
+
+### Bug Fixes
+
+* **deps:** bump comfy-modal-kit to 0.8.1 so the toast fix is actually live ([#52](https://github.com/laurigates/comfyui-image-browser/issues/52)) ([3d8a5b7](https://github.com/laurigates/comfyui-image-browser/commit/3d8a5b7c676b676684e8ae412d4cad8079261b48))
+
 ## [0.1.17](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.16...comfyui-image-browser-v0.1.17) (2026-07-30)
 
 
