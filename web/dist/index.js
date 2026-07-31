@@ -922,6 +922,9 @@ function promptInShell(shell, opts) {
 }
 
 // src/index.ts
+import { app as app2 } from "/scripts/app.js";
+
+// src/browser.ts
 import { app } from "/scripts/app.js";
 
 // src/api.ts
@@ -1052,6 +1055,19 @@ async function fetchMetadata(type, subfolder, name, absDir) {
     raw: data.raw || {},
     truncated: data.truncated === true
   };
+}
+var WORKFLOW_RAW_KEYS = ["workflow", "prompt"];
+function hasEmbeddedWorkflow(meta) {
+  const raw = meta?.raw;
+  if (!raw)
+    return false;
+  return WORKFLOW_RAW_KEYS.some((k) => {
+    const v = raw[k];
+    if (typeof v !== "string")
+      return false;
+    const t = v.trim();
+    return t !== "" && t !== "null" && t !== "{}" && t !== "[]";
+  });
 }
 var META_FIELDS = [
   { key: "positive", label: "Positive" },
@@ -1303,7 +1319,7 @@ function openImageBrowser() {
     placeholder: "Filter by filename…",
     width: "100vw",
     height: "100vh",
-    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>w</kbd> workflow · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     onClose: () => {
       rememberScroll();
@@ -1697,6 +1713,8 @@ function openImageBrowser() {
         openFull(f);
       else if (action === "meta")
         openMetadata(f);
+      else if (action === "workflow")
+        loadWorkflow(f);
       else if (action === "delete")
         onDelete(f);
       else if (action === "rename")
@@ -1843,6 +1861,33 @@ function openImageBrowser() {
         btn.classList.remove("is-copied");
       }, 1500);
     });
+  }
+  async function loadWorkflow(f) {
+    const sub = fileSub(f);
+    try {
+      const meta = await fetchMetadata(state.type, sub, f.name, state.absPath);
+      if (!hasEmbeddedWorkflow(meta)) {
+        notify({
+          severity: "warn",
+          summary: "No workflow in this image",
+          detail: `${f.name} carries no embedded graph. Images saved by another tool (or re-encoded, e.g. by a phone gallery or a chat app) lose ComfyUI's metadata.`
+        });
+        return;
+      }
+      const res = await fetch(fullSrcURL(state.type, sub, f.name, state.absPath));
+      if (!res.ok)
+        throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const file = new File([blob], f.name, { type: blob.type });
+      modal.close();
+      await app.handleFile(file);
+    } catch (e) {
+      notify({
+        severity: "error",
+        summary: "Could not load workflow",
+        detail: `${f.name}: ${e instanceof Error ? e.message : String(e)}`
+      });
+    }
   }
   async function openMetadata(f) {
     let live = true;
@@ -2183,7 +2228,9 @@ ${dims}
 ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon">${t.text}</div>`;
-      const metaBtn = IMG_EXTS.has((f.ext || "").toLowerCase()) ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
+      const isImage = IMG_EXTS.has((f.ext || "").toLowerCase());
+      const metaBtn = isImage ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
+      const wfBtn = isImage ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
       const moveBtn = canWrite ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
       const writeBtns = canWrite ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
            ${moveBtn}
@@ -2201,6 +2248,7 @@ ${when}`;
         <div class="ib-actions">
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
           ${metaBtn}
+          ${wfBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -2752,6 +2800,7 @@ ${when}`;
           <dl>
             <dt>Enter / o</dt><dd>open preview</dd>
             <dt>i</dt><dd>metadata</dd>
+            <dt>w</dt><dd>load workflow</dd>
             <dt>/</dt><dd>focus search</dd>
             <dt>?</dt><dd>this help</dd>
             <dt>Esc</dt><dd>close (priority)</dd>
@@ -2901,6 +2950,12 @@ ${when}`;
         e.stopPropagation();
         if (f)
           openFull(f);
+        break;
+      case "w":
+        e.preventDefault();
+        e.stopPropagation();
+        if (f && IMG_EXTS.has((f.ext || "").toLowerCase()))
+          loadWorkflow(f);
         break;
       case "i":
         e.preventDefault();
@@ -3426,7 +3481,7 @@ var BROWSER_CSS = `
 function openShell() {
   return openImageBrowser();
 }
-app.registerExtension({
+app2.registerExtension({
   name: "comfy.image-browser",
   ...makeLauncher({
     id: "image-browser.open",

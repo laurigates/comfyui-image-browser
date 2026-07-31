@@ -39,6 +39,12 @@ ComfyUI.
   resolution), and fuzzy filename filter.
 - **Thumbnails** for images (WebP previews) and videos (poster frames), lazily
   loaded as you scroll. Tap a card to open the full-size file in a new tab.
+- **⤓ Load workflow** (`w`) — reopen the graph embedded in an image, on any tab
+  including `browse…`. ComfyUI writes the workflow into every image it saves, so
+  this turns the browser into a durable way back into a past generation — unlike
+  the stock sidebar, whose list is cleared on every ComfyUI restart. Images
+  re-encoded elsewhere (a phone gallery, a chat app) lose that metadata, and the
+  button says so rather than failing silently.
 - **Manage** files in the sandboxed roots (Input / Output / Temp):
   - **🗑 Delete** — with a confirm step.
   - **✎ Rename** — in place (extension preserved).

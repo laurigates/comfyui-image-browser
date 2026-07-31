@@ -9,7 +9,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // pure-helper unit tests but ships a blank dialog — so it is asserted here.
 // The initial fetch fires asynchronously and (harmlessly) fails under jsdom;
 // the synchronous scaffold (root + toolbar tabs + grid) is what we assert on.
-import { fetchMetadata, META_FIELDS, metaClipboardText, metaRows } from "../../src/api.ts";
+import {
+  fetchMetadata,
+  hasEmbeddedWorkflow,
+  META_FIELDS,
+  metaClipboardText,
+  metaRows,
+} from "../../src/api.ts";
 import { openShell } from "../../src/index.ts";
 
 /** Dispatch a real keydown on window (capture phase, cancelable). */
@@ -789,6 +795,30 @@ describe("image metadata helpers", () => {
     expect(metaRows(null)).toEqual([]);
     expect(metaRows(undefined)).toEqual([]);
     expect(metaRows({})).toEqual([]);
+  });
+
+  it("hasEmbeddedWorkflow accepts either raw graph key, preferring neither", () => {
+    expect(hasEmbeddedWorkflow({ raw: { workflow: '{"nodes":[]}' } })).toBe(true);
+    // prompt-only images (saved by a node that omits the UI graph) still load —
+    // ComfyUI reconstructs a graph from the API format.
+    expect(hasEmbeddedWorkflow({ raw: { prompt: '{"1":{}}' } })).toBe(true);
+    expect(hasEmbeddedWorkflow({ raw: { parameters: "steps: 20" } })).toBe(false);
+  });
+
+  it("hasEmbeddedWorkflow treats empty-but-present keys as absent", () => {
+    // Some writers emit the key with nothing in it. A truthiness check alone
+    // would light the button and then produce no graph, which reads as a bug.
+    for (const v of ["", "   ", "null", "{}", "[]"]) {
+      expect(hasEmbeddedWorkflow({ raw: { workflow: v } })).toBe(false);
+    }
+    expect(hasEmbeddedWorkflow({ raw: { workflow: 42 } })).toBe(false);
+  });
+
+  it("hasEmbeddedWorkflow survives null/undefined/empty metadata", () => {
+    expect(hasEmbeddedWorkflow(null)).toBe(false);
+    expect(hasEmbeddedWorkflow(undefined)).toBe(false);
+    expect(hasEmbeddedWorkflow({})).toBe(false);
+    expect(hasEmbeddedWorkflow({ raw: {} })).toBe(false);
   });
 
   it("metaClipboardText joins 'Label: value' and keeps a multi-line prompt verbatim", () => {
