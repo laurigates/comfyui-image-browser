@@ -44,6 +44,27 @@ ComfyUI.
   - **✎ Rename** — in place (extension preserved).
   - **⇄ Move** — into another root or subfolder via a destination picker.
 
+### Star ratings on ComfyUI's own Media Assets sidebar
+
+Ratings are stored in each image's **XMP** (or a sidecar), so they are a
+property of the file rather than of this pack. That makes them worth showing
+where you actually look at a fresh generation — ComfyUI's stock **Media
+Assets** sidebar — and not only inside the browser.
+
+Enabled by default; switch it off under **Settings → Image Browser → Sidebar**.
+
+ComfyUI exposes no extension point for media-asset cards (`ComfyExtension` has
+hooks for commands, menus, settings, sidebar *tabs* and canvas/node context
+menus — nothing per card, and `MediaAssetCard.vue` has no slot), so this is a
+deliberate, contained DOM injection. It is written to fail soft: if a frontend
+update changes the card markup, the stars simply stop appearing — they never
+throw, and never intercept the card's own clicks. The setting is the kill
+switch if a future version misbehaves.
+
+Note that the sidebar's own list is cleared whenever ComfyUI restarts. The
+ratings are not — they are on disk, so anything you star there is still starred
+in the Image Browser afterwards.
+
 Management actions are intentionally **disabled in the arbitrary-path
 (`browse…`) tab** — that mode is browse-only. The backend rejects writes outside
 the Input/Output/Temp roots, so an arbitrary path can never be mutated by URL
