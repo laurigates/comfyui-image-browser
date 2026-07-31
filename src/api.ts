@@ -265,6 +265,33 @@ export async function fetchMetadata(
   };
 }
 
+// Which raw keys carry a loadable graph, in ComfyUI's own preference order.
+// `workflow` is the editable graph (node positions, groups, widget values);
+// `prompt` is the flattened API-format graph the backend actually executed.
+// ComfyUI's handleFile() prefers the former and falls back to the latter, so a
+// prompt-only image (one saved by a node that omits the UI graph) still loads —
+// as a reconstructed graph rather than the original layout.
+const WORKFLOW_RAW_KEYS = ["workflow", "prompt"] as const;
+
+// Does this image actually carry a graph? Used to decide BEFORE fetching the
+// full-size bytes, so an image with no workflow gets an honest "none here"
+// instead of handleFile() silently doing nothing (its no-workflow path is a
+// quiet return, which would read to the user as a broken button).
+//
+// Whitespace-only and literal "null"/"{}" values count as absent: some writers
+// emit the key with an empty payload, and a truthiness check alone would
+// promise a graph the loader then can't produce.
+export function hasEmbeddedWorkflow(meta: Pick<ImageMetadata, "raw"> | null | undefined): boolean {
+  const raw = meta?.raw;
+  if (!raw) return false;
+  return WORKFLOW_RAW_KEYS.some((k) => {
+    const v = raw[k];
+    if (typeof v !== "string") return false;
+    const t = v.trim();
+    return t !== "" && t !== "null" && t !== "{}" && t !== "[]";
+  });
+}
+
 // Display order for the summary, in one place so the overlay rows and the
 // copy-all clipboard block can never disagree. Prompts first (they are what
 // actually gets copied), then the model, then the numerics.
