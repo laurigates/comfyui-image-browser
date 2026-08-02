@@ -89,6 +89,12 @@ FLAT_LIST_CAP = 5000
 # response truncated, since the newest-N guarantee no longer holds.
 FLAT_WALK_CAP = 200_000
 
+# Upper bound on a NON-recursive listing. Same newest-N semantics as above.
+# Without it a 50k-file directory costs 50k header opens plus 50k rating reads
+# on the event loop, and 50k cards in one grid is well past usable either way.
+# Mirrored in comfyui-gallery-loader, which had the identical hole.
+DIR_LIST_CAP = 5000
+
 # Cover the common cases mimetypes.guess_type misses on some distros.
 mimetypes.add_type("image/webp", ".webp")
 mimetypes.add_type("image/avif", ".avif")
@@ -271,6 +277,39 @@ def _scan_file_entry(
     }
 
 
+# (mtime, subpath, name, ext, path, stat) — what phase 1 collects per file.
+_FoundEntry = tuple[float, str, str, str, str, os.stat_result]
+
+
+def _probe_newest(
+    found: list[_FoundEntry],
+    image_subset: set[str],
+    cap: int,
+    walk_truncated: bool,
+    *,
+    with_subpath: bool,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Sort newest-first, slice to ``cap``, then probe only the survivors.
+
+    Shared by the recursive and non-recursive listers so the cap means the same
+    thing on both. Ties break on (subpath, name) so the slice is deterministic
+    for same-mtime files; a batch render writes many within one clock tick.
+
+    ``with_subpath`` is False for a non-recursive listing, which must omit the
+    key ENTIRELY rather than emit an empty string — the frontend distinguishes
+    "flat listing, file at top level" from "folder listing" by its presence.
+    """
+    found.sort(key=lambda f: (-f[0], f[1], f[2]))
+    truncated = walk_truncated or len(found) > cap
+    files: list[dict[str, Any]] = []
+    for _mtime, subpath, name, ext, path, st in found[:cap]:
+        fd = _scan_file_entry(path, name, ext, st, image_subset)
+        if with_subpath:
+            fd["subpath"] = subpath
+        files.append(fd)
+    return files, truncated
+
+
 def _walk_files(
     base: str, exts: set[str], image_subset: set[str], cap: int
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -342,17 +381,7 @@ def _walk_files(
             # bad dir.
             continue
 
-    # Phase 2 — newest first, then probe only what we keep. Ties break on
-    # subpath/name so the slice is deterministic for same-mtime files (a batch
-    # render writes many files within the same clock tick).
-    found.sort(key=lambda f: (-f[0], f[1], f[2]))
-    truncated = walk_truncated or len(found) > cap
-    files: list[dict[str, Any]] = []
-    for _mtime, subpath, name, ext, path, st in found[:cap]:
-        fd = _scan_file_entry(path, name, ext, st, image_subset)
-        fd["subpath"] = subpath
-        files.append(fd)
-    return files, truncated
+    return _probe_newest(found, image_subset, cap, walk_truncated, with_subpath=True)
 
 
 @PromptServer.instance.routes.get("/image_browser/list")
@@ -395,6 +424,7 @@ async def image_browser_list(request: web.Request) -> web.Response:
         # Flat view: no folder cards, files carry their relative subpath.
         files, truncated = _walk_files(base, exts, image_subset, FLAT_LIST_CAP)
     else:
+        found: list[_FoundEntry] = []
         try:
             with os.scandir(base) as it:
                 for entry in it:
@@ -411,18 +441,21 @@ async def image_browser_list(request: web.Request) -> web.Response:
                             if ext not in exts:
                                 continue
                             st = entry.stat(follow_symlinks=False)
-                            files.append(
-                                _scan_file_entry(entry.path, entry.name, ext, st, image_subset)
-                            )
+                            found.append((st.st_mtime, "", entry.name, ext, entry.path, st))
                     except OSError:
                         continue
         except PermissionError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=403)
         except OSError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        # Same enumerate -> sort -> slice -> probe shape as the recursive path,
+        # so a huge single directory pays the expensive probes only for the
+        # files that ship. Newest first.
+        files, truncated = _probe_newest(
+            found, image_subset, DIR_LIST_CAP, False, with_subpath=False
+        )
 
     dirs.sort(key=lambda d: d["name"].lower())
-    files.sort(key=lambda f: f["mtime"], reverse=True)
 
     return web.json_response(
         {

@@ -309,6 +309,60 @@ class TestListRecursive:
         assert len(resp._body["files"]) == 2
 
 
+class TestListDirCap:
+    """The non-recursive path is capped too — it had the same unbounded hole."""
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def test_caps_at_dir_list_cap_keeping_the_newest(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "DIR_LIST_CAP", 2)
+        for i in range(5):
+            f = tmp_path / f"f{i}.png"
+            f.write_bytes(b"x")
+            os.utime(f, (1000 + i, 1000 + i))
+        resp = self._call({"type": "output", "subfolder": ""})
+        assert resp._body["truncated"] is True
+        assert {f["name"] for f in resp._body["files"]} == {"f3.png", "f4.png"}
+
+    def test_probes_run_only_on_files_that_ship(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "DIR_LIST_CAP", 2)
+        probed: list[str] = []
+        real = ib._scan_file_entry
+
+        def counting(path, name, ext, st, image_subset):
+            probed.append(name)
+            return real(path, name, ext, st, image_subset)
+
+        monkeypatch.setattr(ib, "_scan_file_entry", counting)
+        for i in range(6):
+            f = tmp_path / f"f{i}.png"
+            f.write_bytes(b"x")
+            os.utime(f, (1000 + i, 1000 + i))
+        self._call({"type": "output", "subfolder": ""})
+        assert sorted(probed) == ["f4.png", "f5.png"]
+
+    def test_under_the_cap_nothing_is_dropped_or_flagged(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "DIR_LIST_CAP", 10)
+        for i in range(3):
+            (tmp_path / f"f{i}.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "subfolder": ""})
+        assert resp._body["truncated"] is False
+        assert len(resp._body["files"]) == 3
+        # Still no subpath key on the non-recursive path.
+        assert "subpath" not in resp._body["files"][0]
+
+
 class TestRmdirEndpoint:
     """Drive the real /rmdir handler against a tmp dir (folder_paths stubbed).
 
