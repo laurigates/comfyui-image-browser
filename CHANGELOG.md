@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.19](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.18...comfyui-image-browser-v0.1.19) (2026-08-03)
+
+
+### Bug Fixes
+
+* **list:** cap the non-recursive listing too ([#58](https://github.com/laurigates/comfyui-image-browser/issues/58)) ([c043127](https://github.com/laurigates/comfyui-image-browser/commit/c043127e1f7b3d44e3fd069232e592eda9290a79))
+
 ## [0.1.18](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.17...comfyui-image-browser-v0.1.18) (2026-07-31)
 
 
