@@ -12,7 +12,10 @@ import {
   confirmInShell,
   copyTextToClipboard,
   ensureStyleOnce,
+  escapeHTML as escHTML,
   fuzzyScore,
+  installBackGuard,
+  installLazyMedia,
   nextRating,
   notify,
   openModalShell,
@@ -20,6 +23,7 @@ import {
   postRating,
   promptInShell,
   ratingOf,
+  sortFiles,
   starsHTML,
 } from "@laurigates/comfy-modal-kit";
 // Runtime import, left unbundled by `bun build --external '/scripts/*'` and
@@ -264,9 +268,10 @@ export function openImageBrowser(): ModalShellController {
     state.sortDir = savedSort.dir;
   }
 
-  // Set when the hardware/gesture back button (popstate) closed the browser —
-  // on that path the sentinel history entry is already consumed (see onPopState).
-  let closedByBack = false;
+  // Assigned just after the shell exists (the guard hit-tests modal.dialog),
+  // but onClose below closes over it, so it is declared here and nulled on
+  // teardown rather than being a const the closure would read in its TDZ.
+  let disposeBackGuard: (() => void) | null = null;
 
   const modal = openModalShell({
     title: "Image Browser",
@@ -287,7 +292,8 @@ export function openImageBrowser(): ModalShellController {
       // Closing mid-load is a deliberate exit, not a crash — don't leave the
       // breadcrumb armed or the next open falls back to folder view for nothing.
       markFlatPending(false);
-      thumbObserver?.disconnect();
+      disposeLazyThumbs?.();
+      disposeLazyThumbs = null;
       // A restore may still be re-asserting the offset frame by frame; the
       // dialog is already gone, so cancel it here rather than letting it run
       // out against a detached element (same reason the observer is
@@ -295,9 +301,8 @@ export function openImageBrowser(): ModalShellController {
       cancelScrollRestore();
       window.removeEventListener("keydown", onWindowKey, true);
       window.removeEventListener("keydown", onScrollKey, true);
-      window.removeEventListener("popstate", onPopState);
-      // Pop the back-button sentinel unless back itself closed the browser.
-      if (!closedByBack) history.back();
+      disposeBackGuard?.();
+      disposeBackGuard = null;
     },
   });
   modal.dialog.classList.add("ib-dialog");
@@ -528,7 +533,7 @@ export function openImageBrowser(): ModalShellController {
 
   // Frames a restore keeps re-asserting for — ~200 ms at 60 Hz. BOUNDED on
   // purpose: an open-ended loop (or an interval) would outlive the modal the
-  // way a leaked IntersectionObserver used to — see thumbObserver. onClose
+  // way a leaked IntersectionObserver used to — see disposeLazyThumbs. onClose
   // cancels whatever is still pending.
   const RESTORE_FRAMES = 12;
 
@@ -697,23 +702,20 @@ export function openImageBrowser(): ModalShellController {
     return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
   }
 
-  function onPopState(): void {
+  disposeBackGuard = installBackGuard(() => {
     const hasOverlay = !!modal.dialog.querySelector(".cmp-ov-backdrop");
-    if (hasOverlay || canGoUp()) {
-      history.pushState({ modal: EXT_NAME }, ""); // re-arm before acting
-      if (hasOverlay) {
-        // Route through the overlay's ESC path so its onDismiss fires.
-        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
-      } else {
-        navigateUp();
-      }
-      return;
+    if (hasOverlay) {
+      // Route through the overlay's ESC path so its onDismiss fires.
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      return true;
     }
-    closedByBack = true;
+    if (canGoUp()) {
+      navigateUp();
+      return true;
+    }
     modal.close();
-  }
-  history.pushState({ modal: EXT_NAME }, "");
-  window.addEventListener("popstate", onPopState);
+    return false;
+  });
 
   // ---- Wiring ----------------------------------------------------
   modal.searchEl.addEventListener("input", () => {
@@ -1608,42 +1610,18 @@ export function openImageBrowser(): ModalShellController {
     installLazyThumbs(gridEl);
   }
 
-  // Observer for the current render. Kept so the next render can disconnect it
-  // instead of leaking one observer (still holding every detached card) per
-  // delete / rename / sort / search keystroke.
-  let thumbObserver: IntersectionObserver | null = null;
+  // The root MUST be the scrolling ancestor (`.cmp-body` / scrollHost), NEVER
+  // `.ib-grid`: the grid has no overflow clip, so rooting on it makes the root
+  // rectangle its whole bounding box and every card in the listing reports as
+  // intersecting on the first callback — thousands of simultaneous /thumb
+  // requests in flat view. The kit takes the root as a required parameter for
+  // exactly this reason. Disposed on every re-install and in onClose; nothing
+  // scheduled may outlive the modal.
+  let disposeLazyThumbs: (() => void) | null = null;
 
   function installLazyThumbs(rootEl: HTMLElement): void {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    if (typeof IntersectionObserver === "undefined") return;
-    const els = rootEl.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length) return;
-    // The root MUST be the scrolling ancestor (.cmp-body / scrollHost), NOT the
-    // grid. `.ib-grid` has no overflow clip, so with the grid as root the root
-    // rectangle is the grid's whole bounding box — every card in the listing
-    // reports as intersecting on the first callback and the "lazy" load fires
-    // for ALL of them at once. That is survivable in folder view (tens of
-    // files) but in flat view it means thousands of simultaneous /thumb
-    // requests plus a <video> element per clip, which OOMs the tab.
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (!e.isIntersecting) continue;
-          const el = e.target as HTMLImageElement | HTMLVideoElement;
-          const src = (el as HTMLElement).dataset.src;
-          if (src) {
-            if (el.tagName === "VIDEO") (el as HTMLVideoElement).preload = "metadata";
-            el.src = src;
-            el.removeAttribute("data-src");
-          }
-          io.unobserve(el);
-        }
-      },
-      { root: scrollHost, rootMargin: "300px" },
-    );
-    for (const el of els) io.observe(el);
-    thumbObserver = io;
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(rootEl, { root: scrollHost, rootMargin: "300px" });
   }
 
   function reportError(summary: string, e: unknown): void {
@@ -2635,50 +2613,9 @@ function pickDestination(
 // Sorting
 // ============================================================
 
-function sortFiles(files: ListingFile[], key: string, dir: string): ListingFile[] {
-  const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a: ListingFile, b: ListingFile) =>
-    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp =
-    (getter: (f: ListingFile) => number | undefined) => (a: ListingFile, b: ListingFile) =>
-      (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-  let cmp: (a: ListingFile, b: ListingFile) => number;
-  switch (key) {
-    case "name":
-      cmp = nameCmp;
-      break;
-    case "size":
-      cmp = numCmp((f) => f.size);
-      break;
-    case "pixels":
-      cmp = numCmp((f) => (f.width && f.height ? f.width * f.height : 0));
-      break;
-    case "rating":
-      cmp = numCmp((f) => f.rating);
-      break;
-    default:
-      cmp = numCmp((f) => f.mtime);
-      break;
-  }
-  return [...files].sort((a, b) => mul * cmp(a, b));
-}
-
 // ============================================================
 // Styles
 // ============================================================
-
-function escHTML(s: unknown): string {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) =>
-      (
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }) as Record<
-          string,
-          string
-        >
-      )[c] as string,
-  );
-}
 
 const BROWSER_CSS = `
 .ib-dialog {

@@ -1,6 +1,53 @@
 /* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */
 
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+function installBackGuard(onBack) {
+  if (typeof window === "undefined" || typeof history === "undefined")
+    return () => {};
+  let armed = false;
+  let disposed = false;
+  const arm = () => {
+    history.pushState({ cmpBackGuard: true }, "");
+    armed = true;
+  };
+  const dispose = () => {
+    if (disposed)
+      return;
+    disposed = true;
+    window.removeEventListener("popstate", onPop);
+    if (armed) {
+      armed = false;
+      history.back();
+    }
+  };
+  function onPop() {
+    armed = false;
+    let handled = false;
+    try {
+      handled = onBack();
+    } catch (e) {
+      console.error("[comfy-modal-kit] back handler threw", e);
+    }
+    if (handled && !disposed) {
+      arm();
+      return;
+    }
+    dispose();
+  }
+  arm();
+  window.addEventListener("popstate", onPop);
+  return dispose;
+}
+var ENTITIES = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;"
+};
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ENTITIES[c]);
+}
 var KEY = Symbol.for("laurigates.comfyModalKit");
 function getKit() {
   const g = globalThis;
@@ -23,6 +70,43 @@ function getKit() {
   if (!kit.modalChrome)
     kit.modalChrome = [];
   return kit;
+}
+var SORT_OPTIONS = [
+  { value: "mtime:desc", label: "Newest" },
+  { value: "mtime:asc", label: "Oldest" },
+  { value: "name:asc", label: "Name A→Z" },
+  { value: "name:desc", label: "Name Z→A" },
+  { value: "size:desc", label: "Largest file" },
+  { value: "size:asc", label: "Smallest file" },
+  { value: "pixels:desc", label: "Largest resolution" },
+  { value: "pixels:asc", label: "Smallest resolution" },
+  { value: "rating:desc", label: "Highest rating" },
+  { value: "rating:asc", label: "Lowest rating" }
+];
+var VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
+function sortFiles(files, key, dir) {
+  const mul = dir === "asc" ? 1 : -1;
+  const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  const numCmp = (extract) => (a, b) => (extract(a) ?? 0) - (extract(b) ?? 0) || nameCmp(a, b);
+  let cmp;
+  switch (key) {
+    case "name":
+      cmp = nameCmp;
+      break;
+    case "size":
+      cmp = numCmp((f) => f.size);
+      break;
+    case "pixels":
+      cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
+      break;
+    case "rating":
+      cmp = numCmp((f) => f.rating);
+      break;
+    default:
+      cmp = numCmp((f) => f.mtime);
+      break;
+  }
+  return [...files].sort((a, b) => mul * cmp(a, b));
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -365,6 +449,33 @@ function makeLauncher(opts) {
     ];
   }
   return fields;
+}
+var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
+function installLazyMedia(container, opts) {
+  const noop = () => {};
+  if (typeof IntersectionObserver === "undefined")
+    return noop;
+  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
+  if (!els.length)
+    return noop;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting)
+        continue;
+      const el = e.target;
+      const src = el.dataset.src;
+      if (src) {
+        if (el.tagName === "VIDEO")
+          el.preload = "metadata";
+        el.src = src;
+        el.removeAttribute("data-src");
+      }
+      io.unobserve(el);
+    }
+  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
+  for (const el of els)
+    io.observe(el);
+  return () => io.disconnect();
 }
 function fuzzyScore(query, target) {
   if (!query)
@@ -1190,7 +1301,7 @@ function makeDir(type, subfolder, name) {
 // src/browser.ts
 var STYLE_ID4 = "ib-style";
 var SORT_STORAGE_KEY = "comfyui-image-browser:sort";
-var VALID_SORTS = new Set([
+var VALID_SORTS2 = new Set([
   "mtime:desc",
   "mtime:asc",
   "name:asc",
@@ -1203,7 +1314,7 @@ var VALID_SORTS = new Set([
 function loadSavedSort() {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw))
+    if (!raw || !VALID_SORTS2.has(raw))
       return null;
     const [key, dir] = raw.split(":");
     return { key, dir };
@@ -1313,7 +1424,7 @@ function openImageBrowser() {
     state.sortKey = savedSort.key;
     state.sortDir = savedSort.dir;
   }
-  let closedByBack = false;
+  let disposeBackGuard = null;
   const modal = openModalShell({
     title: "Image Browser",
     placeholder: "Filter by filename…",
@@ -1324,13 +1435,13 @@ function openImageBrowser() {
     onClose: () => {
       rememberScroll();
       markFlatPending(false);
-      thumbObserver?.disconnect();
+      disposeLazyThumbs?.();
+      disposeLazyThumbs = null;
       cancelScrollRestore();
       window.removeEventListener("keydown", onWindowKey, true);
       window.removeEventListener("keydown", onScrollKey, true);
-      window.removeEventListener("popstate", onPopState);
-      if (!closedByBack)
-        history.back();
+      disposeBackGuard?.();
+      disposeBackGuard = null;
     }
   });
   modal.dialog.classList.add("ib-dialog");
@@ -1544,22 +1655,19 @@ function openImageBrowser() {
   function canGoUp() {
     return state.type === "path" ? !!state.absPath && state.absPath !== "/" : !!state.subfolder;
   }
-  function onPopState() {
+  disposeBackGuard = installBackGuard(() => {
     const hasOverlay = !!modal.dialog.querySelector(".cmp-ov-backdrop");
-    if (hasOverlay || canGoUp()) {
-      history.pushState({ modal: EXT_NAME }, "");
-      if (hasOverlay) {
-        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
-      } else {
-        navigateUp();
-      }
-      return;
+    if (hasOverlay) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }));
+      return true;
     }
-    closedByBack = true;
+    if (canGoUp()) {
+      navigateUp();
+      return true;
+    }
     modal.close();
-  }
-  history.pushState({ modal: EXT_NAME }, "");
-  window.addEventListener("popstate", onPopState);
+    return false;
+  });
   modal.searchEl.addEventListener("input", () => {
     state.query = modal.searchEl.value.toLowerCase().trim();
     renderGrid({ scrollTo: 0 });
@@ -1901,7 +2009,7 @@ function openImageBrowser() {
       live = false;
       ov.close();
     };
-    const title = `Metadata — ${escHTML(f.name)}`;
+    const title = `Metadata — ${escapeHTML(f.name)}`;
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
       <div class="ib-meta-body"><div class="ib-meta-status">Reading metadata…</div></div>
@@ -1924,8 +2032,8 @@ function openImageBrowser() {
     const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
     const rowsHTML = rows.map((r, i) => `
         <div class="ib-meta-row">
-          <div class="ib-meta-k">${escHTML(r.label)}</div>
-          <div class="ib-meta-v">${escHTML(r.value)}</div>
+          <div class="ib-meta-k">${escapeHTML(r.label)}</div>
+          <div class="ib-meta-v">${escapeHTML(r.value)}</div>
           <button type="button" class="ib-meta-copy" data-copy-row="${i}">Copy</button>
         </div>`).join("");
     const emptyHTML = rows.length ? "" : `<div class="ib-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
@@ -1933,7 +2041,7 @@ function openImageBrowser() {
     const rawHTML = rawKeys.length ? `
         <details class="ib-meta-raw">
           <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
-          <pre>${escHTML(rawJSON)}</pre>
+          <pre>${escapeHTML(rawJSON)}</pre>
           <button type="button" class="ib-meta-copy" data-copy-raw>Copy JSON</button>
         </details>` : "";
     const noteHTML = data.truncated ? `<div class="ib-meta-note">Some values were truncated by the server.</div>` : "";
@@ -1941,7 +2049,7 @@ function openImageBrowser() {
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
       <div class="ib-meta-body">
-        <div class="ib-meta-src">${escHTML(srcLabel)}${data.format ? `<span class="ib-meta-fmt">${escHTML(data.format)}</span>` : ""}</div>
+        <div class="ib-meta-src">${escapeHTML(srcLabel)}${data.format ? `<span class="ib-meta-fmt">${escapeHTML(data.format)}</span>` : ""}</div>
         ${emptyHTML}
         ${rowsHTML}
         ${noteHTML}
@@ -2179,7 +2287,7 @@ function openImageBrowser() {
         c.className = "ib-card is-dir";
         c.dataset.name = d.name;
         const dirBtns = canWrite ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` + `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
-        c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
+        c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>${dirBtns}`;
         gridEl.appendChild(c);
       }
     }
@@ -2236,13 +2344,13 @@ ${when}`;
            ${moveBtn}
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
       const starsRow = canWrite ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
-      const checkBtn = canWrite ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>` : "";
-      const subLabel = flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
+      const checkBtn = canWrite ? `<button type="button" class="ib-check" data-check aria-label="Select ${escapeHTML(f.name)}">✓</button>` : "";
+      const subLabel = flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = `
         ${subLabel}
         ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
+        <div class="ib-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
         ${starsRow}
         <div class="ib-actions">
@@ -2264,33 +2372,10 @@ ${when}`;
     restoreScroll(targetScrollTop);
     installLazyThumbs(gridEl);
   }
-  let thumbObserver = null;
+  let disposeLazyThumbs = null;
   function installLazyThumbs(rootEl) {
-    thumbObserver?.disconnect();
-    thumbObserver = null;
-    if (typeof IntersectionObserver === "undefined")
-      return;
-    const els = rootEl.querySelectorAll("img[data-src], video[data-src]");
-    if (!els.length)
-      return;
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting)
-          continue;
-        const el = e.target;
-        const src = el.dataset.src;
-        if (src) {
-          if (el.tagName === "VIDEO")
-            el.preload = "metadata";
-          el.src = src;
-          el.removeAttribute("data-src");
-        }
-        io.unobserve(el);
-      }
-    }, { root: scrollHost, rootMargin: "300px" });
-    for (const el of els)
-      io.observe(el);
-    thumbObserver = io;
+    disposeLazyThumbs?.();
+    disposeLazyThumbs = installLazyMedia(rootEl, { root: scrollHost, rootMargin: "300px" });
   }
   function reportError(summary, e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -3168,33 +3253,6 @@ function pickDestination(modal, start, exclude) {
     });
     load();
   });
-}
-function sortFiles(files, key, dir) {
-  const mul = dir === "asc" ? 1 : -1;
-  const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  const numCmp = (getter) => (a, b) => (getter(a) ?? 0) - (getter(b) ?? 0) || nameCmp(a, b);
-  let cmp;
-  switch (key) {
-    case "name":
-      cmp = nameCmp;
-      break;
-    case "size":
-      cmp = numCmp((f) => f.size);
-      break;
-    case "pixels":
-      cmp = numCmp((f) => f.width && f.height ? f.width * f.height : 0);
-      break;
-    case "rating":
-      cmp = numCmp((f) => f.rating);
-      break;
-    default:
-      cmp = numCmp((f) => f.mtime);
-      break;
-  }
-  return [...files].sort((a, b) => mul * cmp(a, b));
-}
-function escHTML(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 var BROWSER_CSS = `
 .ib-dialog {
