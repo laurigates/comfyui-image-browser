@@ -85,6 +85,17 @@ describe("activeAddress", () => {
     const { dialog } = openLightbox("blob:http://localhost/abc");
     expect(activeAddress(dialog)).toBeNull();
   });
+
+  it("REFUSES /api/viewvideo — that URL's subfolder is a lie", () => {
+    // Not a limitation to relax: AssetsSidebarTab builds the ResultItem with
+    // `subfolder: ''` hard-coded and overrides only `url`, so /api/view carries
+    // the real subfolder while ResultVideo's vhsAdvancedPreviewUrl is rebuilt
+    // from the discarded one. Measured live: this exact shape returned HTTP 204
+    // for a file that lives in output/nsfw/2026-08-04/. Accepting it would
+    // address output/<name> — and a delete would hit the wrong file.
+    const { dialog } = openLightbox("/api/viewvideo?filename=clip.webm&type=output&subfolder=");
+    expect(activeAddress(dialog)).toBeNull();
+  });
 });
 
 describe("hasMultipleItems", () => {

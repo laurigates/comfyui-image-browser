@@ -84,6 +84,33 @@ let readToken = 0;
  * depending on the item, so this walks the media elements rather than assuming
  * an `<img>`. Returns null for anything not addressable (a cloud asset, a
  * blob: placeholder), which is the honest answer — the caller renders no bar.
+ *
+ * ## Do NOT widen this to accept `/api/viewvideo`
+ *
+ * VHS-format videos render no bar, and the tempting one-line "fix" is to let
+ * `parseAssetAddress` take `/api/viewvideo` too. **That would delete the wrong
+ * file.** The two URLs are built from different sources, and only one is
+ * trustworthy (read out of the 1.50.0 source, reproduced live on 1.47.10):
+ *
+ * - `AssetsSidebarTab.vue` maps each asset to a `ResultItemImpl` with
+ *   `subfolder: ''` **hard-coded**, then overrides *only* the `url` getter to
+ *   return the asset's real `preview_url`. So `/api/view` carries the true
+ *   subfolder — that is why rating an image here addresses the right file.
+ * - `ResultVideo.vue` uses `vhsAdvancedPreviewUrl` for VHS formats, which is
+ *   rebuilt from `urlParams` — i.e. from that discarded `subfolder: ''`. The
+ *   resulting URL points at the wrong path entirely.
+ *
+ * Measured on the live box: a `.webm` in `output/nsfw/2026-08-04/` gave
+ * `/api/viewvideo?...&subfolder=` → **HTTP 204, empty** (the stock viewer shows
+ * a blank player — an upstream bug in its own right), while the sidebar card's
+ * correctly-subfoldered `/api/view` for the same file gave 206. Accepting that
+ * URL would have addressed `output/<name>`, and a delete would then have hit
+ * whatever unrelated file sits at the output root under that name.
+ *
+ * So the `/api/view` restriction is not incidental — it is the discriminator
+ * between "this URL is the asset's real address" and "this URL was rebuilt
+ * from state the frontend threw away". Videos get no bar until upstream stops
+ * dropping the subfolder.
  */
 export function activeAddress(dialog: ParentNode): RatingAddress | null {
   for (const el of dialog.querySelectorAll("img, video, audio, source")) {
