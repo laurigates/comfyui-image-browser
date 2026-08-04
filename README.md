@@ -90,6 +90,14 @@ the duds, arrow to the next — without going back to the grid.
 - **The sidebar's list is not ours to refresh.** A file you delete stays in the
   list until the sidebar reloads; arrow back onto it and the bar says *Deleted*
   rather than offering stars on a file that is gone.
+- **Images only, for now.** VHS-format videos get no bar, because the URL the
+  stock viewer builds for them is wrong: `AssetsSidebarTab.vue` hard-codes
+  `subfolder: ''` when it maps an asset to a result item and overrides only the
+  image URL, so a video in a subfolder is requested from the wrong path. (That
+  is an upstream bug in its own right — the stock viewer shows a blank player
+  for those files; measured HTTP 204.) Addressing off that URL would rate and
+  delete the wrong file, so this pack declines to guess. Video ratings still
+  work in the Image Browser itself.
 
 Enabled by default; switch it off under **Settings → Image Browser → Sidebar**.
 Like the card stars, this is a contained DOM injection (`MediaLightbox.vue`
