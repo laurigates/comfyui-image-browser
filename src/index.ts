@@ -18,6 +18,7 @@
 import { type ModalShellController, makeLauncher } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { openImageBrowser } from "./browser.js";
+import { installLightboxActions } from "./lightbox-actions.js";
 import { installSidebarStars } from "./sidebar-stars.js";
 
 // Exported so the jsdom mount smoke test can open the view without the app
@@ -31,6 +32,7 @@ export function openShell(): ModalShellController {
 // registration with the stored value, so the setting IS the lifecycle — there
 // is no separate startup call to keep in sync with it.
 let uninstallSidebarStars: (() => void) | null = null;
+let uninstallLightboxActions: (() => void) | null = null;
 
 app.registerExtension({
   name: "comfy.image-browser",
@@ -49,6 +51,23 @@ app.registerExtension({
         } else if (!value && uninstallSidebarStars) {
           uninstallSidebarStars();
           uninstallSidebarStars = null;
+        }
+      },
+    },
+    {
+      id: "ImageBrowser.LightboxActions",
+      category: ["Image Browser", "Sidebar", "Lightbox actions"],
+      name: "Rate & delete in the asset lightbox",
+      tooltip:
+        "Adds a star row and a delete button to ComfyUI's full-screen asset viewer (Media Assets sidebar → Inspect asset), so you can arrow through fresh generations and rate or bin each one. Deleting advances to the next item; the sidebar's own list only drops the deleted entry when it reloads. Injected into stock UI (ComfyUI exposes no extension point for the lightbox), so switch this off if a frontend update makes it misbehave.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: (value: boolean) => {
+        if (value && !uninstallLightboxActions) {
+          uninstallLightboxActions = installLightboxActions();
+        } else if (!value && uninstallLightboxActions) {
+          uninstallLightboxActions();
+          uninstallLightboxActions = null;
         }
       },
     },

@@ -71,6 +71,34 @@ Note that the sidebar's own list is cleared whenever ComfyUI restarts. The
 ratings are not — they are on disk, so anything you star there is still starred
 in the Image Browser afterwards.
 
+### Rate and delete in the asset lightbox
+
+A thumbnail is not enough to judge a fresh generation, so the same two verdict
+actions are available full-screen: open an asset with **Inspect asset** from the
+Media Assets sidebar and a bar appears at the bottom of the viewer with a
+**0–5 star row** and a **🗑 delete** button. With the lightbox's own ←/→
+navigation, that is a complete cull pass over a batch — rate the keepers, bin
+the duds, arrow to the next — without going back to the grid.
+
+- **Delete asks first**, then **advances to the next item** (it closes instead
+  when there is nothing left to advance to). While the confirm is up, ← / → /
+  Esc do nothing, so you cannot navigate to a different file between the
+  question and the answer.
+- **Ratings are shared with everything else** — the stars here, the sidebar
+  card underneath, and the Image Browser all read and write the same XMP.
+  The lightbox re-reads on every navigation, so it never shows you a stale one.
+- **The sidebar's list is not ours to refresh.** A file you delete stays in the
+  list until the sidebar reloads; arrow back onto it and the bar says *Deleted*
+  rather than offering stars on a file that is gone.
+
+Enabled by default; switch it off under **Settings → Image Browser → Sidebar**.
+Like the card stars, this is a contained DOM injection (`MediaLightbox.vue`
+takes props and emits an index — it has no slot and no extension hook) written
+to fail soft: if a frontend update changes the viewer, the bar stops appearing
+rather than breaking it. Navigation is driven through the viewer's own keyboard
+contract rather than by clicking its buttons, whose labels and icons move
+between versions.
+
 Management actions are intentionally **disabled in the arbitrary-path
 (`browse…`) tab** — that mode is browse-only. The backend rejects writes outside
 the Input/Output/Temp roots, so an arbitrary path can never be mutated by URL
