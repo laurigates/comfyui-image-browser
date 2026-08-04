@@ -233,7 +233,7 @@ async function copyTextToClipboard(text) {
     return false;
   }
 }
-var CSS = `
+var CSS2 = `
 .cmn-container {
     position: fixed;
     top: 12px;
@@ -346,7 +346,7 @@ function notify(opts) {
     console.info(`[notify] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
     return null;
   }
-  ensureStyleOnce(STYLE_ID, CSS);
+  ensureStyleOnce(STYLE_ID, CSS2);
   const container = ensureContainer();
   container.classList.toggle("cmn-modal-inset", isModalActive());
   const life = opts.life ?? defaultLife(severity);
@@ -566,7 +566,7 @@ function applyStars(row, rating) {
   }
 }
 var STYLE_ID2 = "cmp-shell-style";
-var CSS2 = `
+var CSS22 = `
 .cmp-backdrop {
     position: fixed;
     inset: 0;
@@ -716,7 +716,7 @@ var CSS2 = `
 }
 `;
 function openModalShell(opts = {}) {
-  ensureStyleOnce(STYLE_ID2, CSS2);
+  ensureStyleOnce(STYLE_ID2, CSS22);
   const backdrop = document.createElement("div");
   backdrop.className = "cmp-backdrop";
   const dialog = document.createElement("div");
@@ -3611,17 +3611,17 @@ var BROWSER_CSS = `
 }
 `;
 
-// src/sidebar-stars.ts
-var STYLE_ID6 = "ib-sidebar-stars-style";
-var ROW_CLASS = "ibs-stars";
-var DONE_ATTR = "data-ibs";
+// src/rating-cache.ts
 var RATINGS_URL = "/image_browser/ratings";
 var MAX_BATCH = 200;
-var SETTLE_MS = 120;
 var ratingCache = new Map;
 var requested = new Set;
+function clearRatingState() {
+  ratingCache.clear();
+  requested.clear();
+}
 function addressKey(a) {
-  return `${a.type}\x00${a.subfolder}\x00${a.name}`;
+  return `${a.type} ${a.subfolder} ${a.name}`;
 }
 function parseAssetAddress(src) {
   if (!src)
@@ -3642,10 +3642,6 @@ function parseAssetAddress(src) {
     return null;
   return { type, subfolder: url.searchParams.get("subfolder") || "", name, absDir: "" };
 }
-var CARD_SELECTOR = "[data-selected]";
-function cardRootOf(img) {
-  return img.closest(CARD_SELECTOR);
-}
 async function fetchRatings(addrs) {
   const res = await fetch(RATINGS_URL, {
     method: "POST",
@@ -3661,30 +3657,312 @@ async function fetchRatings(addrs) {
     throw new Error(data.error || "bad response");
   return data.ratings;
 }
-function installSidebarStars() {
-  ratingCache.clear();
-  requested.clear();
+
+// src/lightbox-actions.ts
+var STYLE_ID6 = "ib-lightbox-actions-style";
+var BAR_CLASS = "ibl-bar";
+var ROW_CLASS = "ibl-stars";
+var DEL_CLASS = "ibl-del";
+var KEY_ATTR = "data-ibl";
+var SETTLE_MS = 80;
+var LIGHTBOX_SELECTOR = '[role="dialog"][aria-modal="true"][data-mask]';
+var deleted = new Set;
+var readToken = 0;
+function activeAddress(dialog) {
+  for (const el of dialog.querySelectorAll("img, video, audio, source")) {
+    const addr = parseAssetAddress(el.getAttribute("src"));
+    if (addr)
+      return addr;
+  }
+  return null;
+}
+function hasMultipleItems(dialog) {
+  return !!dialog.querySelector('[class*="chevron-right"]');
+}
+function sendKey(dialog, key) {
+  dialog.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+}
+function confirmInLightbox(dialog, name) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "ibl-ov";
+    backdrop.innerHTML = `
+<div class="ibl-ov-card">
+  <div class="ibl-ov-title">Delete file?</div>
+  <div class="ibl-ov-msg"></div>
+  <div class="ibl-ov-actions">
+    <button type="button" class="ibl-ov-btn" data-act="cancel">Cancel</button>
+    <button type="button" class="ibl-ov-btn ibl-ov-danger" data-act="ok">Delete</button>
+  </div>
+</div>`;
+    const msg = backdrop.querySelector(".ibl-ov-msg");
+    msg.textContent = `${name} will be permanently deleted from disk. This cannot be undone.`;
+    let done = false;
+    const finish = (v) => {
+      if (done)
+        return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      backdrop.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        finish(true);
+      }
+    };
+    backdrop.addEventListener("click", (e) => {
+      const act = e.target.closest("[data-act]")?.getAttribute("data-act");
+      if (act) {
+        e.stopPropagation();
+        finish(act === "ok");
+      } else if (e.target === backdrop) {
+        finish(false);
+      }
+    });
+    document.addEventListener("keydown", onKey, true);
+    dialog.appendChild(backdrop);
+    backdrop.querySelector('[data-act="ok"]')?.focus();
+  });
+}
+async function runDelete(dialog, addr) {
+  if (!await confirmInLightbox(dialog, addr.name))
+    return;
+  const advance = hasMultipleItems(dialog);
+  try {
+    await deleteFile(addr.type, addr.subfolder, addr.name);
+  } catch (err) {
+    notify({
+      severity: "error",
+      summary: "Delete failed",
+      detail: `${addr.name}: ${err instanceof Error ? err.message : String(err)}`
+    });
+    return;
+  }
+  const key = addressKey(addr);
+  deleted.add(key);
+  ratingCache.delete(key);
+  notify({ severity: "success", summary: "Deleted", detail: addr.name });
+  sendKey(dialog, advance ? "ArrowRight" : "Escape");
+}
+function installLightboxActions() {
   ensureStyleOnce(STYLE_ID6, `
-.${ROW_CLASS} { display: flex; gap: 1px; justify-content: center; padding: 2px 0 0; }
+.${BAR_CLASS} {
+  position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 10; display: flex; align-items: center; gap: 18px;
+  padding: 8px 14px; border-radius: 999px;
+  background: rgba(20, 20, 26, 0.82); border: 1px solid #33333f;
+  backdrop-filter: blur(6px); user-select: none; touch-action: manipulation;
+}
+.${ROW_CLASS} { display: flex; gap: 2px; }
 .${ROW_CLASS} button {
-  background: none; border: 0; padding: 0 1px; cursor: pointer; line-height: 1;
-  /* Big enough to hit on a phone without stretching the stock card's row. */
-  font-size: 13px; min-width: 16px; color: #55555f;
+  background: none; border: 0; padding: 2px 4px; cursor: pointer; line-height: 1;
+  /* Deliberately larger than the sidebar's 13px row: this is the tap target
+     you use one-handed while flicking through a batch. */
+  font-size: 26px; min-width: 34px; min-height: 34px; color: #55555f;
 }
 .${ROW_CLASS} button.is-on { color: #ffb02e; }
 .${ROW_CLASS} button:hover { color: #ffc95e; }
-/* The stock card sets draggable=true; a drag started on a star must not
-   detach the card, and the row must never become a drag handle. */
-.${ROW_CLASS} { -webkit-user-drag: none; user-select: none; touch-action: manipulation; }
+.${DEL_CLASS} {
+  background: #4a2230; border: 1px solid #78384a; color: #ff9eb0;
+  font: inherit; font-size: 15px; border-radius: 8px; cursor: pointer;
+  min-width: 44px; min-height: 34px; padding: 0 12px;
+}
+.${DEL_CLASS}:hover { background: #5c2a3c; color: #fff; }
+.ibl-note { color: #b8b8c0; font-size: 13px; padding: 0 6px; }
+.ibl-ov {
+  position: absolute; inset: 0; z-index: 20; display: flex;
+  align-items: center; justify-content: center; padding: 16px;
+  background: rgba(0, 0, 0, 0.6); touch-action: manipulation;
+}
+.ibl-ov-card {
+  background: #1c1c24; border: 1px solid #33333f; border-radius: 10px;
+  padding: 18px; width: min(460px, calc(100% - 24px));
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.ibl-ov-title { font-size: 15px; font-weight: 600; color: #e8e8ec; }
+.ibl-ov-msg { font-size: 13px; color: #b8b8c0; line-height: 1.5; word-break: break-word; }
+.ibl-ov-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ibl-ov-btn {
+  font-size: 13px; padding: 9px 16px; border-radius: 6px; min-height: 38px;
+  border: 1px solid #3a3a44; background: #2a2a36; color: #d8d8dc;
+  cursor: pointer; font-family: inherit;
+}
+.ibl-ov-btn:hover { background: #3a3a4a; color: #fff; }
+.ibl-ov-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.ibl-ov-danger:hover { background: #5c2a3c; color: #fff; }
 `);
   let timer = null;
   let disposed = false;
   const onClick = (e) => {
     const target = e.target;
-    const star = target?.closest?.(`.${ROW_CLASS} [data-val]`);
+    const bar = target?.closest?.(`.${BAR_CLASS}`);
+    if (!bar)
+      return;
+    const dialog = bar.closest(LIGHTBOX_SELECTOR);
+    const addr = dialog ? activeAddress(dialog) : null;
+    if (!dialog || !addr || deleted.has(addressKey(addr)))
+      return;
+    if (target?.closest(`.${DEL_CLASS}`)) {
+      e.preventDefault();
+      e.stopPropagation();
+      runDelete(dialog, addr);
+      return;
+    }
+    const star = target?.closest(`.${ROW_CLASS} [data-val]`);
+    const row = bar.querySelector(`.${ROW_CLASS}`);
+    if (!star || !row)
+      return;
+    e.preventDefault();
+    e.stopPropagation();
+    const prev = Number(row.dataset.rating || "0");
+    const next = nextRating(prev, Number(star.dataset.val));
+    applyStars(row, next);
+    postRating(RATING_URL, addr, next).then((confirmed) => {
+      ratingCache.set(addressKey(addr), confirmed);
+      applyStars(row, confirmed);
+    }).catch((err) => {
+      ratingCache.set(addressKey(addr), prev);
+      applyStars(row, prev);
+      notify({
+        severity: "error",
+        summary: "Rating failed",
+        detail: `${addr.name}: ${err instanceof Error ? err.message : String(err)}`
+      });
+    });
+  };
+  document.addEventListener("click", onClick, true);
+  function paint() {
+    const dialog = document.querySelector(LIGHTBOX_SELECTOR);
+    if (!dialog)
+      return;
+    const addr = activeAddress(dialog);
+    const existing = dialog.querySelector(`.${BAR_CLASS}`);
+    if (!addr) {
+      existing?.remove();
+      return;
+    }
+    const key = addressKey(addr);
+    let bar = existing;
+    if (bar && bar.getAttribute(KEY_ATTR) === key) {
+      const known = ratingCache.get(key);
+      const row2 = bar.querySelector(`.${ROW_CLASS}`);
+      if (row2 && typeof known === "number")
+        applyStars(row2, known);
+      return;
+    }
+    bar?.remove();
+    bar = document.createElement("div");
+    bar.className = BAR_CLASS;
+    bar.setAttribute(KEY_ATTR, key);
+    bar.setAttribute("draggable", "false");
+    if (deleted.has(key)) {
+      const note = document.createElement("div");
+      note.className = "ibl-note";
+      note.textContent = "Deleted — reopen the sidebar to refresh this list";
+      bar.appendChild(note);
+      dialog.appendChild(bar);
+      return;
+    }
+    const holder = document.createElement("div");
+    holder.innerHTML = starsHTML("ibl", ratingCache.get(key) ?? 0);
+    const row = holder.firstElementChild;
+    if (!row)
+      return;
+    row.classList.add(ROW_CLASS);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = DEL_CLASS;
+    del.title = "Delete this file from disk";
+    del.setAttribute("aria-label", "Delete file");
+    del.textContent = "\uD83D\uDDD1";
+    bar.append(row, del);
+    dialog.appendChild(bar);
+    const token = ++readToken;
+    fetchRatings([addr]).then(([r]) => {
+      if (disposed || token !== readToken)
+        return;
+      if (typeof r !== "number")
+        return;
+      ratingCache.set(key, r);
+      const live = document.querySelector(`${LIGHTBOX_SELECTOR} .${BAR_CLASS}[${KEY_ATTR}="${CSS.escape(key)}"] .${ROW_CLASS}`);
+      if (live)
+        applyStars(live, r);
+    }).catch((err) => {
+      console.warn(`[${EXT_NAME}] lightbox rating read failed`, err);
+    });
+  }
+  function schedule() {
+    if (disposed)
+      return;
+    if (timer !== null)
+      clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        paint();
+      } catch (err) {
+        console.warn(`[${EXT_NAME}] lightbox pass failed`, err);
+      }
+    }, SETTLE_MS);
+  }
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["src"]
+  });
+  schedule();
+  return () => {
+    disposed = true;
+    if (timer !== null)
+      clearTimeout(timer);
+    observer.disconnect();
+    document.removeEventListener("click", onClick, true);
+    for (const el of document.querySelectorAll(`.${BAR_CLASS}, .ibl-ov`))
+      el.remove();
+  };
+}
+
+// src/sidebar-stars.ts
+var STYLE_ID7 = "ib-sidebar-stars-style";
+var ROW_CLASS2 = "ibs-stars";
+var DONE_ATTR = "data-ibs";
+var SETTLE_MS2 = 120;
+var CARD_SELECTOR = "[data-selected]";
+function cardRootOf(img) {
+  return img.closest(CARD_SELECTOR);
+}
+function installSidebarStars() {
+  clearRatingState();
+  ensureStyleOnce(STYLE_ID7, `
+.${ROW_CLASS2} { display: flex; gap: 1px; justify-content: center; padding: 2px 0 0; }
+.${ROW_CLASS2} button {
+  background: none; border: 0; padding: 0 1px; cursor: pointer; line-height: 1;
+  /* Big enough to hit on a phone without stretching the stock card's row. */
+  font-size: 13px; min-width: 16px; color: #55555f;
+}
+.${ROW_CLASS2} button.is-on { color: #ffb02e; }
+.${ROW_CLASS2} button:hover { color: #ffc95e; }
+/* The stock card sets draggable=true; a drag started on a star must not
+   detach the card, and the row must never become a drag handle. */
+.${ROW_CLASS2} { -webkit-user-drag: none; user-select: none; touch-action: manipulation; }
+`);
+  let timer = null;
+  let disposed = false;
+  const onClick = (e) => {
+    const target = e.target;
+    const star = target?.closest?.(`.${ROW_CLASS2} [data-val]`);
     if (!star)
       return;
-    const row = star.closest(`.${ROW_CLASS}`);
+    const row = star.closest(`.${ROW_CLASS2}`);
     const card = row ? cardRootOf(row) : null;
     const img = card?.querySelector("img");
     const addr = parseAssetAddress(img?.getAttribute("src"));
@@ -3720,7 +3998,7 @@ function installSidebarStars() {
         continue;
       const key = addressKey(addr);
       const known = ratingCache.get(key);
-      let row = card.querySelector(`.${ROW_CLASS}`);
+      let row = card.querySelector(`.${ROW_CLASS2}`);
       if (row && card.getAttribute(DONE_ATTR) !== key) {
         row.remove();
         row = null;
@@ -3731,7 +4009,7 @@ function installSidebarStars() {
         row = holder.firstElementChild;
         if (!row)
           continue;
-        row.classList.add(ROW_CLASS);
+        row.classList.add(ROW_CLASS2);
         row.setAttribute("draggable", "false");
         card.appendChild(row);
         card.setAttribute(DONE_ATTR, key);
@@ -3775,7 +4053,7 @@ function installSidebarStars() {
       } catch (err) {
         console.warn(`[${EXT_NAME}] sidebar star pass failed`, err);
       }
-    }, SETTLE_MS);
+    }, SETTLE_MS2);
   }
   const observer = new MutationObserver(schedule);
   observer.observe(document.body, {
@@ -3791,7 +4069,7 @@ function installSidebarStars() {
       clearTimeout(timer);
     observer.disconnect();
     document.removeEventListener("click", onClick, true);
-    for (const row of document.querySelectorAll(`.${ROW_CLASS}`))
+    for (const row of document.querySelectorAll(`.${ROW_CLASS2}`))
       row.remove();
     for (const card of document.querySelectorAll(`[${DONE_ATTR}]`))
       card.removeAttribute(DONE_ATTR);
@@ -3803,6 +4081,7 @@ function openShell() {
   return openImageBrowser();
 }
 var uninstallSidebarStars = null;
+var uninstallLightboxActions = null;
 app2.registerExtension({
   name: "comfy.image-browser",
   settings: [
@@ -3819,6 +4098,22 @@ app2.registerExtension({
         } else if (!value && uninstallSidebarStars) {
           uninstallSidebarStars();
           uninstallSidebarStars = null;
+        }
+      }
+    },
+    {
+      id: "ImageBrowser.LightboxActions",
+      category: ["Image Browser", "Sidebar", "Lightbox actions"],
+      name: "Rate & delete in the asset lightbox",
+      tooltip: "Adds a star row and a delete button to ComfyUI's full-screen asset viewer (Media Assets sidebar → Inspect asset), so you can arrow through fresh generations and rate or bin each one. Deleting advances to the next item; the sidebar's own list only drops the deleted entry when it reloads. Injected into stock UI (ComfyUI exposes no extension point for the lightbox), so switch this off if a frontend update makes it misbehave.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: (value) => {
+        if (value && !uninstallLightboxActions) {
+          uninstallLightboxActions = installLightboxActions();
+        } else if (!value && uninstallLightboxActions) {
+          uninstallLightboxActions();
+          uninstallLightboxActions = null;
         }
       }
     }
