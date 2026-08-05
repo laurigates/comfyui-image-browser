@@ -39,12 +39,21 @@ ComfyUI.
   resolution), and fuzzy filename filter.
 - **Thumbnails** for images (WebP previews) and videos (poster frames), lazily
   loaded as you scroll. Tap a card to open the full-size file in a new tab.
-- **⤓ Load workflow** (`w`) — reopen the graph embedded in an image, on any tab
-  including `browse…`. ComfyUI writes the workflow into every image it saves, so
-  this turns the browser into a durable way back into a past generation — unlike
-  the stock sidebar, whose list is cleared on every ComfyUI restart. Images
-  re-encoded elsewhere (a phone gallery, a chat app) lose that metadata, and the
-  button says so rather than failing silently.
+- **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab
+  including `browse…`. ComfyUI writes the workflow into every image *and video*
+  it saves, so this turns the browser into a durable way back into a past
+  generation — unlike the stock sidebar, whose list is cleared on every ComfyUI
+  restart. Files re-encoded elsewhere (a phone gallery, a chat app) lose that
+  metadata, and the button says so rather than failing silently.
+- **ⓘ Metadata** (`i`) — the prompt, model, seed, steps, CFG, sampler and
+  scheduler read back out of the file, each copyable, with the full raw
+  metadata behind a disclosure.
+
+  Both work on **videos** as well as images: MP4/MOV/M4V and WebM/MKV are read
+  natively, including clips written by `WanVideoWrapper` and other custom
+  savers whose metadata layout ComfyUI's own loader does not understand.
+  (`.avi`/`.mpg` carry no ComfyUI metadata, so they show neither button rather
+  than one that fails on tap.)
 - **Manage** files in the sandboxed roots (Input / Output / Temp):
   - **🗑 Delete** — with a confirm step.
   - **✎ Rename** — in place (extension preserved).

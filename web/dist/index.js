@@ -1075,6 +1075,8 @@ var VIDEO_EXTS = new Set([
   ".mpg",
   ".mpeg"
 ]);
+var META_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm", ".mkv"]);
+var META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);
 var SANDBOXED_TYPES = ["input", "output", "temp"];
 var BASE_PATHS = null;
 async function fetchBasePaths() {
@@ -1168,17 +1170,19 @@ async function fetchMetadata(type, subfolder, name, absDir) {
   };
 }
 var WORKFLOW_RAW_KEYS = ["workflow", "prompt"];
-function hasEmbeddedWorkflow(meta) {
+function embeddedWorkflowJSON(meta) {
   const raw = meta?.raw;
   if (!raw)
-    return false;
-  return WORKFLOW_RAW_KEYS.some((k) => {
+    return null;
+  for (const k of WORKFLOW_RAW_KEYS) {
     const v = raw[k];
     if (typeof v !== "string")
-      return false;
+      continue;
     const t = v.trim();
-    return t !== "" && t !== "null" && t !== "{}" && t !== "[]";
-  });
+    if (t !== "" && t !== "null" && t !== "{}" && t !== "[]")
+      return v;
+  }
+  return null;
 }
 var META_FIELDS = [
   { key: "positive", label: "Positive" },
@@ -1974,12 +1978,20 @@ function openImageBrowser() {
     const sub = fileSub(f);
     try {
       const meta = await fetchMetadata(state.type, sub, f.name, state.absPath);
-      if (!hasEmbeddedWorkflow(meta)) {
+      const graphJSON = embeddedWorkflowJSON(meta);
+      if (!graphJSON) {
         notify({
           severity: "warn",
-          summary: "No workflow in this image",
-          detail: `${f.name} carries no embedded graph. Images saved by another tool (or re-encoded, e.g. by a phone gallery or a chat app) lose ComfyUI's metadata.`
+          summary: "No workflow in this file",
+          detail: `${f.name} carries no embedded graph. Files saved by another tool (or re-encoded, e.g. by a phone gallery or a chat app) lose ComfyUI's metadata.`
         });
+        return;
+      }
+      if (META_VIDEO_EXTS.has((f.ext || "").toLowerCase())) {
+        const base = f.name.replace(/\.[^./]+$/, "");
+        const file2 = new File([graphJSON], `${base}.json`, { type: "application/json" });
+        modal.close();
+        await app.handleFile(file2);
         return;
       }
       const res = await fetch(fullSrcURL(state.type, sub, f.name, state.absPath));
@@ -2336,9 +2348,9 @@ ${dims}
 ${when}` : `${f.name}
 ${when}`;
       const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon">${t.text}</div>`;
-      const isImage = IMG_EXTS.has((f.ext || "").toLowerCase());
-      const metaBtn = isImage ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
-      const wfBtn = isImage ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
+      const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
+      const metaBtn = hasMeta ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
+      const wfBtn = hasMeta ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
       const moveBtn = canWrite ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
       const writeBtns = canWrite ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
            ${moveBtn}
@@ -3039,13 +3051,13 @@ ${when}`;
       case "w":
         e.preventDefault();
         e.stopPropagation();
-        if (f && IMG_EXTS.has((f.ext || "").toLowerCase()))
+        if (f && META_EXTS.has((f.ext || "").toLowerCase()))
           loadWorkflow(f);
         break;
       case "i":
         e.preventDefault();
         e.stopPropagation();
-        if (f && IMG_EXTS.has((f.ext || "").toLowerCase()))
+        if (f && META_EXTS.has((f.ext || "").toLowerCase()))
           openMetadata(f);
         break;
       case "r":

@@ -40,6 +40,22 @@ export const VIDEO_EXTS = new Set([
   ".mpeg",
 ]);
 
+// Video containers whose embedded metadata the backend can actually read —
+// ISOBMFF (MP4/MOV/M4V) and Matroska (WebM/MKV). Deliberately NARROWER than
+// VIDEO_EXTS: .avi/.mpg have no reader, and this set is what decides whether a
+// card gets the ⓘ / ⤓ buttons, so listing a container the endpoint 400s on
+// would ship two dead controls. It mirrors the backend's METADATA_EXTS (itself
+// derived from image_meta.FORMAT_EXTS); tests/test_metadata.py reads this
+// literal back out of the source and fails if the two ever disagree, because a
+// silently drifted mirror is exactly the failure the write-gate mirror warns
+// about — a control that is present here and rejected there.
+export const META_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm", ".mkv"]);
+
+// Everything /metadata answers for. Images are all admitted: one whose format
+// has no parser (a .gif) answers 200 with empty metadata rather than an error,
+// which is the honest "nothing embedded here" the overlay renders.
+export const META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);
+
 // The three sandboxed ComfyUI roots the browser exposes as tabs, plus the
 // arbitrary-path mode. Writes (delete/rename/move) are backend-restricted to
 // the sandboxed roots; "path" is browse-only.
@@ -281,15 +297,22 @@ const WORKFLOW_RAW_KEYS = ["workflow", "prompt"] as const;
 // Whitespace-only and literal "null"/"{}" values count as absent: some writers
 // emit the key with an empty payload, and a truthiness check alone would
 // promise a graph the loader then can't produce.
-export function hasEmbeddedWorkflow(meta: Pick<ImageMetadata, "raw"> | null | undefined): boolean {
+export function embeddedWorkflowJSON(
+  meta: Pick<ImageMetadata, "raw"> | null | undefined,
+): string | null {
   const raw = meta?.raw;
-  if (!raw) return false;
-  return WORKFLOW_RAW_KEYS.some((k) => {
+  if (!raw) return null;
+  for (const k of WORKFLOW_RAW_KEYS) {
     const v = raw[k];
-    if (typeof v !== "string") return false;
+    if (typeof v !== "string") continue;
     const t = v.trim();
-    return t !== "" && t !== "null" && t !== "{}" && t !== "[]";
-  });
+    if (t !== "" && t !== "null" && t !== "{}" && t !== "[]") return v;
+  }
+  return null;
+}
+
+export function hasEmbeddedWorkflow(meta: Pick<ImageMetadata, "raw"> | null | undefined): boolean {
+  return embeddedWorkflowJSON(meta) !== null;
 }
 
 // Display order for the summary, in one place so the overlay rows and the
