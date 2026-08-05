@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.20](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.19...comfyui-image-browser-v0.1.20) (2026-08-05)
+
+
+### Features
+
+* **metadata:** read embedded workflows from video containers ([#62](https://github.com/laurigates/comfyui-image-browser/issues/62)) ([085ba82](https://github.com/laurigates/comfyui-image-browser/commit/085ba82731d293693c47e149c096c925b2ecfad3))
+* **metadata:** summarize the video node families, incl. MiniMax H3 ([#63](https://github.com/laurigates/comfyui-image-browser/issues/63)) ([1b3fb55](https://github.com/laurigates/comfyui-image-browser/commit/1b3fb55fbfc9981ab193e79a89e919418486d1d7))
+
 ## [0.1.19](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.18...comfyui-image-browser-v0.1.19) (2026-08-03)
 
 
