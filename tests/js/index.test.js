@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { app } from "/scripts/app.js";
 // Vitest transpiles TypeScript, so the test imports the `.ts` source directly
 // (no build step). Importing the module also runs the registerExtension wiring
 // against tests/js/__mocks__/app.js. The standalone modal is launched from the
@@ -1084,8 +1085,11 @@ describe("metadata overlay", () => {
     modal.close();
   });
 
-  it("does not render ⓘ on a video card (the endpoint is IMG_EXTS-gated)", async () => {
-    const fetchFn = vi.fn(async () => ({
+  // The ⓘ / ⤓ gate is META_EXTS, not IMG_EXTS: the backend reads embedded
+  // metadata out of ISOBMFF (MP4/MOV/M4V) and Matroska (WebM/MKV) containers
+  // too, so those cards carry the same two read controls an image does.
+  const listingOf = (files) =>
+    vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => ({
@@ -1094,17 +1098,121 @@ describe("metadata overlay", () => {
         subfolder: "",
         path: "/out",
         dirs: [],
-        files: [{ name: "clip.mp4", ext: ".mp4", mtime: 3, size: 10 }],
+        files,
         exists: true,
       }),
     }));
+
+  it("renders ⓘ and ⤓ on video cards whose container the backend can read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      listingOf([
+        { name: "clip.mp4", ext: ".mp4", mtime: 3, size: 10 },
+        { name: "clip.webm", ext: ".webm", mtime: 2, size: 10 },
+        { name: "clip.mkv", ext: ".mkv", mtime: 1, size: 10 },
+      ]),
+    );
+    const modal = openShell();
+    await openLoaded(modal);
+    const cards = [...modal.bodyEl.querySelectorAll(".ib-card.is-file")];
+    expect(cards.map((c) => c.dataset.ext)).toEqual([".mp4", ".webm", ".mkv"]);
+    for (const card of cards) {
+      expect(card.querySelector('[data-action="meta"]')).not.toBeNull();
+      expect(card.querySelector('[data-action="workflow"]')).not.toBeNull();
+    }
+    modal.close();
+  });
+
+  it("loads a video's workflow as JSON, never by handing the video to handleFile", async () => {
+    // The load-bearing assertion of the video ⤓ path. ComfyUI's own
+    // getWorkflowDataFromFile() reads only the mdta `keys`+`ilst` MP4 layout;
+    // for a container it cannot read (kijai's bare `©cmt` atom), handleFile's
+    // no-workflow branch PASTES A LoadVideo NODE instead of erroring. Handing
+    // it the video bytes is therefore silently wrong for a large share of real
+    // files, so the pack hands over the graph the BACKEND parsed instead.
+    const graph = JSON.stringify({ nodes: [{ id: 1, type: "KSampler" }] });
+    const fetchFn = vi.fn(async (url) => {
+      const s = String(url);
+      if (s.includes("/image_browser/metadata")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            format: "mp4",
+            source: "comfyui",
+            raw: { workflow: graph },
+          }),
+        };
+      }
+      if (s.includes("/image_browser/base")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            base_path: "/",
+            input_dir: "",
+            output_dir: "",
+            temp_dir: "",
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "output",
+          subfolder: "",
+          path: "/out",
+          dirs: [],
+          files: [{ name: "clip.mp4", ext: ".mp4", mtime: 3, size: 10 }],
+          exists: true,
+        }),
+      };
+    });
     vi.stubGlobal("fetch", fetchFn);
+    app.handleFileCalls.length = 0;
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.bodyEl.querySelector('[data-action="workflow"]').click();
+    await vi.waitFor(() => {
+      if (app.handleFileCalls.length === 0) throw new Error("handleFile not called");
+    });
+
+    const file = app.handleFileCalls[0];
+    expect(file.type).toBe("application/json");
+    // Named after the video with its extension REPLACED, so the workflow tab
+    // reads "clip" rather than "clip.mp4".
+    expect(file.name).toBe("clip.json");
+    expect(await file.text()).toBe(graph);
+    // Nothing fetched the video's BYTES — that is the difference between this
+    // path and the image one, which downloads the full file to re-parse it.
+    // Matched on the byte-serving routes (/api/view, /image_browser/file), not
+    // on the filename: the /metadata request names the file too, so a bare
+    // "no URL mentions clip.mp4" assertion fails against correct code.
+    const byteFetches = fetchFn.mock.calls.filter(([u]) => {
+      const s = String(u);
+      return s.includes("/api/view") || s.includes("/image_browser/file");
+    });
+    expect(byteFetches).toEqual([]);
+    modal.close();
+  });
+
+  it("still withholds ⓘ and ⤓ from a container with no reader (.avi)", async () => {
+    // .avi is in VIDEO_EXTS — it lists, previews and deletes like any video —
+    // but image_meta has no reader for it, so /metadata answers 400. A button
+    // here would be a control that fails on tap, which is the whole reason the
+    // gate mirrors the backend rather than "is it a video".
+    vi.stubGlobal("fetch", listingOf([{ name: "clip.avi", ext: ".avi", mtime: 3, size: 10 }]));
     const modal = openShell();
     await openLoaded(modal);
     const card = modal.bodyEl.querySelector(".ib-card.is-file");
-    expect(card.dataset.ext).toBe(".mp4");
+    expect(card.dataset.ext).toBe(".avi");
     expect(card.querySelector('[data-action="meta"]')).toBeNull();
-    // The open (↗) button is still there — only the metadata affordance is gated.
+    expect(card.querySelector('[data-action="workflow"]')).toBeNull();
+    // The open (↗) button is still there — only the two read affordances are gated.
     expect(card.querySelector('[data-action="open"]')).not.toBeNull();
     modal.close();
   });

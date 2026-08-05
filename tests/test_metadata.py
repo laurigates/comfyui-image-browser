@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
+import re
 import struct
 import zlib
 from types import SimpleNamespace
@@ -135,6 +137,87 @@ def _webp(chunks: list[tuple[bytes, bytes]]) -> bytes:
         if len(payload) & 1:
             body += b"\x00"  # RIFF pads payloads to an even length
     return b"RIFF" + (4 + len(body)).to_bytes(4, "little") + b"WEBP" + body
+
+
+# ---------- ISOBMFF (MP4/MOV) builders --------------------------------
+#
+# Shapes taken from the box trees of real ComfyUI outputs, not from the spec
+# alone — the two writers differ structurally and only one of them is what
+# ComfyUI's own frontend parser can read:
+#
+#   core SaveVideo : moov/udta/meta/{keys,ilst}, ilst items typed by a 1-based
+#                    index into the keys box
+#   kijai save_video: moov/udta/meta/ilst ONLY (no keys box), items typed by
+#                    the iTunes fourcc `©cmt`, holding a double-encoded
+#                    {"prompt": "...", "workflow": "..."} envelope
+
+
+def _box(btype: bytes, payload: bytes) -> bytes:
+    return (len(payload) + 8).to_bytes(4, "big") + btype + payload
+
+
+def _keys_box(names: list[bytes]) -> bytes:
+    entries = b"".join((len(n) + 8).to_bytes(4, "big") + b"mdta" + n for n in names)
+    return _box(b"keys", b"\x00" * 4 + len(names).to_bytes(4, "big") + entries)
+
+
+def _data_box(value: bytes) -> bytes:
+    # type indicator (4) + locale (4) + value
+    return _box(b"data", b"\x00\x00\x00\x01" + b"\x00" * 4 + value)
+
+
+def _mp4(ilst_items: bytes, keys: list[bytes] | None = None, ftyp: bool = True) -> bytes:
+    meta_body = b"\x00" * 4  # `meta` is a FullBox: version/flags first
+    if keys:
+        meta_body += _keys_box(keys)
+    meta_body += _box(b"ilst", ilst_items)
+    moov = _box(b"moov", _box(b"udta", _box(b"meta", meta_body)))
+    head = _box(b"ftyp", b"isom" + b"\x00" * 8) if ftyp else b""
+    # mdat FIRST, as in real outputs: the walk must seek past megabytes of
+    # media to reach a moov at the end, which a prefix scan would never do.
+    return head + _box(b"mdat", b"\x00" * 4096) + moov
+
+
+def _indexed_item(index: int, value: bytes) -> bytes:
+    return _box(index.to_bytes(4, "big"), _data_box(value))
+
+
+def _atom_item(fourcc: bytes, value: bytes) -> bytes:
+    return _box(fourcc, _data_box(value))
+
+
+# ---------- Matroska (WebM/MKV) builders ------------------------------
+
+
+def _vint(value: int) -> bytes:
+    """Encode an EBML element SIZE (marker bit set, data bits hold the value)."""
+    for length in range(1, 9):
+        if value < (1 << (7 * length)) - 1:
+            return (value | (1 << (7 * length))).to_bytes(length, "big")
+    raise ValueError("size too large for the test builder")
+
+
+def _elem(elem_id: int, payload: bytes) -> bytes:
+    id_bytes = elem_id.to_bytes((elem_id.bit_length() + 7) // 8, "big")
+    return id_bytes + _vint(len(payload)) + payload
+
+
+def _simple_tag(name: bytes, value: bytes) -> bytes:
+    return _elem(
+        image_meta.EBML_ID_SIMPLE_TAG,
+        _elem(image_meta.EBML_ID_TAG_NAME, name) + _elem(image_meta.EBML_ID_TAG_STRING, value),
+    )
+
+
+def _webm(tags: bytes, cluster_bytes: int = 4096) -> bytes:
+    # A Cluster before the Tags element, so the walk is shown skipping media by
+    # declared size rather than scanning through it.
+    segment = _elem(0x1F43B675, b"\x00" * cluster_bytes) + _elem(
+        image_meta.EBML_ID_TAGS, _elem(image_meta.EBML_ID_TAG, tags)
+    )
+    return (
+        image_meta.EBML_SIG + _vint(4) + b"\x00" * 4 + _elem(image_meta.EBML_ID_SEGMENT, segment)
+    )
 
 
 def _read(tmp_path, name: str, data: bytes) -> tuple[dict[str, str], bool]:
@@ -1354,6 +1437,234 @@ class TestMetadataEndpoint:
     def test_route_present(self):
         registered = PromptServer.instance.routes.registered
         assert any(r.method == "GET" and r.path == "/image_browser/metadata" for r in registered)
+
+
+# ---------- Video containers ------------------------------------------
+
+
+VIDEO_GRAPH_JSON = json.dumps(FULL_GRAPH)
+UI_WORKFLOW_JSON = json.dumps({"nodes": [{"id": 1, "type": "KSampler"}], "links": []})
+
+
+class TestIsobmffRaw:
+    """MP4/MOV — the `keys`+`ilst` form core SaveVideo writes."""
+
+    def test_indexed_keys_round_trip(self, tmp_path):
+        data = _mp4(
+            _indexed_item(1, VIDEO_GRAPH_JSON.encode())
+            + _indexed_item(2, UI_WORKFLOW_JSON.encode()),
+            keys=[b"prompt", b"workflow"],
+        )
+        raw, truncated = _read(tmp_path, "a.mp4", data)
+        assert raw["prompt"] == VIDEO_GRAPH_JSON
+        assert raw["workflow"] == UI_WORKFLOW_JSON
+        assert truncated is False
+
+    def test_moov_after_a_large_mdat_is_still_found(self, tmp_path):
+        """The builder puts mdat first, as real outputs do. A prefix-scan parser
+        (which is what ComfyUI's frontend does, bounded at 64 MB) depends on the
+        file being small enough; seeking by declared box size does not."""
+        data = _mp4(
+            _indexed_item(1, b'{"1": {"class_type": "X", "inputs": {}}}'), keys=[b"prompt"]
+        )
+        assert data.index(b"mdat") < data.index(b"moov")
+        raw, _t = _read(tmp_path, "a.mp4", data)
+        assert "prompt" in raw
+
+    def test_mov_and_m4v_use_the_same_reader(self, tmp_path):
+        data = _mp4(_indexed_item(1, b"hello"), keys=[b"prompt"])
+        for name in ("a.mov", "a.m4v"):
+            raw, _t = _read(tmp_path, name, data)
+            assert raw["prompt"] == "hello"
+
+    def test_key_case_is_normalised(self, tmp_path):
+        """The graph lookup downstream keys on lowercase `prompt`/`workflow`."""
+        raw, _t = _read(tmp_path, "a.mp4", _mp4(_indexed_item(1, b"x"), keys=[b"WORKFLOW"]))
+        assert raw == {"workflow": "x"}
+
+    def test_missing_ftyp_reads_nothing(self, tmp_path):
+        data = _mp4(_indexed_item(1, b"x"), keys=[b"prompt"], ftyp=False)
+        assert _read(tmp_path, "a.mp4", data) == ({}, False)
+
+    def test_unknown_index_without_a_keys_box_is_skipped(self, tmp_path):
+        """An index that names nothing must not invent a key. `\x00\x00\x00\x01`
+        is not printable, so it is dropped rather than becoming a raw entry."""
+        assert _read(tmp_path, "a.mp4", _mp4(_indexed_item(1, b"x"))) == ({}, False)
+
+    def test_truncated_box_yields_what_was_readable(self, tmp_path):
+        full = _mp4(_indexed_item(1, b"value"), keys=[b"prompt"])
+        raw, _t = _read(tmp_path, "a.mp4", full[: len(full) - 3])
+        assert raw == {}  # never raises; a clipped box simply stops the walk
+
+    def test_value_is_capped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(image_meta, "MAX_VALUE_BYTES", 16)
+        data = _mp4(_indexed_item(1, b"y" * 500), keys=[b"prompt"])
+        raw, truncated = _read(tmp_path, "a.mp4", data)
+        assert len(raw["prompt"]) == 16
+        assert truncated is True
+
+
+class TestIsobmffAtoms:
+    """MP4 — the bare `©cmt` atom form kijai's writers use (no `keys` box).
+
+    This is the layout ComfyUI's own parser bails on, and 26% of the videos on
+    the reference install are written this way.
+    """
+
+    def _envelope(self) -> bytes:
+        return json.dumps({"prompt": VIDEO_GRAPH_JSON, "workflow": UI_WORKFLOW_JSON}).encode()
+
+    def test_comment_envelope_is_unwrapped(self, tmp_path):
+        raw, _t = _read(tmp_path, "a.mp4", _mp4(_atom_item(b"\xa9cmt", self._envelope())))
+        assert raw["prompt"] == VIDEO_GRAPH_JSON
+        assert raw["workflow"] == UI_WORKFLOW_JSON
+        # The envelope is kept: it is genuinely what the writer stored, and the
+        # raw view is a verbatim report of the file.
+        assert "comment" in raw
+
+    def test_unwrapped_envelope_parses_into_a_summary(self, tmp_path):
+        """The point of unwrapping: a graph left inside the envelope is invisible
+        to parse_generation_meta, which looks for one AT a GRAPH_KEYS slot."""
+        raw, _t = _read(tmp_path, "a.mp4", _mp4(_atom_item(b"\xa9cmt", self._envelope())))
+        source, summary = image_meta.parse_generation_meta(raw)
+        assert source == "comfyui"
+        assert summary["seed"] == "123456789"
+
+    def test_a_plain_human_comment_is_left_alone(self, tmp_path):
+        raw, _t = _read(tmp_path, "a.mp4", _mp4(_atom_item(b"\xa9cmt", b"shot on a phone")))
+        assert raw == {"comment": "shot on a phone"}
+
+    def test_json_comment_without_graph_keys_adds_nothing(self, tmp_path):
+        data = _mp4(_atom_item(b"\xa9cmt", b'{"camera": "a7iv"}'))
+        raw, _t = _read(tmp_path, "a.mp4", data)
+        assert set(raw) == {"comment"}
+
+    def test_a_native_tag_is_never_overridden_by_the_envelope(self, tmp_path):
+        """Both forms present: the real tag wins, because it is the one the
+        writer addressed deliberately rather than a value lifted out of a blob."""
+        envelope = json.dumps({"workflow": "from-envelope"}).encode()
+        data = _mp4(
+            _indexed_item(1, b"from-native-tag") + _atom_item(b"\xa9cmt", envelope),
+            keys=[b"workflow"],
+        )
+        raw, _t = _read(tmp_path, "a.mp4", data)
+        assert raw["workflow"] == "from-native-tag"
+
+    def test_known_atoms_get_readable_names(self, tmp_path):
+        data = _mp4(_atom_item(b"\xa9nam", b"a title") + _atom_item(b"\xa9too", b"Lavf62"))
+        raw, _t = _read(tmp_path, "a.mp4", data)
+        assert raw == {"title": "a title", "encoder": "Lavf62"}
+
+
+class TestMatroskaRaw:
+    """WebM/MKV — SimpleTag name/value pairs."""
+
+    def test_uppercase_tags_are_lowercased(self, tmp_path):
+        """Matroska tag names are conventionally upper — that is a container
+        convention, not something the writer chose, so it must not decide
+        whether the graph is findable."""
+        data = _webm(
+            _simple_tag(b"WORKFLOW", UI_WORKFLOW_JSON.encode())
+            + _simple_tag(b"PROMPT", VIDEO_GRAPH_JSON.encode())
+        )
+        raw, truncated = _read(tmp_path, "a.webm", data)
+        assert raw["workflow"] == UI_WORKFLOW_JSON
+        assert raw["prompt"] == VIDEO_GRAPH_JSON
+        assert truncated is False
+
+    def test_tags_after_a_cluster_are_found(self, tmp_path):
+        """The Cluster is skipped by its declared size, so tags written after the
+        media data are still reached."""
+        data = _webm(_simple_tag(b"PROMPT", b'{"1": {"class_type": "X", "inputs": {}}}'))
+        assert data.index(b"PROMPT") > 4096
+        raw, _t = _read(tmp_path, "a.webm", data)
+        assert "prompt" in raw
+
+    def test_mkv_uses_the_same_reader(self, tmp_path):
+        raw, _t = _read(tmp_path, "a.mkv", _webm(_simple_tag(b"PROMPT", b"x")))
+        assert raw == {"prompt": "x"}
+
+    def test_comment_envelope_is_unwrapped(self, tmp_path):
+        envelope = json.dumps({"prompt": VIDEO_GRAPH_JSON}).encode()
+        raw, _t = _read(tmp_path, "a.webm", _webm(_simple_tag(b"COMMENT", envelope)))
+        assert raw["prompt"] == VIDEO_GRAPH_JSON
+        source, _summary = image_meta.parse_generation_meta(raw)
+        assert source == "comfyui"
+
+    def test_not_matroska_reads_nothing(self, tmp_path):
+        assert _read(tmp_path, "a.webm", b"NOTEBML" + b"\x00" * 64) == ({}, False)
+
+    def test_truncated_element_yields_what_was_readable(self, tmp_path):
+        full = _webm(_simple_tag(b"PROMPT", b"value"))
+        raw, _t = _read(tmp_path, "a.webm", full[: len(full) - 3])
+        assert raw == {}
+
+    def test_deep_nesting_does_not_recurse_without_bound(self, tmp_path):
+        """EBML is self-describing with no structural end marker, so a crafted
+        file can nest SimpleTags arbitrarily. The depth cap must turn that into
+        a bounded read, not a RecursionError on the event loop."""
+        payload = _simple_tag(b"PROMPT", b"deep")
+        for _ in range(200):
+            payload = _elem(image_meta.EBML_ID_SIMPLE_TAG, payload)
+        raw, truncated = _read(tmp_path, "a.webm", _webm(payload))
+        assert raw == {}
+        assert truncated is True
+
+    def test_value_is_capped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(image_meta, "MAX_VALUE_BYTES", 16)
+        raw, truncated = _read(tmp_path, "a.webm", _webm(_simple_tag(b"PROMPT", b"z" * 500)))
+        assert len(raw["prompt"]) == 16
+        assert truncated is True
+
+
+class TestVideoMetadataGate:
+    """The /metadata perimeter, and the frontend mirror of it."""
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_metadata(_FakeGetRequest(query)))
+
+    def test_readable_video_answers_200_with_a_summary(self, tmp_path):
+        data = _mp4(_indexed_item(1, VIDEO_GRAPH_JSON.encode()), keys=[b"prompt"])
+        (tmp_path / "clip.mp4").write_bytes(data)
+        resp = self._call({"path": str(tmp_path / "clip.mp4")})
+        assert resp.status == 200
+        assert resp._body["format"] == "mp4"
+        assert resp._body["source"] == "comfyui"
+        assert resp._body["summary"]["seed"] == "123456789"
+
+    def test_container_without_a_reader_is_400_before_any_disk_touch(self, monkeypatch):
+        """.avi is in VIDEO_EXTS — it lists and previews — but has no reader, so
+        the endpoint rejects it and the frontend withholds the ⓘ / ⤓ buttons.
+        A 400 for a path that does not exist proves the gate precedes isfile."""
+
+        def boom(_path):
+            raise AssertionError("the extension gate must precede os.path.isfile")
+
+        monkeypatch.setattr(os.path, "isfile", boom)
+        resp = self._call({"path": "/nonexistent/clip.avi"})
+        assert resp.status == 400
+        assert resp._body["error"] == "unsupported file type"
+
+    def test_images_without_a_parser_still_pass_the_gate(self, tmp_path):
+        """Widening the gate to video must not narrow it for images: every
+        IMG_EXTS member is still accepted, answering 200 + empty."""
+        assert ".gif" in ib.METADATA_EXTS
+        assert ".tif" in ib.METADATA_EXTS
+
+    def test_frontend_mirror_matches_the_backend_gate(self):
+        """The ⓘ / ⤓ buttons are gated client-side by META_VIDEO_EXTS in
+        src/api.ts. The backend derives its own set from image_meta.FORMAT_EXTS,
+        so the two can silently drift — and a drifted mirror ships a control that
+        is present here and rejected there. Read the literal back out of the
+        source rather than trusting a comment to keep them aligned."""
+        src = (pathlib.Path(__file__).resolve().parents[1] / "src" / "api.ts").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(r"export const META_VIDEO_EXTS = new Set\(\[(.*?)\]\)", src, re.S)
+        assert match, "META_VIDEO_EXTS literal not found in src/api.ts"
+        frontend = set(re.findall(r'"(\.[a-z0-9]+)"', match.group(1)))
+        backend = ib.VIDEO_EXTS & set(image_meta.FORMAT_EXTS)
+        assert frontend == backend
 
 
 # Imported at the bottom so the class above can reference the stubbed server

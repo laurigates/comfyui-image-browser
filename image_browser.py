@@ -104,6 +104,20 @@ def _is_image_file(name: str) -> bool:
     return os.path.splitext(name)[1].lower() in IMG_EXTS
 
 
+# Extensions /metadata will answer for. Images keep their historical behaviour
+# — every IMG_EXTS member is accepted, and one whose format has no parser (a
+# .gif) answers 200 with empty metadata rather than an error. Videos are
+# admitted only where image_meta actually has a reader, DERIVED from its
+# FORMAT_EXTS rather than re-listed here: the same set gates the frontend's
+# ⓘ / ⤓ buttons, so a hand-copy that drifted would ship a control that 400s.
+# That is why .avi/.mpg stay out — they are in VIDEO_EXTS but have no reader.
+METADATA_EXTS = IMG_EXTS | (VIDEO_EXTS & set(image_meta.FORMAT_EXTS))
+
+
+def _has_metadata_reader(name: str) -> bool:
+    return os.path.splitext(name)[1].lower() in METADATA_EXTS
+
+
 def _parse_extensions(raw: str) -> set[str]:
     """Parse a CSV extension list ('mp4,webm' or '.png,.jpg') to a normalized set.
 
@@ -570,11 +584,12 @@ async def image_browser_thumb(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.get("/image_browser/metadata")
 async def image_browser_metadata(request: web.Request) -> web.Response:
-    """Embedded generation metadata for one image — sandboxed roots AND type=path.
+    """Embedded generation metadata for one file — sandboxed roots AND type=path.
 
-    Same dual addressing as /thumb (``_resolve_thumb_target``), and images
-    only: the gate is IMG_EXTS, not STREAMABLE_EXTS, so no video metadata is
-    read and no new extension enters the perimeter.
+    Same dual addressing as /thumb (``_resolve_thumb_target``). The gate is
+    METADATA_EXTS — every image, plus the video containers image_meta can read
+    (MP4/MOV/M4V, WebM/MKV) — and never STREAMABLE_EXTS, so no extension
+    enters the perimeter that some reader here cannot actually parse.
 
     The whitelist is asserted **before** ``os.path.isfile`` — the opposite
     order to /file, which stats an arbitrary caller-supplied path before
@@ -589,7 +604,7 @@ async def image_browser_metadata(request: web.Request) -> web.Response:
     if err:
         return _err(err, 400)
     assert path is not None
-    if not _is_image_file(path):
+    if not _has_metadata_reader(path):
         return _err("unsupported file type", 400)
     if not os.path.isfile(path):
         return _err("file not found", 404)

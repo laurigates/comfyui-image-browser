@@ -36,16 +36,18 @@ import {
   deleteFile,
   deleteMany,
   EXT_NAME,
+  embeddedWorkflowJSON,
   fetchBasePaths,
   fetchListing,
   fetchMetadata,
   fullSrcURL,
-  hasEmbeddedWorkflow,
   IMG_EXTS,
   type ImageMetadata,
   imageThumbURL,
   joinAbs,
   type ListingFile,
+  META_EXTS,
+  META_VIDEO_EXTS,
   type MetaRow,
   makeDir,
   metaClipboardText,
@@ -1084,12 +1086,41 @@ export function openImageBrowser(): ModalShellController {
     const sub = fileSub(f);
     try {
       const meta = await fetchMetadata(state.type, sub, f.name, state.absPath);
-      if (!hasEmbeddedWorkflow(meta)) {
+      const graphJSON = embeddedWorkflowJSON(meta);
+      if (!graphJSON) {
         notify({
           severity: "warn",
-          summary: "No workflow in this image",
-          detail: `${f.name} carries no embedded graph. Images saved by another tool (or re-encoded, e.g. by a phone gallery or a chat app) lose ComfyUI's metadata.`,
+          summary: "No workflow in this file",
+          detail: `${f.name} carries no embedded graph. Files saved by another tool (or re-encoded, e.g. by a phone gallery or a chat app) lose ComfyUI's metadata.`,
         });
+        return;
+      }
+      // Videos take a different route to the SAME app loader, because
+      // handing the video bytes to handleFile() is not reliable for them.
+      // getWorkflowDataFromFile() reads the mdta `keys`+`ilst` MP4 layout core
+      // SaveVideo writes, but returns early when the `keys` box is absent —
+      // which is exactly how kijai's writers store it (a bare `©cmt` atom
+      // holding a double-encoded envelope; 26% of the videos on the reference
+      // install, verified by walking their box trees). handleFile's
+      // no-workflow branch then PASTES A LoadVideo NODE rather than loading
+      // the graph: a silently wrong outcome, worse than the dead button this
+      // change removes.
+      //
+      // So a video hands over the graph the BACKEND already parsed, as a JSON
+      // file. That still goes through app.handleFile → getDataFromJSON, which
+      // owns the lenient non-finite parse, the API-vs-UI format detection, and
+      // the workflow/prompt precedence — none of which is reimplemented here.
+      // A malformed graph ends at the app's own showErrorOnFileLoad, never at
+      // a pasted node. Images keep the byte path: it is unchanged, and their
+      // containers are ones handleFile reads natively.
+      if (META_VIDEO_EXTS.has((f.ext || "").toLowerCase())) {
+        // handleFile names the workflow tab after the file, minus one
+        // extension — so ".json" here would leave the video's own extension
+        // showing. Strip it first and let the graph tab carry the bare name.
+        const base = f.name.replace(/\.[^./]+$/, "");
+        const file = new File([graphJSON], `${base}.json`, { type: "application/json" });
+        modal.close();
+        await app.handleFile(file);
         return;
       }
       const res = await fetch(fullSrcURL(state.type, sub, f.name, state.absPath));
@@ -1529,19 +1560,20 @@ export function openImageBrowser(): ModalShellController {
       // The ⓘ metadata button is the ONE card control deliberately outside the
       // canWrite mirror: /metadata is a READ and accepts type=path, so it belongs
       // on the browse…/path tab too. Don't "fix" this into canWrite. It is gated
-      // on image-ness instead — same ext source thumbForFile uses — because the
-      // endpoint's own gate is IMG_EXTS (a video would just 400).
-      const isImage = IMG_EXTS.has((f.ext || "").toLowerCase());
-      const metaBtn = isImage
+      // on META_EXTS instead — same ext source thumbForFile uses — which mirrors
+      // the endpoint's own gate: every image, plus the video containers the
+      // backend can parse. A .avi has no reader and would 400, so it gets no ⓘ.
+      const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
+      const metaBtn = hasMeta
         ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>`
         : "";
       // Load-workflow rides the same gate as ⓘ (both are READS through /metadata,
       // which accepts type=path), so it appears on the browse…/path tab too and
-      // stays outside the canWrite mirror. It is offered for every image rather
-      // than only for images known to carry a graph: knowing that requires the
-      // per-file metadata read, and doing that for every card in a listing would
-      // cost one request per thumbnail. The click path reads it and says so.
-      const wfBtn = isImage
+      // stays outside the canWrite mirror. It is offered for every readable file
+      // rather than only for those known to carry a graph: knowing that requires
+      // the per-file metadata read, and doing that for every card in a listing
+      // would cost one request per thumbnail. The click path reads it and says so.
+      const wfBtn = hasMeta
         ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>`
         : "";
       // Move is only offered for the sandboxed roots (backend rejects path writes).
@@ -2342,16 +2374,16 @@ export function openImageBrowser(): ModalShellController {
         if (f) openFull(f);
         break;
       case "w":
-        // Same gate as the ⤓ button: images only, every tab (a read, not a write).
+        // Same gate as the ⤓ button: META_EXTS, every tab (a read, not a write).
         e.preventDefault();
         e.stopPropagation();
-        if (f && IMG_EXTS.has((f.ext || "").toLowerCase())) void loadWorkflow(f);
+        if (f && META_EXTS.has((f.ext || "").toLowerCase())) void loadWorkflow(f);
         break;
       case "i":
-        // Same gate as the ⓘ button: images only, every tab (a read, not a write).
+        // Same gate as the ⓘ button: META_EXTS, every tab (a read, not a write).
         e.preventDefault();
         e.stopPropagation();
-        if (f && IMG_EXTS.has((f.ext || "").toLowerCase())) void openMetadata(f);
+        if (f && META_EXTS.has((f.ext || "").toLowerCase())) void openMetadata(f);
         break;
       case "r":
         if (SANDBOXED_TYPES.includes(state.type) && f) {
