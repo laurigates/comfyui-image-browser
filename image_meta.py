@@ -1049,7 +1049,14 @@ SUMMARY_WIDGETS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
 
 # Checkpoint/UNet loader widgets, in preference order when one node holds
 # several.
-MODEL_KEYS = ("ckpt_name", "unet_name", "model_name", "model_path")
+# Checkpoint/UNet loader widgets, in preference order when one node holds
+# several. ``model`` is last and is deliberately the loosest: it is the key
+# ``WanVideoModelLoader`` (and the MMAudio loaders) use for the filename, but
+# it is also the name of the MODEL *link* every sampler carries. Only
+# ``_scalar`` decides between them — it rejects a ``[node_id, slot]`` list — so
+# a link can never be reported as a model name. Keeping it last means a graph
+# with a real ``ckpt_name``/``unet_name`` still prefers that.
+MODEL_KEYS = ("ckpt_name", "unet_name", "model_name", "model_path", "model")
 
 # Raw keys that can hold a Comfy graph. ``prompt``/``workflow`` are the PNG text
 # chunks ComfyUI core writes, but they are the *only* place a PNG writer has —
@@ -1341,6 +1348,36 @@ def _cond_inputs(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any
     return inputs
 
 
+# Nodes that hold BOTH prompts as plain strings on one node, rather than as
+# two conditioning links. kijai's WanVideoTextEncode is the case that matters
+# (1215 files on the reference install): the sampler reaches it through a
+# ``text_embeds`` link, and the two roles are named on the node itself.
+#
+# This is the same guarantee _prompt_summary demands of the link path — both
+# roles read off ONE node, so they stay distinguishable — expressed as widget
+# names instead of links. It is emphatically NOT the forbidden fallback of
+# picking whichever text node looks prompt-shaped.
+PAIRED_PROMPT_WIDGETS = (("positive", "positive_prompt"), ("negative", "negative_prompt"))
+
+
+def _paired_prompts(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, str]:
+    """Prompts from a single node naming both roles as widgets (Wan-style)."""
+
+    def pick(node_inputs: dict[str, Any]) -> dict[str, str] | None:
+        found = {
+            role: node_inputs[key]
+            for role, key in PAIRED_PROMPT_WIDGETS
+            if isinstance(node_inputs.get(key), str)
+        }
+        return found or None
+
+    for ref in inputs.values():
+        found = _walk(graph, ref, pick)
+        if isinstance(found, dict):
+            return found
+    return {}
+
+
 def _prompt_summary(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, str]:
     """Resolve positive/negative for one sampler's inputs. Roles come from links.
 
@@ -1360,7 +1397,36 @@ def _prompt_summary(graph: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
         prompt = _resolve(graph, cond.get(key), (), want_text=True)
         if prompt is not None:
             summary[key] = prompt
-    return summary
+    if summary:
+        return summary
+    # No conditioning links resolved. Two more shapes, both role-determined:
+    # a node naming both prompts as widgets (Wan), or an unguided single
+    # conditioning (BasicGuider — MiniMax H3, and the core Flux/SD3 path).
+    paired = _paired_prompts(graph, inputs)
+    if paired:
+        return paired
+    single = _resolve(graph, _single_conditioning(graph, inputs), (), want_text=True)
+    return {"positive": single} if single is not None else {}
+
+
+def _single_conditioning(graph: dict[str, Any], inputs: dict[str, Any]) -> Any:
+    """The lone conditioning link of an unguided guider, or None.
+
+    ``BasicGuider`` takes one ``conditioning`` and no negative, because CFG
+    does not apply on that path — so its single link is unambiguously the
+    positive. The role comes from the node's contract (there is nothing else it
+    could be), not from choosing between two candidates, which is what
+    _prompt_summary's no-fallback rule forbids. A node exposing ``positive`` or
+    ``negative`` is excluded so this can never pre-empt the link path above.
+    """
+
+    def pick(node_inputs: dict[str, Any]) -> Any:
+        if "positive" in node_inputs or "negative" in node_inputs:
+            return None
+        ref = node_inputs.get("conditioning")
+        return ref if _is_link(ref) else None
+
+    return _walk(graph, inputs.get("guider"), pick)
 
 
 def _from_api_graph(text: Any) -> tuple[str, dict[str, str]]:

@@ -1617,6 +1617,183 @@ class TestMatroskaRaw:
         assert truncated is True
 
 
+H3_GRAPH = {
+    "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_int8.safetensors"}},
+    "5": {
+        "class_type": "MiniMaxH3ImageToVideo",
+        "inputs": {"prompt": "a lighthouse keeper at dusk", "length": 124, "clip": ["2", 0]},
+    },
+    "6": {
+        "class_type": "BasicGuider",
+        "inputs": {"model": ["1", 0], "conditioning": ["5", 0]},
+    },
+    "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+    "8": {
+        "class_type": "BasicScheduler",
+        "inputs": {"scheduler": "simple", "steps": 20, "model": ["1", 0]},
+    },
+    "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": 981154224542045}},
+    "10": {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {
+            "noise": ["9", 0],
+            "guider": ["6", 0],
+            "sampler": ["7", 0],
+            "sigmas": ["8", 0],
+            "latent_image": ["5", 1],
+        },
+    },
+}
+
+
+WAN_GRAPH = {
+    "11": {
+        "class_type": "LoadWanVideoT5TextEncoder",
+        "inputs": {"model_name": "umt5-xxl-enc-bf16.safetensors"},
+    },
+    "16": {
+        "class_type": "WanVideoTextEncode",
+        "inputs": {
+            "positive_prompt": "Three robot dogs",
+            "negative_prompt": "static, blurry",
+            "t5": ["11", 0],
+        },
+    },
+    "22": {
+        "class_type": "WanVideoModelLoader",
+        "inputs": {
+            "model": "WanVideo/Wan2_1-T2V-14B_fp8.safetensors",
+            "base_precision": "fp16",
+        },
+    },
+    "27": {
+        "class_type": "WanVideoSampler",
+        "inputs": {
+            "steps": 15,
+            "cfg": 6.0,
+            "seed": 1057359483639288,
+            "scheduler": "dpm++",
+            "model": ["22", 0],
+            "text_embeds": ["16", 0],
+        },
+    },
+}
+
+
+class TestVideoFamilySummaries:
+    """Summarizing the node families video workflows actually use.
+
+    Every shape here was read off real graphs on the reference install, not
+    invented: the widget names and the link a sampler reaches them by are the
+    whole substance of these tests.
+    """
+
+    def _summary(self, graph):
+        source, summary = image_meta.parse_generation_meta({"prompt": json.dumps(graph)})
+        assert source == "comfyui"
+        return summary
+
+    # --- MiniMax H3 / the core unguided path -------------------------------
+
+    def test_minimax_h3_resolves_the_prompt_through_basicguider(self):
+        """BasicGuider takes ONE conditioning and has no negative — CFG does not
+        apply on that path — so its single link is unambiguously the positive.
+        Without this the whole H3 family reported no prompt at all."""
+        summary = self._summary(H3_GRAPH)
+        assert summary["positive"] == "a lighthouse keeper at dusk"
+        assert "negative" not in summary  # there is none; inventing one would be a lie
+
+    def test_minimax_h3_resolves_the_satellite_widgets(self):
+        summary = self._summary(H3_GRAPH)
+        assert summary["seed"] == "981154224542045"
+        assert summary["steps"] == "20"
+        assert summary["sampler"] == "res_multistep"
+        assert summary["scheduler"] == "simple"
+        assert summary["model"] == "minimax_h3_int8.safetensors"
+
+    def test_a_cfgguider_graph_still_reports_both_roles_from_the_wiring(self):
+        """A behavioural LOCK, not a test of the exclusion guard: the link path
+        resolves first and returns early, so this passes with or without that
+        guard (measured). What it does lock is that adding the unguided path
+        did not perturb a normal two-role graph. The guard itself is covered by
+        test_single_conditioning_skips_a_node_that_names_roles."""
+        graph = dict(H3_GRAPH)
+        graph["6"] = {
+            "class_type": "CFGGuider",
+            "inputs": {
+                "model": ["1", 0],
+                "positive": ["20", 0],
+                "negative": ["21", 0],
+                "conditioning": ["5", 0],
+            },
+        }
+        graph["20"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "the real positive"}}
+        graph["21"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "the real negative"}}
+        summary = self._summary(graph)
+        assert summary["positive"] == "the real positive"
+        assert summary["negative"] == "the real negative"
+
+    # --- WanVideoWrapper ---------------------------------------------------
+
+    def test_wan_prompts_come_from_the_paired_widgets(self):
+        """The sampler reaches WanVideoTextEncode by a `text_embeds` link, and
+        that node names BOTH roles as widgets — so the two stay distinguishable,
+        which is the same guarantee the link path gives."""
+        summary = self._summary(WAN_GRAPH)
+        assert summary["positive"] == "Three robot dogs"
+        assert summary["negative"] == "static, blurry"
+
+    def test_wan_model_name_resolves_off_the_model_widget(self):
+        summary = self._summary(WAN_GRAPH)
+        assert summary["model"] == "WanVideo/Wan2_1-T2V-14B_fp8.safetensors"
+        assert summary["seed"] == "1057359483639288"
+
+    def test_a_model_LINK_is_never_reported_as_a_model_name(self):
+        """`model` is both a loader widget and the name of the MODEL link every
+        sampler carries. Only _scalar separates them; if it ever stopped
+        rejecting lists, every graph would report a model of "['22', 0]"."""
+        graph = dict(WAN_GRAPH)
+        graph["22"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": ["99", 0]}}
+        graph["99"] = {"class_type": "Reroute", "inputs": {}}
+        assert "model" not in self._summary(graph)
+
+    def test_single_conditioning_skips_a_node_that_names_roles(self):
+        """Direct unit test of the guard, because the integration test above
+        cannot reach it: the link path resolves first and returns early, so
+        _single_conditioning is never consulted there and that test passes with
+        or without this exclusion (measured). A node carrying positive/negative
+        has a KNOWN role split, so its `conditioning` input — if it has one —
+        is not the sole conditioning and must not be read as the positive."""
+        graph = {
+            "5": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"prompt": "text"}},
+            "6": {
+                "class_type": "CFGGuider",
+                "inputs": {
+                    "positive": ["20", 0],
+                    "negative": ["21", 0],
+                    "conditioning": ["5", 0],
+                },
+            },
+            "20": {"class_type": "CLIPTextEncode", "inputs": {"text": "p"}},
+            "21": {"class_type": "CLIPTextEncode", "inputs": {"text": "n"}},
+        }
+        assert image_meta._single_conditioning(graph, {"guider": ["6", 0]}) is None
+
+    def test_paired_widgets_do_not_override_a_resolved_link_pair(self):
+        """A graph carrying both shapes must prefer the wiring, which is the
+        stronger evidence. The paired-widget path is a fallback, not a peer."""
+        graph = dict(WAN_GRAPH)
+        graph["27"] = dict(graph["27"])
+        graph["27"]["inputs"] = dict(graph["27"]["inputs"])
+        graph["27"]["inputs"]["positive"] = ["30", 0]
+        graph["27"]["inputs"]["negative"] = ["31", 0]
+        graph["30"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "from the link"}}
+        graph["31"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "negative from link"}}
+        summary = self._summary(graph)
+        assert summary["positive"] == "from the link"
+        assert summary["negative"] == "negative from link"
+
+
 class TestVideoMetadataGate:
     """The /metadata perimeter, and the frontend mirror of it."""
 
