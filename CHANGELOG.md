@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.21](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.20...comfyui-image-browser-v0.1.21) (2026-08-06)
+
+
+### Features
+
+* **browser:** filter the grid by media type, server-side ([#65](https://github.com/laurigates/comfyui-image-browser/issues/65)) ([3fda8e3](https://github.com/laurigates/comfyui-image-browser/commit/3fda8e3edd3f4f04aa8f065d695ed3f08ec7b27b))
+* **lightbox:** rate and delete from the stock asset viewer ([3e4e1bc](https://github.com/laurigates/comfyui-image-browser/commit/3e4e1bc0cf7b2f3d2c209e31d592a999083103e4))
+
+
+### Documentation
+
+* **lightbox:** record why /api/viewvideo must never be accepted ([fdaa1c1](https://github.com/laurigates/comfyui-image-browser/commit/fdaa1c16abce71def2af072844ca638824af55c1))
+
 ## [0.1.20](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.19...comfyui-image-browser-v0.1.20) (2026-08-05)
 
 
