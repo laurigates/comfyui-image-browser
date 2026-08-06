@@ -105,6 +105,12 @@ interface ListResponse {
   truncated?: boolean;
 }
 
+// Which media family the listing is narrowed to — the toolbar's segmented
+// All / 🖼 Images / 🎬 Videos control. The names are the backend's `kind=`
+// values verbatim; tests/test_helpers.py asserts them against KIND_FILTERS,
+// because a drift here would be a silent no-filter rather than an error.
+export type TypeFilter = "all" | "images" | "videos";
+
 interface ListParams {
   type: BrowseType;
   subfolder?: string;
@@ -112,6 +118,11 @@ interface ListParams {
   // Flat view: walk the subfolder recursively and return every descendant file
   // (each tagged with its subpath). Sandboxed roots only — ignored for path mode.
   recursive?: boolean;
+  // Narrow the listing to one media family. Filtered server-side because both
+  // listing paths cap at 5000 files by mtime AFTER sorting: narrowing on the
+  // server spends that cap on the kind asked for (the newest N videos), while
+  // filtering the response here would filter an already-truncated listing.
+  kind?: TypeFilter;
 }
 
 let BASE_PATHS: BasePaths | null = null;
@@ -143,6 +154,11 @@ export async function fetchListing(p: ListParams): Promise<ListResponse> {
     params.set("subfolder", p.subfolder || "");
     if (p.recursive) params.set("recursive", "1");
   }
+  // Deliberately OUTSIDE the branch: the filter applies on the browse…/path tab
+  // too, and setting it in both arms is the shape that already lost `recursive`
+  // from the path request above. Omitted for "all" so the default request URL
+  // stays byte-identical to what it was before the filter existed.
+  if (p.kind && p.kind !== "all") params.set("kind", p.kind);
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const data = (await r.json()) as ListResponse;

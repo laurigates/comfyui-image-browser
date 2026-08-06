@@ -118,6 +118,15 @@ def _has_metadata_reader(name: str) -> bool:
     return os.path.splitext(name)[1].lower() in METADATA_EXTS
 
 
+# The media families /list's `kind=` param narrows to — the toolbar's
+# All / Images / Videos filter. Enumerable rather than an if/elif of string
+# literals so the frontend's VALID_FILTERS can be asserted against it: a
+# one-character drift between the two sides ("videos" vs "video") would
+# otherwise be a silent no-filter that no test could see. An unrecognised key
+# narrows nothing, matching how `recursive` treats a value it can't parse.
+KIND_FILTERS: dict[str, set[str]] = {"images": IMG_EXTS, "videos": VIDEO_EXTS}
+
+
 def _parse_extensions(raw: str) -> set[str]:
     """Parse a CSV extension list ('mp4,webm' or '.png,.jpg') to a normalized set.
 
@@ -405,6 +414,27 @@ async def image_browser_list(request: web.Request) -> web.Response:
     subfolder = q.get("subfolder", "")
     abs_path = q.get("path", "")
     exts = _parse_extensions(q.get("extensions", ""))
+    # Narrows, never widens: composes with an explicit `extensions=` rather than
+    # overriding it, so a caller that asked for a narrower set still gets it.
+    # Applied HERE, above the recursive/non-recursive split, so it reaches
+    # _walk_files and the flat view too — and above the mtime sort + cap in
+    # _probe_newest, which is the whole point: the cap is then spent entirely on
+    # the kind you asked for (the newest N *videos*), not on whatever the newest
+    # N files happened to be. Filtering client-side, or after the slice, would
+    # under-report videos in any folder where stills outnumber them.
+    #
+    # Note this makes a narrow filter TRAVERSE MORE, not less: FLAT_WALK_CAP
+    # counts only files that survive the extension test, so `kind=videos` over a
+    # tree of 300k stills walks all of it without the backstop ever biting.
+    # That follows from the newest-N guarantee above — don't "optimize" it by
+    # moving the filter after the walk.
+    narrow = KIND_FILTERS.get(q.get("kind", ""))
+    if narrow:
+        exts = exts & narrow
+    # After the narrowing, which is the correct expression of intent — though it
+    # changes nothing today, since IMG_EXTS and VIDEO_EXTS are disjoint and no
+    # video would pass `ext in image_subset` either way. No test can tell the
+    # two orderings apart; don't write one.
     image_subset = exts & IMG_EXTS
     # Flat/recursive listing is a sandboxed-root affordance only — recursing an
     # arbitrary base path (type=path, e.g. models/) is out of scope and could be

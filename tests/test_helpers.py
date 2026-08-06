@@ -363,6 +363,115 @@ class TestListDirCap:
         assert "subpath" not in resp._body["files"][0]
 
 
+class TestListKindFilter:
+    """`kind=` — the toolbar's All / Images / Videos filter, applied server-side.
+
+    Server-side is the requirement, not an implementation detail: the narrowing
+    sits above the mtime sort + cap in _probe_newest, so the cap is spent on the
+    kind that was asked for. That is what the recursive case below pins down.
+    """
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def _mixed(self, base):
+        (base / "a.png").write_bytes(b"x")
+        (base / "b.mp4").write_bytes(b"x")
+
+    def _names(self, resp):
+        return {f["name"] for f in resp._body["files"]}
+
+    def test_videos_narrows_to_video_extensions(self, tmp_path, monkeypatch):
+        # Fails if the narrowing is deleted.
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        assert self._names(self._call({"type": "output", "kind": "videos"})) == {"b.mp4"}
+
+    def test_images_narrows_to_image_extensions(self, tmp_path, monkeypatch):
+        # Fails if IMG_EXTS/VIDEO_EXTS are swapped in KIND_FILTERS.
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        assert self._names(self._call({"type": "output", "kind": "images"})) == {"a.png"}
+
+    def test_absent_kind_lists_both(self, tmp_path, monkeypatch):
+        # Fails if the narrowing is applied unconditionally.
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        assert self._names(self._call({"type": "output"})) == {"a.png", "b.mp4"}
+
+    def test_unrecognised_kind_narrows_nothing(self, tmp_path, monkeypatch):
+        """An odd `kind` is answerable, so it answers — it does not 400.
+
+        Locks the leniency decision: fails if the lookup is changed to raise on
+        an unknown key, or if an else-branch guesses a family. The frontend
+        whitelists on read, so this is only reachable by hand-built URLs.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        # Singular typo — the exact drift the mirror test below also guards.
+        assert self._names(self._call({"type": "output", "kind": "video"})) == {
+            "a.png",
+            "b.mp4",
+        }
+
+    def test_narrowing_reaches_the_recursive_walk(self, tmp_path, monkeypatch):
+        """Flat view filters too — fails if the narrowing moves below the
+        `if recursive:` split, where it would only reach the dir lister."""
+        self._sandbox(tmp_path, monkeypatch)
+        deep = tmp_path / "sub" / "deep"
+        deep.mkdir(parents=True)
+        (deep / "nested.mp4").write_bytes(b"x")
+        (deep / "nested.png").write_bytes(b"x")
+        resp = self._call({"type": "output", "recursive": "1", "kind": "videos"})
+        assert self._names(resp) == {"nested.mp4"}
+        assert resp._body["files"][0]["subpath"] == "sub/deep"
+
+    def test_applies_on_the_path_tab(self, tmp_path, monkeypatch):
+        """The deliberate divergence from `recursive`, which IS gated to the
+        sandboxed roots. Extension filtering costs nothing extra on an arbitrary
+        base, so the browse… tab filters like any other. Fails the moment
+        someone mirrors `recursive`'s `and type_name in SANDBOXED_TYPES`."""
+        self._mixed(tmp_path)
+        resp = self._call({"type": "path", "path": str(tmp_path), "kind": "videos"})
+        assert self._names(resp) == {"b.mp4"}
+
+    def test_composes_with_an_explicit_extensions_list(self, tmp_path, monkeypatch):
+        """Intersects rather than overrides, so a caller's own narrowing is not
+        silently discarded. Fails if `&=` becomes `=` — c.webm would reappear."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        (tmp_path / "c.webm").write_bytes(b"x")
+        resp = self._call({"type": "output", "extensions": "mp4,png", "kind": "videos"})
+        assert self._names(resp) == {"b.mp4"}
+
+    def test_frontend_filter_names_match_the_backend_kinds(self):
+        """The frontend's VALID_FILTERS must name exactly the kinds the backend
+        honours, plus "all" (which is expressed by omitting the param).
+
+        A one-character drift — "videos" on one side, "video" on the other —
+        would be a SILENT no-filter: the request succeeds, every file comes
+        back, and the UI shows the segment as active. Nothing else can see it,
+        which is why the literal is read back out of the source here. Sibling of
+        tests/test_metadata.py::test_frontend_mirror_matches_the_backend_gate.
+        """
+        import re
+
+        src = os.path.join(os.path.dirname(__file__), "..", "src", "browser.ts")
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
+        m = re.search(r"VALID_FILTERS = new Set\(\[(.*?)\]\)", text, re.S)
+        assert m, "VALID_FILTERS literal not found in src/browser.ts"
+        frontend = set(re.findall(r'"([^"]+)"', m.group(1)))
+        assert frontend == {"all"} | set(ib.KIND_FILTERS)
+
+
 class TestRmdirEndpoint:
     """Drive the real /rmdir handler against a tmp dir (folder_paths stubbed).
 

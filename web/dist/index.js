@@ -1109,6 +1109,8 @@ async function fetchListing(p) {
     if (p.recursive)
       params.set("recursive", "1");
   }
+  if (p.kind && p.kind !== "all")
+    params.set("kind", p.kind);
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok)
     throw new Error(`HTTP ${r.status}`);
@@ -1353,6 +1355,21 @@ function saveView(mode) {
     localStorage.setItem(VIEW_STORAGE_KEY, mode);
   } catch {}
 }
+var FILTER_STORAGE_KEY = "comfyui-image-browser:filter";
+var VALID_FILTERS = new Set(["all", "images", "videos"]);
+function loadSavedFilter() {
+  try {
+    const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+    return raw && VALID_FILTERS.has(raw) ? raw : "all";
+  } catch {
+    return "all";
+  }
+}
+function saveFilter(filter) {
+  try {
+    localStorage.setItem(FILTER_STORAGE_KEY, filter);
+  } catch {}
+}
 function markFlatPending(pending) {
   try {
     if (pending)
@@ -1421,7 +1438,8 @@ function openImageBrowser() {
     sortKey: "mtime",
     sortDir: "desc",
     query: "",
-    viewMode: savedView.mode
+    viewMode: savedView.mode,
+    typeFilter: loadSavedFilter()
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -1502,9 +1520,27 @@ function openImageBrowser() {
   newFolderEl.className = "ib-control ib-icon ib-newfolder";
   newFolderEl.title = "New folder";
   newFolderEl.textContent = "\uD83D\uDCC1+";
+  const filterEl = document.createElement("div");
+  filterEl.className = "ib-filter";
+  const filterGroupEl = document.createElement("div");
+  filterGroupEl.className = "ib-filter-group";
+  for (const [value, label, title] of [
+    ["all", "All", "Show images and videos"],
+    ["images", "\uD83D\uDDBC Images", "Show images only"],
+    ["videos", "\uD83C\uDFAC Videos", "Show videos only"]
+  ]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ib-filter-seg";
+    b.dataset.filter = value;
+    b.title = title;
+    b.textContent = label;
+    filterGroupEl.appendChild(b);
+  }
+  filterEl.appendChild(filterGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, sortEl, refreshEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, sortEl, refreshEl, filterEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -1616,7 +1652,8 @@ function openImageBrowser() {
   }
   function locationKey() {
     const view = isFlat() ? ":flat" : "";
-    return state.type === "path" ? `path:${state.absPath}` : `${state.type}:${state.subfolder}${view}`;
+    const filter = state.typeFilter === "all" ? "" : `:${state.typeFilter}`;
+    return state.type === "path" ? `path:${state.absPath}${filter}` : `${state.type}:${state.subfolder}${view}${filter}`;
   }
   function rememberScroll() {
     scrollMemory.set(locationKey(), currentScrollTop());
@@ -1691,6 +1728,18 @@ function openImageBrowser() {
     rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
     saveView(state.viewMode);
+    loadAndRender();
+  });
+  filterEl.addEventListener("click", (e) => {
+    const seg = e.target.closest("[data-filter]");
+    if (!seg)
+      return;
+    const next = seg.dataset.filter;
+    if (next === state.typeFilter)
+      return;
+    rememberScroll();
+    state.typeFilter = next;
+    saveFilter(next);
     loadAndRender();
   });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
@@ -2164,6 +2213,9 @@ function openImageBrowser() {
     viewToggleEl.style.display = canWrite ? "" : "none";
     viewToggleEl.classList.toggle("is-active", isFlat());
     viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
+    for (const b of filterGroupEl.querySelectorAll(".ib-filter-seg")) {
+      b.classList.toggle("is-active", b.dataset.filter === state.typeFilter);
+    }
   }
   function renderPins() {
     const pins = loadPins();
@@ -2236,7 +2288,8 @@ function openImageBrowser() {
         type: state.type,
         subfolder: state.subfolder,
         path: state.absPath,
-        recursive: isFlat()
+        recursive: isFlat(),
+        kind: state.typeFilter
       });
       state.dirs = data.dirs || [];
       state.files = data.files || [];
@@ -3284,17 +3337,27 @@ var BROWSER_CSS = `
     .ib-dialog { height: 100dvh !important; max-height: 100dvh !important; }
 }
 .image-browser-body { display: block; }
-.ib-tabs {
+/* The pill look is shared by the root tabs and the media-type filter. Shared as
+   a comma selector rather than by giving the filter segments the .ib-tab class:
+   several tests count .ib-tab dialog-wide and select .ib-tab[data-type=…], so
+   reusing the class would make "four tabs" quietly stop meaning four tabs. */
+.ib-tabs, .ib-filter-group {
     display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
     background: #1a1a22; border: 1px solid #2a2a32; border-radius: 4px; padding: 2px;
 }
-.ib-tab {
+.ib-tab, .ib-filter-seg {
     background: transparent; color: #8a8a92; border: 0; border-radius: 3px;
     padding: 6px 12px; font-size: 12px; cursor: pointer; font-family: inherit;
     text-transform: capitalize; min-height: 32px;
 }
-.ib-tab:hover { background: #2a2a36; color: #e0e0e4; }
-.ib-tab.is-active { background: #2f3a52; color: #9ec6ff; }
+.ib-tab:hover, .ib-filter-seg:hover { background: #2a2a36; color: #e0e0e4; }
+.ib-tab.is-active, .ib-filter-seg.is-active { background: #2f3a52; color: #9ec6ff; }
+/* The filter's own full-width toolbar row. The row and the pill must be two
+   elements: flex-basis:100% is what breaks the line, and putting it on the pill
+   would stretch its border across the whole toolbar instead of hugging the
+   three segments. order:10 places it below the crumbs row (order:9 on phones)
+   and above the pins row (order:11). */
+.ib-filter { order: 10; flex-basis: 100%; display: flex; }
 .ib-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1; min-width: 0; }
 @media (max-width: 700px) {
     /* Narrow screens: crumbs get their own full-width toolbar row. Squeezed to
@@ -3416,9 +3479,10 @@ var BROWSER_CSS = `
 .ib-card.is-flat .ib-check { top: 30px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
 /* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
-   order:10 keeps them below the crumbs row when the toolbar wraps on phones. */
+   order:11 keeps them last when the toolbar wraps on phones, below both the
+   crumbs row (order:9) and the media-type filter row (order:10). */
 .ib-pins {
-    order: 10; flex-basis: 100%;
+    order: 11; flex-basis: 100%;
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
 }
 .ib-pin-chip { display: inline-flex; align-items: stretch; }
