@@ -114,6 +114,61 @@ function recursiveListFetch(calls = []) {
   });
 }
 
+// The mixed folder the media-type filter narrows: one still, one clip.
+const MIXED_FILES = [
+  { name: "a.png", ext: ".png", mtime: 2, size: 10, width: 8, height: 8, rating: 0 },
+  { name: "b.mp4", ext: ".mp4", mtime: 1, size: 10, rating: 0 },
+];
+
+/**
+ * Fetch stub that answers /list by honouring `kind=` the way the backend does —
+ * so a test can assert the grid narrowed, not merely that a param was sent.
+ * Deliberately separate from recursiveListFetch (which ~8 tests consume and
+ * whose contract is already a paragraph long) rather than a second axis on it.
+ */
+function kindListFetch(calls = []) {
+  return vi.fn(async (url, init) => {
+    const s = String(url);
+    calls.push({ url: s, init });
+    if (s.includes("/image_browser/base")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          base_path: "/",
+          input_dir: "",
+          output_dir: "",
+          temp_dir: "",
+        }),
+      };
+    }
+    if (s.includes("/image_browser/list")) {
+      const kind = new URL(s, "http://x").searchParams.get("kind");
+      const files = MIXED_FILES.filter(
+        (f) =>
+          kind === null ||
+          (kind === "images" ? f.ext === ".png" : kind === "videos" ? f.ext === ".mp4" : true),
+      );
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "output",
+          subfolder: "",
+          path: "/out",
+          dirs: [],
+          files,
+          exists: true,
+          truncated: false,
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  });
+}
+
 describe("touch multi-select affordances", () => {
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -763,6 +818,122 @@ describe("flat (recursive) view", () => {
   });
 });
 
+describe("media-type filter", () => {
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  // The load-bearing test for the whole feature: the narrowing must happen on
+  // the SERVER, above the backend's mtime sort and 5000-file cap. Asserting
+  // both the request param and the resulting grid makes it fail two ways — if
+  // the param is dropped, and if the handler re-slices the already-fetched list
+  // (renderGrid) instead of re-fetching (loadAndRender), which would issue no
+  // second request at all.
+  it("re-fetches the listing with kind=videos rather than filtering client-side", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", kindListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+    expect(modal.bodyEl.querySelectorAll(".ib-card.is-file").length).toBe(2);
+    const before = calls.filter((c) => c.url.includes("/image_browser/list")).length;
+
+    modal.dialog.querySelector('.ib-filter-seg[data-filter="videos"]').click();
+    await vi.waitFor(() => {
+      const cards = modal.bodyEl.querySelectorAll(".ib-card.is-file");
+      if (cards.length !== 1) throw new Error(`expected 1 card, got ${cards.length}`);
+    });
+    const listCalls = calls.filter((c) => c.url.includes("/image_browser/list"));
+    expect(listCalls.length).toBeGreaterThan(before);
+    expect(listCalls.at(-1).url).toContain("kind=videos");
+    expect(modal.bodyEl.querySelector(".ib-name").textContent).toContain("b.mp4");
+    expect(
+      modal.dialog
+        .querySelector('.ib-filter-seg[data-filter="videos"]')
+        .classList.contains("is-active"),
+    ).toBe(true);
+    modal.close();
+  });
+
+  // The filter is NOT a sandboxed-root affordance (unlike flat view), so it has
+  // to reach the path branch of fetchListing too — the branch that already
+  // drops `recursive`. Setting the param inside the branches instead of after
+  // them reproduces exactly that bug, and this is what catches it.
+  it("sends kind on the browse…/path tab, whose request is built by a separate branch", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", kindListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+
+    modal.dialog.querySelector('.ib-tab[data-type="path"]').click();
+    await vi.waitFor(() => {
+      if (!calls.some((c) => c.url.includes("type=path"))) throw new Error("no path listing");
+    });
+    modal.dialog.querySelector('.ib-filter-seg[data-filter="videos"]').click();
+    // Wait on the RENDER, not on the recorded request: `calls` is appended at
+    // request time, so a waitFor on the URL alone would return one tick before
+    // the response repainted the grid and the card assertion would race it.
+    await vi.waitFor(() => {
+      const cards = modal.bodyEl.querySelectorAll(".ib-card.is-file");
+      if (cards.length !== 1) throw new Error(`expected 1 card, got ${cards.length}`);
+    });
+    const pathCalls = calls.filter(
+      (c) => c.url.includes("/image_browser/list") && c.url.includes("type=path"),
+    );
+    expect(pathCalls.some((c) => c.url.includes("kind=videos"))).toBe(true);
+    modal.close();
+  });
+
+  it("persists the choice and applies it to the first request of the next session", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", kindListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+    modal.dialog.querySelector('.ib-filter-seg[data-filter="images"]').click();
+    await vi.waitFor(() => {
+      if (!calls.at(-1).url.includes("kind=images")) throw new Error("not requested yet");
+    });
+    expect(localStorage.getItem("comfyui-image-browser:filter")).toBe("images");
+    modal.close();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Reopen: the very FIRST listing must already carry the filter, and the
+    // segment must read as engaged before any interaction.
+    const reopened = [];
+    vi.stubGlobal("fetch", kindListFetch(reopened));
+    const modal2 = openShell();
+    await openLoaded(modal2);
+    expect(reopened[0].url).toContain("kind=images");
+    expect(
+      modal2.dialog
+        .querySelector('.ib-filter-seg[data-filter="images"]')
+        .classList.contains("is-active"),
+    ).toBe(true);
+    modal2.close();
+  });
+
+  it("ignores a stored value outside the whitelist instead of sending it", async () => {
+    // A hand-edited or stale key must not reach the backend as an unknown kind
+    // — the whitelist-on-read is what makes the lenient server-side handling of
+    // a bad `kind` unreachable from our own UI.
+    localStorage.setItem("comfyui-image-browser:filter", "movies");
+    const calls = [];
+    vi.stubGlobal("fetch", kindListFetch(calls));
+    const modal = openShell();
+    await openLoaded(modal);
+    expect(calls[0].url).not.toContain("kind=");
+    expect(modal.bodyEl.querySelectorAll(".ib-card.is-file").length).toBe(2);
+    expect(
+      modal.dialog
+        .querySelector('.ib-filter-seg[data-filter="all"]')
+        .classList.contains("is-active"),
+    ).toBe(true);
+    modal.close();
+  });
+});
+
 describe("image metadata helpers", () => {
   it("emits META_FIELDS order regardless of the response's own key order", () => {
     // The backend serialises in parser order, which differs between the ComfyUI
@@ -1265,9 +1436,13 @@ describe("comfyui-image-browser standalone modal", () => {
     expect(modal.bodyEl.querySelector(".image-browser-body")).not.toBeNull();
     // The card grid is mounted synchronously (populated after the async fetch).
     expect(modal.bodyEl.querySelector(".ib-grid")).not.toBeNull();
-    // Toolbar tabs for the sandboxed roots + arbitrary path mode.
+    // Toolbar tabs for the sandboxed roots + arbitrary path mode. This query is
+    // dialog-wide, so the count only means "four root tabs" as long as nothing
+    // else wears .ib-tab — the media-type filter segments share the tabs' CSS
+    // through a comma selector precisely so they don't have to wear the class.
     const tabs = modal.dialog.querySelectorAll(".ib-tab");
     expect(tabs.length).toBe(4);
+    expect(modal.dialog.querySelectorAll(".ib-filter-seg").length).toBe(3);
     // The flat-view toggle is part of the toolbar scaffold.
     expect(modal.dialog.querySelector(".ib-view-toggle")).not.toBeNull();
     modal.close();

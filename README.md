@@ -37,6 +37,10 @@ ComfyUI.
   tab for arbitrary absolute paths (`models/`, `custom_nodes/`, anywhere on
   disk). Breadcrumbs, folder descend, sort (newest / oldest / name / size /
   resolution), and fuzzy filename filter.
+- **Filter by media type** — a segmented **All / 🖼 Images / 🎬 Videos** control
+  narrows the grid to one kind. It filters on the server, so in a big output
+  folder "Videos" shows the newest clips rather than only the clips that happen
+  to fall inside the listing limit. The choice is remembered.
 - **Thumbnails** for images (WebP previews) and videos (poster frames), lazily
   loaded as you scroll. Tap a card to open the full-size file in a new tab.
 - **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab

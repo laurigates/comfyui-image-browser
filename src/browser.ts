@@ -59,6 +59,7 @@ import {
   removeDir,
   renameFile,
   SANDBOXED_TYPES,
+  type TypeFilter,
   thumbVersion,
   VIDEO_EXTS,
   videoSrcURL,
@@ -87,6 +88,7 @@ interface BrowserState {
   sortDir: string;
   query: string;
   viewMode: ViewMode;
+  typeFilter: TypeFilter;
 }
 
 interface SavedSort {
@@ -150,6 +152,36 @@ function loadSavedView(): SavedView {
 function saveView(mode: ViewMode): void {
   try {
     localStorage.setItem(VIEW_STORAGE_KEY, mode);
+  } catch {
+    /* private-mode / disabled storage — non-fatal */
+  }
+}
+
+// Media-type filter: narrows the listing to images or videos only. Filtered
+// SERVER-side (see api.ts's ListParams.kind) — both listing paths cap at 5000
+// files by mtime after sorting, so narrowing here in the client would filter an
+// already-truncated listing and under-report videos in exactly the folders
+// where you'd reach for the filter. Persisted like the sort and view
+// preferences; deliberately WITHOUT a view-pending-style recovery breadcrumb,
+// because unlike flat view a filter only ever makes a listing smaller and so
+// can never become a preference that reopens into its own failure.
+const FILTER_STORAGE_KEY = "comfyui-image-browser:filter";
+const VALID_FILTERS = new Set(["all", "images", "videos"]);
+
+function loadSavedFilter(): TypeFilter {
+  try {
+    const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+    // Whitelist on read, like VALID_SORTS: a stale or hand-edited value must
+    // fall back to "all" rather than reach the request as an unknown kind.
+    return raw && VALID_FILTERS.has(raw) ? (raw as TypeFilter) : "all";
+  } catch {
+    return "all";
+  }
+}
+
+function saveFilter(filter: TypeFilter): void {
+  try {
+    localStorage.setItem(FILTER_STORAGE_KEY, filter);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -263,6 +295,7 @@ export function openImageBrowser(): ModalShellController {
     sortDir: "desc",
     query: "",
     viewMode: savedView.mode,
+    typeFilter: loadSavedFilter(),
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -382,6 +415,33 @@ export function openImageBrowser(): ModalShellController {
   newFolderEl.title = "New folder";
   newFolderEl.textContent = "📁+";
 
+  // Media-type filter — a segmented All / 🖼 Images / 🎬 Videos control on its
+  // own full-width toolbar row (.ib-filter is the row, .ib-filter-group the
+  // pill; flex-basis:100% on the pill itself would stretch its border across
+  // the whole toolbar). Shown on EVERY tab, including browse…/path: unlike the
+  // flat toggle it isn't a sandboxed-root affordance — the backend applies the
+  // extension filter on type=path identically. The segments deliberately do not
+  // carry the .ib-tab class or a data-type attribute even though they share its
+  // CSS: several tests select tabs dialog-wide by both.
+  const filterEl = document.createElement("div");
+  filterEl.className = "ib-filter";
+  const filterGroupEl = document.createElement("div");
+  filterGroupEl.className = "ib-filter-group";
+  for (const [value, label, title] of [
+    ["all", "All", "Show images and videos"],
+    ["images", "🖼 Images", "Show images only"],
+    ["videos", "🎬 Videos", "Show videos only"],
+  ] as [TypeFilter, string, string][]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ib-filter-seg";
+    b.dataset.filter = value;
+    b.title = title;
+    b.textContent = label;
+    filterGroupEl.appendChild(b);
+  }
+  filterEl.appendChild(filterGroupEl);
+
   // One-tap navigation chips for the pinned folders; hidden while empty.
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
@@ -395,6 +455,7 @@ export function openImageBrowser(): ModalShellController {
     newFolderEl,
     sortEl,
     refreshEl,
+    filterEl,
     pinsEl,
   );
 
@@ -641,11 +702,17 @@ export function openImageBrowser(): ModalShellController {
   // Key for the CURRENT location's scroll-memory slot. Distinct namespaces
   // for the sandboxed roots (`type:subfolder`) and path mode (`path:/abs`).
   // Flat view gets its own slot so toggling doesn't restore the wrong offset.
+  // The type filter gets its own slot too — a Videos listing is a different
+  // (usually much shorter) list than the All listing of the same folder, so
+  // sharing a slot would restore an offset measured against the wrong one.
+  // Empty suffix for the default, like `:flat` above, so an unfiltered session's
+  // keys are unchanged.
   function locationKey(): string {
     const view = isFlat() ? ":flat" : "";
+    const filter = state.typeFilter === "all" ? "" : `:${state.typeFilter}`;
     return state.type === "path"
-      ? `path:${state.absPath}`
-      : `${state.type}:${state.subfolder}${view}`;
+      ? `path:${state.absPath}${filter}`
+      : `${state.type}:${state.subfolder}${view}${filter}`;
   }
 
   // Called on every navigation BEFORE the location mutates, so returning to
@@ -745,6 +812,20 @@ export function openImageBrowser(): ModalShellController {
     saveView(state.viewMode);
     // Flat needs a recursive re-fetch; the folder→flat and flat→folder slots
     // are distinct in scrollMemory, so loadAndRender lands each at its own place.
+    loadAndRender();
+  });
+  filterEl.addEventListener("click", (e) => {
+    const seg = (e.target as HTMLElement).closest("[data-filter]") as HTMLElement | null;
+    if (!seg) return;
+    const next = seg.dataset.filter as TypeFilter;
+    if (next === state.typeFilter) return;
+    rememberScroll();
+    state.typeFilter = next;
+    saveFilter(next);
+    // A new listing, not a re-slice of the one already fetched — the narrowing
+    // happens on the server, above the cap. Hence loadAndRender, not renderGrid.
+    // No SANDBOXED_TYPES guard, unlike the flat toggle above: the filter is
+    // valid on the browse…/path tab too.
     loadAndRender();
   });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
@@ -1331,6 +1412,11 @@ export function openImageBrowser(): ModalShellController {
     viewToggleEl.style.display = canWrite ? "" : "none";
     viewToggleEl.classList.toggle("is-active", isFlat());
     viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
+    // No display gate for the filter: it is a read-side narrowing that works on
+    // every tab, browse…/path included.
+    for (const b of filterGroupEl.querySelectorAll(".ib-filter-seg")) {
+      b.classList.toggle("is-active", (b as HTMLElement).dataset.filter === state.typeFilter);
+    }
   }
 
   function renderPins(): void {
@@ -1411,6 +1497,7 @@ export function openImageBrowser(): ModalShellController {
         subfolder: state.subfolder,
         path: state.absPath,
         recursive: isFlat(),
+        kind: state.typeFilter,
       });
       state.dirs = data.dirs || [];
       state.files = data.files || [];
@@ -2144,6 +2231,9 @@ export function openImageBrowser(): ModalShellController {
       currentName = p.slice(i + 1);
     }
     try {
+      // Reads `dirs` only, so it deliberately passes no `kind` — folder cards
+      // are never extension-filtered, and making sibling navigation depend on
+      // the media filter would strand you in a folder the filter emptied.
       const data = await fetchListing({
         type: parentType,
         subfolder: parentSub,
@@ -2548,6 +2638,9 @@ function pickDestination(
       list.innerHTML = "";
       status.textContent = "Loading…";
       try {
+        // `dirs` only — no `kind`, for the same reason as the sibling nav above:
+        // a destination picker that hid folders because of a media filter would
+        // make valid move targets unreachable.
         const data = await fetchListing({ type: cur.type, subfolder: cur.subfolder });
         // A remembered destination may have been deleted since — climb to the
         // root of the same tab (which always exists) instead of a dead end.
@@ -2667,17 +2760,27 @@ const BROWSER_CSS = `
     .ib-dialog { height: 100dvh !important; max-height: 100dvh !important; }
 }
 .image-browser-body { display: block; }
-.ib-tabs {
+/* The pill look is shared by the root tabs and the media-type filter. Shared as
+   a comma selector rather than by giving the filter segments the .ib-tab class:
+   several tests count .ib-tab dialog-wide and select .ib-tab[data-type=…], so
+   reusing the class would make "four tabs" quietly stop meaning four tabs. */
+.ib-tabs, .ib-filter-group {
     display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
     background: #1a1a22; border: 1px solid #2a2a32; border-radius: 4px; padding: 2px;
 }
-.ib-tab {
+.ib-tab, .ib-filter-seg {
     background: transparent; color: #8a8a92; border: 0; border-radius: 3px;
     padding: 6px 12px; font-size: 12px; cursor: pointer; font-family: inherit;
     text-transform: capitalize; min-height: 32px;
 }
-.ib-tab:hover { background: #2a2a36; color: #e0e0e4; }
-.ib-tab.is-active { background: #2f3a52; color: #9ec6ff; }
+.ib-tab:hover, .ib-filter-seg:hover { background: #2a2a36; color: #e0e0e4; }
+.ib-tab.is-active, .ib-filter-seg.is-active { background: #2f3a52; color: #9ec6ff; }
+/* The filter's own full-width toolbar row. The row and the pill must be two
+   elements: flex-basis:100% is what breaks the line, and putting it on the pill
+   would stretch its border across the whole toolbar instead of hugging the
+   three segments. order:10 places it below the crumbs row (order:9 on phones)
+   and above the pins row (order:11). */
+.ib-filter { order: 10; flex-basis: 100%; display: flex; }
 .ib-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1; min-width: 0; }
 @media (max-width: 700px) {
     /* Narrow screens: crumbs get their own full-width toolbar row. Squeezed to
@@ -2799,9 +2902,10 @@ const BROWSER_CSS = `
 .ib-card.is-flat .ib-check { top: 30px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
 /* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
-   order:10 keeps them below the crumbs row when the toolbar wraps on phones. */
+   order:11 keeps them last when the toolbar wraps on phones, below both the
+   crumbs row (order:9) and the media-type filter row (order:10). */
 .ib-pins {
-    order: 10; flex-basis: 100%;
+    order: 11; flex-basis: 100%;
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
 }
 .ib-pin-chip { display: inline-flex; align-items: stretch; }
