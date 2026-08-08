@@ -10,14 +10,15 @@ function installBackGuard(onBack) {
     history.pushState({ cmpBackGuard: true }, "");
     armed = true;
   };
-  const dispose = () => {
+  const dispose = (opts) => {
     if (disposed)
       return;
     disposed = true;
     window.removeEventListener("popstate", onPop);
     if (armed) {
       armed = false;
-      history.back();
+      if (opts?.pop !== false)
+        history.back();
     }
   };
   function onPop() {
@@ -59,7 +60,9 @@ function getKit() {
       activeModal: null,
       pointerClaim: null,
       modalChrome: [],
-      pointerGuardInstalled: false
+      pointerGuardInstalled: false,
+      hubEntries: [],
+      hubLauncherInstalled: false
     };
     g[KEY] = kit;
   }
@@ -69,6 +72,8 @@ function getKit() {
     kit.modelPickers = [];
   if (!kit.modalChrome)
     kit.modalChrome = [];
+  if (!kit.hubEntries)
+    kit.hubEntries = [];
   return kit;
 }
 var SORT_OPTIONS = [
@@ -107,6 +112,18 @@ function sortFiles(files, key, dir) {
       break;
   }
   return [...files].sort((a, b) => mul * cmp(a, b));
+}
+function registerHubEntry(entry) {
+  const list = getKit().hubEntries;
+  const i = list.findIndex((e) => e.id === entry.id);
+  if (i >= 0) {
+    list.splice(i, 1, entry);
+  } else {
+    list.push(entry);
+  }
+}
+function getHubEntries() {
+  return [...getKit().hubEntries].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -450,121 +467,6 @@ function makeLauncher(opts) {
   }
   return fields;
 }
-var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
-function installLazyMedia(container, opts) {
-  const noop = () => {};
-  if (typeof IntersectionObserver === "undefined")
-    return noop;
-  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
-  if (!els.length)
-    return noop;
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting)
-        continue;
-      const el = e.target;
-      const src = el.dataset.src;
-      if (src) {
-        if (el.tagName === "VIDEO")
-          el.preload = "metadata";
-        el.src = src;
-        el.removeAttribute("data-src");
-      }
-      io.unobserve(el);
-    }
-  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
-  for (const el of els)
-    io.observe(el);
-  return () => io.disconnect();
-}
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
-}
-var MAX_RATING = 5;
-function ratingOf(f) {
-  const r = f.rating;
-  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
-}
-function nextRating(cur, val) {
-  return val === cur ? 0 : val;
-}
-function ratingRequestBody(addr, rating) {
-  if (addr.type === "path") {
-    return { type: "path", path: addr.absDir, name: addr.name, rating };
-  }
-  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
-}
-async function postRating(url, addr, rating) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ratingRequestBody(addr, rating))
-  });
-  if (!res.ok)
-    throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  if (!data.ok)
-    throw new Error(data.error || "rating failed");
-  return typeof data.rating === "number" ? data.rating : rating;
-}
-function starsHTML(prefix, rating) {
-  const r = ratingOf({ rating });
-  let buttons = "";
-  for (let i = 1;i <= MAX_RATING; i++) {
-    const on = i <= r ? " is-on" : "";
-    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
-  }
-  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
-}
-function applyStars(row, rating) {
-  const r = ratingOf({ rating });
-  row.dataset.rating = String(r);
-  for (const s of row.querySelectorAll("[data-val]")) {
-    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
-  }
-}
 var STYLE_ID2 = "cmp-shell-style";
 var CSS22 = `
 .cmp-backdrop {
@@ -625,8 +527,11 @@ var CSS22 = `
     color: #aaa;
     border: 1px solid #3a3a44;
     border-radius: 4px;
-    width: 36px;
-    height: 36px;
+    /* 44px, not 36: docs/modal-ux-drift-catalog.md:71 sets the family's D02
+       target at >=44px, and the Touch Tools chooser cannot credibly promise
+       >=44px rows while inheriting a 36px close control. */
+    width: 44px;
+    height: 44px;
     cursor: pointer;
     font-size: 20px;
     line-height: 1;
@@ -786,6 +691,7 @@ function openModalShell(opts = {}) {
       backdrop.remove();
       dialog.remove();
       document.removeEventListener("keydown", onKey, true);
+      bodyEl.removeEventListener("scroll", onBodyScroll);
     } finally {
       try {
         opts.onClose?.();
@@ -819,6 +725,11 @@ function openModalShell(opts = {}) {
   };
   document.addEventListener("keydown", onKey, true);
   document.body.append(backdrop, dialog);
+  let liveScrollTop = 0;
+  const onBodyScroll = () => {
+    liveScrollTop = bodyEl.scrollTop;
+  };
+  bodyEl.addEventListener("scroll", onBodyScroll, { passive: true });
   const controller = {
     backdrop,
     dialog,
@@ -827,12 +738,18 @@ function openModalShell(opts = {}) {
     searchEl,
     statusEl,
     bodyEl,
+    scrollHost: bodyEl,
     footerEl,
     setBusy(b) {
       bodyEl.classList.toggle("is-busy", !!b);
     },
     setStatus(s) {
       statusEl.textContent = s || "";
+    },
+    getScrollTop() {
+      if (bodyEl.isConnected)
+        liveScrollTop = bodyEl.scrollTop;
+      return liveScrollTop;
     },
     close: requestClose,
     _onKey: onKey,
@@ -846,6 +763,318 @@ function openModalShell(opts = {}) {
     });
   }
   return controller;
+}
+var HUB_LABEL = "Touch Tools";
+var HUB_ICON = "pi pi-mobile";
+var HUB_STYLE_ID = "cmk-hub-style";
+var SETTINGS_COMMAND = "Comfy.ShowSettingsDialog";
+var HUB_CSS = `
+.cmk-hub-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 4px;
+}
+.cmk-hub-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    /* >=44px is the family's D02 touch-target floor; 48 for comfort. */
+    min-height: 48px;
+    padding: 8px 12px;
+    background: #21212a;
+    color: #e8e8ea;
+    border: 1px solid #3a3a44;
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    touch-action: manipulation;
+}
+.cmk-hub-row:hover {
+    background: #2a2a36;
+    border-color: #4a4a58;
+}
+.cmk-hub-icon {
+    font-size: 18px;
+    color: #9ec6ff;
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+}
+.cmk-hub-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.cmk-hub-label {
+    font-weight: 600;
+    font-size: 14px;
+}
+.cmk-hub-desc {
+    color: #9a9aa4;
+    font-size: 12px;
+}
+.cmk-hub-sep {
+    height: 1px;
+    background: #2a2a32;
+    margin: 8px 4px;
+}
+.cmk-hub-empty {
+    color: #9a9aa4;
+    font-size: 13px;
+    padding: 10px 12px;
+}
+.cmk-hub-note {
+    color: #777;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 10px 12px 4px;
+}
+`;
+function makeHubEntry(opts) {
+  const fields = makeLauncher({ ...opts, actionBar: false });
+  const hubEntry = {
+    id: opts.id,
+    label: opts.label,
+    icon: opts.icon,
+    description: opts.description,
+    priority: opts.priority,
+    open: fields.commands[0]?.function ?? opts.open
+  };
+  return { ...fields, hubEntry };
+}
+function installHubButton() {
+  const kit = getKit();
+  if (kit.hubLauncherInstalled)
+    return {};
+  kit.hubLauncherInstalled = true;
+  return {
+    actionBarButtons: [
+      {
+        icon: HUB_ICON,
+        label: HUB_LABEL,
+        tooltip: "Touch Tools — open a touch-first tool",
+        class: "!h-11 !min-w-11",
+        onClick: () => {
+          const entries = getHubEntries();
+          if (entries.length === 1) {
+            try {
+              entries[0]?.open();
+            } catch (e) {
+              console.error("[comfy-modal-kit] hub single-entry open failed", e);
+            }
+            return;
+          }
+          openTouchToolsHub();
+        }
+      }
+    ]
+  };
+}
+function executeCommand(id) {
+  const host = globalThis;
+  const command = host.app?.extensionManager?.command;
+  if (!command)
+    throw new Error(`command manager unavailable (cannot run "${id}")`);
+  command.execute(id);
+}
+function makeRow(icon, label, description) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "cmk-hub-row";
+  const iconEl = document.createElement("i");
+  iconEl.className = `cmk-hub-icon ${icon}`;
+  const text = document.createElement("span");
+  text.className = "cmk-hub-text";
+  const labelEl = document.createElement("span");
+  labelEl.className = "cmk-hub-label";
+  labelEl.textContent = label;
+  text.append(labelEl);
+  if (description) {
+    const descEl = document.createElement("span");
+    descEl.className = "cmk-hub-desc";
+    descEl.textContent = description;
+    text.append(descEl);
+  }
+  row.append(iconEl, text);
+  return row;
+}
+function openTouchToolsHub() {
+  ensureStyleOnce(HUB_STYLE_ID, HUB_CSS);
+  let disposeBack = () => {};
+  const controller = openModalShell({
+    title: HUB_LABEL,
+    showSearch: false,
+    showFooter: false,
+    width: "min(420px, calc(100vw - 24px))",
+    onClose: () => {
+      disposeBack();
+    }
+  });
+  disposeBack = installBackGuard(() => {
+    controller.close();
+    return false;
+  });
+  function runRow(action) {
+    disposeBack({ pop: false });
+    controller.close();
+    setTimeout(() => {
+      try {
+        action();
+      } catch (e) {
+        console.error("[comfy-modal-kit] hub row action failed", e);
+        try {
+          notify({ severity: "error", summary: "Could not open that tool", detail: String(e) });
+        } catch (n) {
+          console.warn("[comfy-modal-kit] notify failed", n);
+        }
+      }
+    }, 0);
+  }
+  const list = document.createElement("div");
+  list.className = "cmk-hub-list";
+  const entries = getHubEntries();
+  for (const entry of entries) {
+    const row = makeRow(entry.icon, entry.label, entry.description);
+    row.addEventListener("click", () => runRow(entry.open));
+    list.append(row);
+  }
+  if (entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "cmk-hub-empty";
+    empty.textContent = "No Touch Tools packs registered on this page yet.";
+    list.append(empty);
+  }
+  const sep = document.createElement("div");
+  sep.className = "cmk-hub-sep";
+  list.append(sep);
+  const settingsRow = makeRow("pi pi-cog", "Settings", "All Touch Tools options, in ComfyUI settings");
+  settingsRow.addEventListener("click", () => runRow(() => executeCommand(SETTINGS_COMMAND)));
+  list.append(settingsRow);
+  const note = document.createElement("div");
+  note.className = "cmk-hub-note";
+  note.textContent = "Other Touch Tools packs work directly on the canvas and its widgets — their options are in Settings.";
+  list.append(note);
+  controller.bodyEl.append(list);
+  return controller;
+}
+var DEFAULT_SELECTOR = "img[data-src], video[data-src]";
+function installLazyMedia(container, opts) {
+  const noop = () => {};
+  if (typeof IntersectionObserver === "undefined")
+    return noop;
+  const els = container.querySelectorAll(opts.selector ?? DEFAULT_SELECTOR);
+  if (!els.length)
+    return noop;
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting)
+        continue;
+      const el = e.target;
+      const src = el.dataset.src;
+      if (src) {
+        if (el.tagName === "VIDEO")
+          el.preload = "metadata";
+        el.src = src;
+        el.removeAttribute("data-src");
+      }
+      io.unobserve(el);
+    }
+  }, { root: opts.root, rootMargin: opts.rootMargin ?? "300px" });
+  for (const el of els)
+    io.observe(el);
+  return () => io.disconnect();
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
+}
+var MAX_RATING = 5;
+function ratingOf(f) {
+  const r = f.rating;
+  return typeof r === "number" && r > 0 ? Math.min(MAX_RATING, Math.floor(r)) : 0;
+}
+function nextRating(cur, val) {
+  return val === cur ? 0 : val;
+}
+function ratingRequestBody(addr, rating) {
+  if (addr.type === "path") {
+    return { type: "path", path: addr.absDir, name: addr.name, rating };
+  }
+  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, rating };
+}
+async function postRating(url, addr, rating) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ratingRequestBody(addr, rating))
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok)
+    throw new Error(data.error || "rating failed");
+  return typeof data.rating === "number" ? data.rating : rating;
+}
+function starsHTML(prefix, rating) {
+  const r = ratingOf({ rating });
+  let buttons = "";
+  for (let i = 1;i <= MAX_RATING; i++) {
+    const on = i <= r ? " is-on" : "";
+    buttons += `<button type="button" class="${prefix}-star${on}" data-val="${i}" tabindex="-1">★</button>`;
+  }
+  return `<div class="${prefix}-stars" data-rating="${r}" title="Rate (click the active star to clear)">${buttons}</div>`;
+}
+function applyStars(row, rating) {
+  const r = ratingOf({ rating });
+  row.dataset.rating = String(r);
+  for (const s of row.querySelectorAll("[data-val]")) {
+    s.classList.toggle("is-on", Number(s.dataset.val) <= r);
+  }
 }
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
@@ -4367,12 +4596,23 @@ function openShell() {
 }
 var uninstallSidebarStars = null;
 var uninstallLightboxActions = null;
+var entry = makeHubEntry({
+  id: "image-browser.open",
+  label: "Image Browser",
+  icon: "pi pi-images",
+  tooltip: "Browse & manage input/output images",
+  description: "Browse & manage input/output images",
+  failSummary: "Image Browser failed to open",
+  open: openImageBrowser,
+  priority: 10
+});
 app2.registerExtension({
   name: "comfy.image-browser",
   settings: [
     {
       id: "ImageBrowser.SidebarStars",
-      category: ["Image Browser", "Sidebar", "Star ratings"],
+      category: ["Touch Tools", "Image Browser", "Star ratings"],
+      sortOrder: 100,
       name: "Star ratings on stock Media Assets cards",
       tooltip: "Adds a 0–5 star row to ComfyUI's own Media Assets sidebar cards, written to the image's XMP — the same rating the Image Browser shows. Injected into stock UI (ComfyUI exposes no extension point for asset cards), so switch this off if a frontend update makes it misbehave.",
       type: "boolean",
@@ -4388,7 +4628,8 @@ app2.registerExtension({
     },
     {
       id: "ImageBrowser.LightboxActions",
-      category: ["Image Browser", "Sidebar", "Lightbox actions"],
+      category: ["Touch Tools", "Image Browser", "Lightbox actions"],
+      sortOrder: 90,
       name: "Rate & delete in the asset lightbox",
       tooltip: "Adds a star row and a delete button to ComfyUI's full-screen asset viewer (Media Assets sidebar → Inspect asset), so you can arrow through fresh generations and rate or bin each one. Deleting advances to the next item; the sidebar's own list only drops the deleted entry when it reloads. Injected into stock UI (ComfyUI exposes no extension point for the lightbox), so switch this off if a frontend update makes it misbehave.",
       type: "boolean",
@@ -4403,15 +4644,11 @@ app2.registerExtension({
       }
     }
   ],
-  ...makeLauncher({
-    id: "image-browser.open",
-    label: "Image Browser",
-    icon: "pi pi-images",
-    tooltip: "Browse & manage input/output images",
-    failSummary: "Image Browser failed to open",
-    open: openImageBrowser,
-    actionBar: { label: "Image Browser" }
-  })
+  ...entry,
+  ...installHubButton(),
+  setup() {
+    registerHubEntry(entry.hubEntry);
+  }
 });
 export {
   openShell

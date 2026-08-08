@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { getHubEntries } from "@laurigates/comfy-modal-kit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "/scripts/app.js";
 // Vitest transpiles TypeScript, so the test imports the `.ts` source directly
@@ -1935,5 +1936,71 @@ describe("comfyui-image-browser standalone modal", () => {
     const afterEv = new KeyboardEvent("keydown", { key: "?", cancelable: true });
     window.dispatchEvent(afterEv);
     expect(afterEv.defaultPrevented).toBe(false);
+  });
+});
+
+// The registered extension object is assembled from TWO SIBLING SPREADS —
+// `...entry` (makeHubEntry: commands + menuCommands) and `...installHubButton()`
+// (actionBarButtons only). The failure mode these pin is silent: if the second
+// spread ever also carried `commands`, it would win the key and orphan this
+// pack's command. The Extensions-menu row would vanish (menuItemStore.ts:90-97
+// filters menuCommand.commands against extension.commands ids) and a user
+// keybinding on the orphaned id would be re-added at boot with no isRegistered
+// gate (keybindingService.ts:116-124), squatting its combo and throwing on
+// press. Nothing would look wrong at registration time — hence these.
+//
+// What this tier CANNOT assert, and which tier owns it: whether the one button
+// renders at >=44px on a phone (the `!h-11` override is measured only in a real
+// engine), whether the `pi pi-mobile` glyph paints, whether tapping the row
+// actually opens this pack, and whether the settings dialog shows one
+// `Touch Tools` row with both of this pack's settings under it. All of those
+// are the browser tier (comfyui-plugin:comfyui-pack-live-smoke, GPU box).
+describe("Touch Tools hub registration", () => {
+  /** The extension object the module handed to app.registerExtension. */
+  const ext = () => {
+    const registered = app.registrations.filter((e) => e.name === "comfy.image-browser");
+    expect(registered.length).toBe(1);
+    return registered[0];
+  };
+
+  it("keeps this pack's own command and menu row on the extension object", () => {
+    const e = ext();
+    expect(e.commands.map((c) => c.id)).toContain("image-browser.open");
+    // The family submenu row points at THIS pack's command id. An id here that
+    // e.commands does not carry is filtered out and the row silently vanishes.
+    expect(e.menuCommands[0].commands).toContain("image-browser.open");
+    expect(e.menuCommands[0].path).toEqual(["Extensions", "Touch Tools"]);
+  });
+
+  it("contributes exactly one action-bar button, and it is the shared hub button", () => {
+    const e = ext();
+    expect(e.actionBarButtons.length).toBe(1);
+    // Not "Image Browser": the pack's own topbar button is gone, replaced by
+    // the family's single hub button that this copy of the kit claimed.
+    expect(e.actionBarButtons[0].label).toBe("Touch Tools");
+  });
+
+  it("registers its chooser row in setup(), not at module evaluation", () => {
+    // Module evaluation has already happened (the import at the top of this
+    // file). Nothing in this suite calls setup(), so the row must still be
+    // absent — that absence is what keeps a DISABLED pack out of the chooser,
+    // since ComfyUI imports every extension file regardless of the disable list
+    // but only invokes setup() for enabled ones.
+    expect(getHubEntries().some((r) => r.id === "image-browser.open")).toBe(false);
+
+    ext().setup();
+
+    const row = getHubEntries().find((r) => r.id === "image-browser.open");
+    expect(row).toBeTruthy();
+    expect(row.label).toBe("Image Browser");
+    // Sorts above Touch Node Manager; the mitigation for the extra tap.
+    expect(row.priority).toBe(10);
+    // The one structural contract of the registry: a zero-argument opener.
+    expect(row.open.length).toBe(0);
+
+    // Idempotent by id — a re-register replaces in place rather than adding a
+    // duplicate row.
+    ext().setup();
+    expect(getHubEntries().filter((r) => r.id === "image-browser.open").length).toBe(1);
   });
 });
