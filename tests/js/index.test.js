@@ -76,10 +76,16 @@ const FLAT_FILES = [
  * FLAT_FILES with subpaths, dirs:[]), and records every call so a test can
  * assert on the request URL/body. Non-list POSTs (move/…) resolve ok:true.
  */
-function recursiveListFetch(calls = []) {
+function recursiveListFetch(calls = [], pins = []) {
   return vi.fn(async (url, init) => {
     const s = String(url);
     calls.push({ url: s, init });
+    // Pins are server-side now, so even a listing-focused stub has to answer
+    // /pins — an unanswered one only warns, but the picker's pin rows come from
+    // it and would silently never appear.
+    if (s.includes("/image_browser/pins")) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins }) };
+    }
     if (s.includes("/image_browser/base")) {
       return {
         ok: true,
@@ -111,6 +117,129 @@ function recursiveListFetch(calls = []) {
       };
     }
     return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  });
+}
+
+// Two pinned FILES living in different roots. The whole point of the pinned
+// view — and of fileType()/fileSub() — is that these two cards address their own
+// roots rather than the location's, so every pinned-view test starts here.
+const PINNED_FILES = [
+  {
+    kind: "file",
+    type: "input",
+    subfolder: "src",
+    name: "in.png",
+    exists: true,
+    ext: ".png",
+    mtime: 5,
+    size: 10,
+    width: 8,
+    height: 8,
+    rating: 0,
+  },
+  {
+    kind: "file",
+    type: "output",
+    subfolder: "2026-08-04",
+    name: "out.png",
+    exists: true,
+    ext: ".png",
+    mtime: 4,
+    size: 10,
+    width: 8,
+    height: 8,
+    rating: 0,
+  },
+];
+
+const pinKey = (p) => `${p.kind}:${p.type}:${p.subfolder}:${p.name ?? ""}`;
+
+/**
+ * Fetch stub carrying a LIVE pin store: GET /pins answers the list, POST applies
+ * the delta and answers the whole list back — the endpoint's real contract. A
+ * canned reply would let the UI look right while reading something the server
+ * never said; here the grid renders whatever the deltas actually produced.
+ *
+ * `seed` entries are the stored list; /list and /base answer as usual so the
+ * browser can also open on a directory tab.
+ */
+function pinsFetch({ calls = [], seed = [], files = TWO_FILES, dirs = [] } = {}) {
+  const store = seed.map((p) => ({ ...p }));
+  const answer = () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: true, max: 200, pins: store }),
+  });
+  return vi.fn(async (url, init) => {
+    const s = String(url);
+    calls.push({ url: s, init });
+    if (s.includes("/image_browser/pins")) {
+      if (init?.method !== "POST") return answer();
+      const { op, item } = JSON.parse(init.body);
+      if (op === "add") {
+        // The backend resolves an added pin and answers with the same per-file
+        // keys /list emits — mimic that, or the pinned view would render cards
+        // with no mtime/ext and the test would be asserting on a shape the real
+        // endpoint never returns.
+        if (!store.some((p) => pinKey(p) === pinKey(item))) {
+          store.push({ ...item, exists: true, ext: ".png", mtime: 1, size: 10, rating: 0 });
+        }
+      } else if (op === "remove") {
+        const i = store.findIndex((p) => pinKey(p) === pinKey(item));
+        if (i >= 0) store.splice(i, 1);
+      } else if (op === "prune") {
+        for (let i = store.length - 1; i >= 0; i--) {
+          if (store[i].exists === false) store.splice(i, 1);
+        }
+      }
+      return answer();
+    }
+    if (s.includes("/image_browser/base")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          base_path: "/",
+          input_dir: "",
+          output_dir: "",
+          temp_dir: "",
+        }),
+      };
+    }
+    if (s.includes("/image_browser/list")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "output",
+          subfolder: "",
+          path: "/out",
+          dirs,
+          files,
+          exists: true,
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  });
+}
+
+/**
+ * Switch to the 📌 tab and wait for ITS grid to paint.
+ *
+ * Counts pinned cards specifically (the address label only a pinned card
+ * carries), not bare `.ib-card.is-file`: the directory tab we are leaving also
+ * shows two cards, so a bare count is satisfied before the switch even happens
+ * and every assertion afterwards runs against the wrong grid — which is exactly
+ * how the first draft of these tests "passed".
+ */
+async function openPinnedTab(modal, expected) {
+  modal.dialog.querySelector('.ib-tab[data-type="pinned"]').click();
+  await vi.waitFor(() => {
+    const n = modal.bodyEl.querySelectorAll(".ib-card.is-file .ib-subpath[data-pin-type]").length;
+    if (n !== expected) throw new Error(`pinned grid has ${n} cards, want ${expected}`);
   });
 }
 
@@ -281,8 +410,9 @@ describe("pinned directories", () => {
     await new Promise((r) => setTimeout(r, 20));
   });
 
-  it("the toolbar 📌 pins/unpins the current folder and renders a chip row", async () => {
-    stubListing({ files: TWO_FILES });
+  it("the toolbar 📌 pins/unpins the current folder through /pins deltas", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", pinsFetch({ calls }));
     const modal = openShell();
     await openLoaded(modal);
     const toggle = modal.dialog.querySelector(".ib-pin-toggle");
@@ -290,31 +420,52 @@ describe("pinned directories", () => {
     expect(modal.dialog.querySelector(".ib-pin-chip")).toBeNull();
 
     toggle.click();
+    const chip = await vi.waitFor(() => {
+      const c = modal.dialog.querySelector(".ib-pin-chip .ib-pin-go");
+      if (!c) throw new Error("chip not rendered");
+      return c;
+    });
     expect(toggle.classList.contains("is-active")).toBe(true);
-    const chip = modal.dialog.querySelector(".ib-pin-chip .ib-pin-go");
     expect(chip.textContent).toContain("output");
-    expect(JSON.parse(localStorage.getItem("comfyui-image-browser:pins"))).toEqual([
-      { type: "output", subfolder: "" },
-    ]);
+    // The delta, not a whole-list PUT.
+    const add = calls.filter((c) => c.url.includes("/pins") && c.init?.method === "POST").at(-1);
+    expect(JSON.parse(add.init.body)).toEqual({
+      op: "add",
+      item: { kind: "dir", type: "output", subfolder: "" },
+    });
+    // The pre-server localStorage list is gone for good, not written alongside.
+    expect(localStorage.getItem("comfyui-image-browser:pins")).toBeNull();
 
     // Unpin via the chip's ✕.
     modal.dialog.querySelector(".ib-pin-x").click();
-    expect(modal.dialog.querySelector(".ib-pin-chip")).toBeNull();
+    await vi.waitFor(() => {
+      if (modal.dialog.querySelector(".ib-pin-chip")) throw new Error("chip still there");
+    });
     expect(toggle.classList.contains("is-active")).toBe(false);
+    expect(JSON.parse(calls.filter((c) => c.init?.method === "POST").at(-1).init.body).op).toBe(
+      "remove",
+    );
     modal.close();
   });
 
   it("a pin chip navigates to the pinned folder", async () => {
-    localStorage.setItem(
-      "comfyui-image-browser:pins",
-      JSON.stringify([{ type: "output", subfolder: "sub" }]),
+    vi.stubGlobal(
+      "fetch",
+      pinsFetch({
+        seed: [{ kind: "dir", type: "output", subfolder: "sub", exists: true }],
+        dirs: [{ name: "sub" }],
+      }),
     );
-    stubListing({ files: TWO_FILES, dirs: [{ name: "sub" }] });
     const modal = openShell();
     await openLoaded(modal);
     expect(modal.bodyEl.querySelector(".ib-card.is-up")).toBeNull();
 
-    modal.dialog.querySelector(".ib-pin-go").click();
+    const go = await vi.waitFor(() => {
+      const g = modal.dialog.querySelector(".ib-pin-go");
+      if (!g) throw new Error("chip not rendered yet");
+      return g;
+    });
+    go.click();
     await vi.waitFor(() => {
       if (!modal.bodyEl.querySelector(".ib-card.is-up")) throw new Error("did not navigate");
     });
@@ -324,14 +475,54 @@ describe("pinned directories", () => {
     modal.close();
   });
 
-  it("the move picker lists pinned folders as one-tap destinations", async () => {
+  it("migrates a localStorage pin list into the store once, then drops the key", async () => {
     localStorage.setItem(
       "comfyui-image-browser:pins",
       JSON.stringify([{ type: "input", subfolder: "keep" }]),
     );
-    stubListing({ files: TWO_FILES });
+    const calls = [];
+    vi.stubGlobal("fetch", pinsFetch({ calls }));
     const modal = openShell();
     await openLoaded(modal);
+
+    // Replayed as an ordinary add delta — add-of-existing is a server-side
+    // no-op, which is what makes a second device's migration safe.
+    const posts = await vi.waitFor(() => {
+      const p = calls.filter((c) => c.url.includes("/pins") && c.init?.method === "POST");
+      if (p.length === 0) throw new Error("no migration POST");
+      return p;
+    });
+    expect(posts.length).toBe(1);
+    expect(JSON.parse(posts[0].init.body)).toEqual({
+      op: "add",
+      item: { kind: "dir", type: "input", subfolder: "keep" },
+    });
+    // The key is gone, so the next open replays nothing.
+    await vi.waitFor(() => {
+      if (localStorage.getItem("comfyui-image-browser:pins") !== null) {
+        throw new Error("legacy key still present");
+      }
+    });
+    // And the migrated pin is now a live chip.
+    await vi.waitFor(() => {
+      const c = modal.dialog.querySelector(".ib-pin-chip .ib-pin-go");
+      if (!c?.textContent.includes("input/keep")) throw new Error("chip missing");
+    });
+    modal.close();
+  });
+
+  it("the move picker lists pinned folders as one-tap destinations", async () => {
+    vi.stubGlobal(
+      "fetch",
+      pinsFetch({ seed: [{ kind: "dir", type: "input", subfolder: "keep", exists: true }] }),
+    );
+    const modal = openShell();
+    await openLoaded(modal);
+    // The picker reads the module-level cache rather than firing its own GET,
+    // so wait for that cache to land before opening it.
+    await vi.waitFor(() => {
+      if (!modal.dialog.querySelector(".ib-pin-chip")) throw new Error("pins not loaded yet");
+    });
 
     modal.bodyEl.querySelector('[data-action="move"]').click();
     const pinRow = await vi.waitFor(() => {
@@ -350,6 +541,235 @@ describe("pinned directories", () => {
     Array.from(modal.dialog.querySelectorAll(".ib-move-card .cmp-ov-btn"))
       .find((b) => b.textContent === "Cancel")
       .click();
+    modal.close();
+  });
+});
+
+describe("pinned view", () => {
+  beforeEach(() => {
+    // jsdom implements no layout and therefore no scrollIntoView; applyFocus
+    // calls it, so without this stub any keyboard/focus path throws on open.
+    Element.prototype.scrollIntoView = () => {};
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+    document.querySelector(".ib-dialog")?.querySelector(".cmp-close")?.click();
+    await new Promise((r) => setTimeout(r, 20));
+  });
+
+  it("renders one card per pinned file, each addressing its OWN root", async () => {
+    vi.stubGlobal("fetch", pinsFetch({ seed: PINNED_FILES }));
+    const modal = openShell();
+    await openLoaded(modal);
+    await openPinnedTab(modal, 2);
+
+    // Non-emptiness FIRST: every assertion below is trivially true on an empty
+    // grid, so the grid has to be proven non-empty before any of them counts.
+    const cards = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-file"));
+    expect(cards.length).toBe(2);
+
+    // THE SWEEP ASSERTION. Both cards live in one grid whose location type is
+    // "pinned"; each thumbnail must carry the card's own root. Pairing fileSub()
+    // with the location's state.type instead of fileType(f) collapses both to
+    // `type=pinned` and this fails.
+    const srcs = cards.map((c) => c.querySelector("img").dataset.src);
+    const byName = Object.fromEntries(
+      cards.map((c) => [c.dataset.name, c.querySelector("img").dataset.src]),
+    );
+    expect(srcs.every((s) => s.startsWith("/image_browser/thumb?"))).toBe(true);
+    expect(byName["in.png"]).toContain("type=input");
+    expect(byName["in.png"]).toContain("subfolder=src");
+    expect(byName["out.png"]).toContain("type=output");
+    expect(byName["out.png"]).toContain("subfolder=2026-08-04");
+  });
+
+  it("a pinned card's delete posts its own root, not the view's", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", pinsFetch({ calls, seed: PINNED_FILES }));
+    const modal = openShell();
+    await openLoaded(modal);
+    await openPinnedTab(modal, 2);
+
+    const cards = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-file"));
+    expect(cards.length).toBe(2);
+    // The write buttons must EXIST here at all: the location type "pinned" is
+    // not a sandboxed root, so a location-level canWrite would have rendered a
+    // pinned grid with no rename/move/delete at all.
+    const inCard = cards.find((c) => c.dataset.name === "in.png");
+    expect(inCard.querySelector('[data-action="delete"]')).not.toBeNull();
+
+    inCard.querySelector('[data-action="delete"]').click();
+    const confirm = await vi.waitFor(() => {
+      const b = Array.from(modal.dialog.querySelectorAll(".cmp-ov-btn")).find(
+        (x) => x.textContent === "Delete",
+      );
+      if (!b) throw new Error("confirm not rendered");
+      return b;
+    });
+    confirm.click();
+
+    const del = await vi.waitFor(() => {
+      const c = calls.find((x) => x.url.includes("/image_browser/delete"));
+      if (!c) throw new Error("delete not called");
+      return c;
+    });
+    expect(JSON.parse(del.init.body)).toEqual({
+      type: "input",
+      subfolder: "src",
+      name: "in.png",
+    });
+    modal.close();
+  });
+
+  it("the card 📌 posts the exact add/remove delta for that file", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", pinsFetch({ calls, files: TWO_FILES }));
+    const modal = openShell();
+    await openLoaded(modal);
+
+    const card = modal.bodyEl.querySelector('.ib-card.is-file[data-name="a.png"]');
+    expect(card).not.toBeNull();
+    const pinBtn = card.querySelector('[data-action="pin"]');
+    expect(pinBtn).not.toBeNull();
+    expect(pinBtn.classList.contains("is-pinned")).toBe(false);
+
+    pinBtn.click();
+    const add = await vi.waitFor(() => {
+      const c = calls.find((x) => x.url.includes("/pins") && x.init?.method === "POST");
+      if (!c) throw new Error("pin delta not posted");
+      return c;
+    });
+    expect(JSON.parse(add.init.body)).toEqual({
+      op: "add",
+      item: { kind: "file", type: "output", subfolder: "", name: "a.png" },
+    });
+
+    // The button repaints filled from the response the POST itself returned —
+    // no follow-up GET.
+    await vi.waitFor(() => {
+      const b = modal.bodyEl.querySelector('.ib-card[data-name="a.png"] [data-action="pin"]');
+      if (!b?.classList.contains("is-pinned")) throw new Error("still unfilled");
+    });
+
+    // Tapping again unpins.
+    modal.bodyEl.querySelector('.ib-card[data-name="a.png"] [data-action="pin"]').click();
+    await vi.waitFor(() => {
+      const last = calls.filter((x) => x.init?.method === "POST").at(-1);
+      if (JSON.parse(last.init.body).op !== "remove") throw new Error("no remove delta");
+    });
+    modal.close();
+  });
+
+  it("the selection bar's 📌 posts one add delta per selected file", async () => {
+    const calls = [];
+    vi.stubGlobal("fetch", pinsFetch({ calls, files: TWO_FILES }));
+    const modal = openShell();
+    await openLoaded(modal);
+
+    for (const c of modal.bodyEl.querySelectorAll(".ib-card.is-file .ib-check")) c.click();
+    expect(modal.dialog.querySelector(".ib-selbar-count").textContent).toBe("2 selected");
+
+    modal.dialog.querySelector('[data-selbar="pin"]').click();
+    await vi.waitFor(() => {
+      const posts = calls.filter((x) => x.url.includes("/pins") && x.init?.method === "POST");
+      if (posts.length !== 2) throw new Error(`${posts.length} deltas, want 2`);
+    });
+    const bodies = calls
+      .filter((x) => x.url.includes("/pins") && x.init?.method === "POST")
+      .map((x) => JSON.parse(x.init.body));
+    expect(bodies).toEqual([
+      { op: "add", item: { kind: "file", type: "output", subfolder: "", name: "a.png" } },
+      { op: "add", item: { kind: "file", type: "output", subfolder: "", name: "b.png" } },
+    ]);
+    modal.close();
+  });
+
+  it("a pin whose file is gone renders dimmed, keeps only its unpin, and prunes", async () => {
+    const calls = [];
+    vi.stubGlobal(
+      "fetch",
+      pinsFetch({
+        calls,
+        seed: [
+          PINNED_FILES[0],
+          { kind: "file", type: "output", subfolder: "old", name: "gone.png", exists: false },
+        ],
+      }),
+    );
+    const modal = openShell();
+    await openLoaded(modal);
+    await openPinnedTab(modal, 2);
+
+    const cards = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-file"));
+    expect(cards.length).toBe(2);
+    const missing = cards.find((c) => c.dataset.name === "gone.png");
+    const live = cards.find((c) => c.dataset.name === "in.png");
+    expect(missing).not.toBeUndefined();
+
+    // Asserted through getComputedStyle, NEVER el.style: the dimming lives in a
+    // CLASS rule in the injected stylesheet, so an inline-style assertion would
+    // read "" and pass against the bug.
+    expect(getComputedStyle(missing).opacity).toBe("0.45");
+    expect(getComputedStyle(live).opacity).not.toBe("0.45");
+
+    // Every control that would address the absent file is gone; the unpin stays.
+    expect(missing.querySelector('[data-action="delete"]')).toBeNull();
+    expect(missing.querySelector('[data-action="open"]')).toBeNull();
+    expect(missing.querySelector(".ib-check")).toBeNull();
+    expect(missing.querySelector('[data-action="pin"]')).not.toBeNull();
+
+    // Prune is offered (and only because something is missing).
+    const prune = modal.dialog.querySelector(".ib-prune");
+    expect(prune.style.display).not.toBe("none");
+    prune.click();
+    await vi.waitFor(() => {
+      const c = calls.find(
+        (x) => x.init?.method === "POST" && JSON.parse(x.init.body).op === "prune",
+      );
+      if (!c) throw new Error("prune not posted");
+    });
+    await vi.waitFor(() => {
+      const n = modal.bodyEl.querySelectorAll(".ib-card.is-file").length;
+      if (n !== 1) throw new Error(`${n} cards after prune, want 1`);
+    });
+    expect(modal.dialog.querySelector(".ib-prune").style.display).toBe("none");
+    modal.close();
+  });
+
+  it("hides the directory-only toolbar controls but keeps multi-select", async () => {
+    vi.stubGlobal("fetch", pinsFetch({ seed: PINNED_FILES }));
+    const modal = openShell();
+    await openLoaded(modal);
+    await openPinnedTab(modal, 2);
+
+    expect(modal.dialog.querySelector(".ib-view-toggle").style.display).toBe("none");
+    expect(modal.dialog.querySelector(".ib-newfolder").style.display).toBe("none");
+    expect(modal.dialog.querySelector(".ib-pin-toggle").style.display).toBe("none");
+    expect(modal.dialog.querySelector(".ib-select-toggle").style.display).not.toBe("none");
+
+    // And selection actually works, keyed per card's own root.
+    modal.bodyEl.querySelector('.ib-card[data-name="in.png"] .ib-check').click();
+    expect(modal.dialog.querySelector(".ib-selbar-count").textContent).toBe("1 selected");
+    modal.close();
+  });
+
+  it("a pinned card's address label navigates to that file's own root and folder", async () => {
+    vi.stubGlobal("fetch", pinsFetch({ seed: PINNED_FILES }));
+    const modal = openShell();
+    await openLoaded(modal);
+    await openPinnedTab(modal, 2);
+
+    const label = modal.bodyEl.querySelector('.ib-card[data-name="out.png"] .ib-subpath');
+    expect(label.textContent).toBe("output/2026-08-04/");
+    label.click();
+    await vi.waitFor(() => {
+      const crumbs = Array.from(modal.dialog.querySelectorAll(".ib-crumbs .ib-crumb")).map(
+        (c) => c.textContent,
+      );
+      if (crumbs.join("/") !== "output/2026-08-04") throw new Error(`crumbs: ${crumbs}`);
+    });
     modal.close();
   });
 });
@@ -684,14 +1104,16 @@ describe("flat (recursive) view", () => {
 
   it("a flat-view card's move sends the file's real (nested) subfolder", async () => {
     localStorage.setItem("comfyui-image-browser:view", "flat");
-    localStorage.setItem(
-      "comfyui-image-browser:pins",
-      JSON.stringify([{ type: "input", subfolder: "keep" }]),
-    );
     const calls = [];
-    vi.stubGlobal("fetch", recursiveListFetch(calls));
+    vi.stubGlobal(
+      "fetch",
+      recursiveListFetch(calls, [{ kind: "dir", type: "input", subfolder: "keep", exists: true }]),
+    );
     const modal = openShell();
     await openLoaded(modal);
+    await vi.waitFor(() => {
+      if (!modal.dialog.querySelector(".ib-pin-chip")) throw new Error("pins not loaded yet");
+    });
 
     const deepCard = await vi.waitFor(() => {
       const c = Array.from(modal.bodyEl.querySelectorAll(".ib-card.is-file")).find(
@@ -1436,12 +1858,20 @@ describe("comfyui-image-browser standalone modal", () => {
     expect(modal.bodyEl.querySelector(".image-browser-body")).not.toBeNull();
     // The card grid is mounted synchronously (populated after the async fetch).
     expect(modal.bodyEl.querySelector(".ib-grid")).not.toBeNull();
-    // Toolbar tabs for the sandboxed roots + arbitrary path mode. This query is
-    // dialog-wide, so the count only means "four root tabs" as long as nothing
-    // else wears .ib-tab — the media-type filter segments share the tabs' CSS
-    // through a comma selector precisely so they don't have to wear the class.
+    // Toolbar tabs for the sandboxed roots + arbitrary path mode + the pinned
+    // view. This query is dialog-wide, so the count only means "five tabs" as
+    // long as nothing else wears .ib-tab — the media-type filter segments share
+    // the tabs' CSS through a comma selector precisely so they don't have to
+    // wear the class.
     const tabs = modal.dialog.querySelectorAll(".ib-tab");
-    expect(tabs.length).toBe(4);
+    expect(tabs.length).toBe(5);
+    expect(Array.from(tabs).map((t) => t.dataset.type)).toEqual([
+      "input",
+      "output",
+      "temp",
+      "path",
+      "pinned",
+    ]);
     expect(modal.dialog.querySelectorAll(".ib-filter-seg").length).toBe(3);
     // The flat-view toggle is part of the toolbar scaffold.
     expect(modal.dialog.querySelector(".ib-view-toggle")).not.toBeNull();

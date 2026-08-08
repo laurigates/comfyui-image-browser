@@ -1053,6 +1053,7 @@ var MOVE_DIR_URL = "/image_browser/move_dir";
 var MOVE_MANY_URL = "/image_browser/move_many";
 var RMDIR_URL = "/image_browser/rmdir";
 var MKDIR_URL = "/image_browser/mkdir";
+var PINS_URL = "/image_browser/pins";
 var RATING_URL = "/image_browser/rating";
 var IMG_EXTS = new Set([
   ".png",
@@ -1303,6 +1304,58 @@ function moveMany(items, destType, destSubfolder) {
 function makeDir(type, subfolder, name) {
   return postJSON(MKDIR_URL, { type, subfolder, name });
 }
+function pinKeyOf(p) {
+  return `${p.kind}:${p.type}:${p.subfolder}:${p.name ?? ""}`;
+}
+async function readPinsResponse(r) {
+  let data = {};
+  try {
+    data = await r.json();
+  } catch {}
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+  return { ok: true, max: typeof data.max === "number" ? data.max : 0, pins: data.pins ?? [] };
+}
+async function fetchPins() {
+  return readPinsResponse(await fetch(PINS_URL, { cache: "no-cache" }));
+}
+async function postPinDelta(op, item) {
+  const body = { op };
+  if (item)
+    body.item = item;
+  const r = await fetch(PINS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return readPinsResponse(r);
+}
+function pinsToFiles(entries) {
+  const out = [];
+  for (const e of entries) {
+    if (e.kind !== "file")
+      continue;
+    const name = e.name;
+    if (!name)
+      continue;
+    const dot = name.lastIndexOf(".");
+    out.push({
+      name,
+      ext: (e.ext ?? (dot >= 0 ? name.slice(dot) : "")).toLowerCase(),
+      mtime: e.exists ? e.mtime ?? 0 : 0,
+      size: e.exists ? e.size ?? 0 : 0,
+      width: e.width,
+      height: e.height,
+      rating: e.exists ? e.rating ?? 0 : 0,
+      pinType: e.type,
+      pinSub: e.subfolder,
+      pinKind: "file",
+      pinExists: e.exists
+    });
+  }
+  return out;
+}
 
 // src/browser.ts
 var STYLE_ID4 = "ib-style";
@@ -1401,29 +1454,51 @@ function saveDest(d) {
   } catch {}
 }
 var scrollMemory = new Map;
-var PINS_STORAGE_KEY = "comfyui-image-browser:pins";
-function pinKey(p) {
-  return `${p.type}:${p.subfolder}`;
+var pinEntries = [];
+var pinKeys = new Set;
+function setPinCache(entries) {
+  pinEntries = entries;
+  pinKeys = new Set(entries.map(pinKeyOf));
+}
+function isPinned(item) {
+  return pinKeys.has(pinKeyOf(item));
+}
+function folderPins() {
+  return pinEntries.filter((p) => p.kind === "dir");
 }
 function pinLabel(p) {
   return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
 }
-function loadPins() {
+var PINS_STORAGE_KEY = "comfyui-image-browser:pins";
+async function migrateLocalPins() {
+  let raw = null;
   try {
-    const raw = localStorage.getItem(PINS_STORAGE_KEY);
-    if (!raw)
-      return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr))
-      return [];
-    return arr.filter((p) => !!p && typeof p.subfolder === "string" && SANDBOXED_TYPES.includes(p.type));
+    raw = localStorage.getItem(PINS_STORAGE_KEY);
   } catch {
-    return [];
+    return;
   }
-}
-function savePins(pins) {
+  if (!raw)
+    return;
+  let legacy = [];
   try {
-    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed))
+      legacy = parsed;
+  } catch {
+    legacy = [];
+  }
+  for (const p of legacy) {
+    const type = p?.type;
+    if (!p || typeof p.subfolder !== "string" || !SANDBOXED_TYPES.includes(type))
+      continue;
+    try {
+      setPinCache((await postPinDelta("add", { kind: "dir", type, subfolder: p.subfolder })).pins);
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] pin migration skipped ${type}/${p.subfolder}`, e);
+    }
+  }
+  try {
+    localStorage.removeItem(PINS_STORAGE_KEY);
   } catch {}
 }
 function openImageBrowser() {
@@ -1472,12 +1547,12 @@ function openImageBrowser() {
   modal.bodyEl.appendChild(root);
   const tabsEl = document.createElement("div");
   tabsEl.className = "ib-tabs";
-  for (const t of ["input", "output", "temp", "path"]) {
+  for (const t of ["input", "output", "temp", "path", "pinned"]) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "ib-tab";
     b.dataset.type = t;
-    b.textContent = t === "path" ? "browse…" : t;
+    b.textContent = t === "path" ? "browse…" : t === "pinned" ? "\uD83D\uDCCC pinned" : t;
     tabsEl.appendChild(b);
   }
   const crumbsEl = document.createElement("div");
@@ -1520,6 +1595,12 @@ function openImageBrowser() {
   newFolderEl.className = "ib-control ib-icon ib-newfolder";
   newFolderEl.title = "New folder";
   newFolderEl.textContent = "\uD83D\uDCC1+";
+  const pruneEl = document.createElement("button");
+  pruneEl.type = "button";
+  pruneEl.className = "ib-control ib-prune";
+  pruneEl.title = "Remove pins whose file or folder no longer exists";
+  pruneEl.textContent = "\uD83E\uDDF9 Prune missing";
+  pruneEl.style.display = "none";
   const filterEl = document.createElement("div");
   filterEl.className = "ib-filter";
   const filterGroupEl = document.createElement("div");
@@ -1540,7 +1621,7 @@ function openImageBrowser() {
   filterEl.appendChild(filterGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, sortEl, refreshEl, filterEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, sortEl, refreshEl, filterEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -1617,6 +1698,7 @@ function openImageBrowser() {
   selBar.className = "ib-selbar";
   selBar.innerHTML = `
     <span class="ib-selbar-count"></span>
+    <button type="button" class="ib-selbar-btn" data-selbar="pin">\uD83D\uDCCC Pin</button>
     <button type="button" class="ib-selbar-btn" data-selbar="move">⇄ Move…</button>
     <button type="button" class="ib-selbar-btn ib-selbar-danger" data-selbar="delete">\uD83D\uDDD1 Delete</button>
     <button type="button" class="ib-selbar-btn" data-selbar="clear">✕</button>`;
@@ -1644,11 +1726,34 @@ function openImageBrowser() {
     return state.viewMode === "flat" && SANDBOXED_TYPES.includes(state.type);
   }
   function fileSub(f) {
+    if (f.pinSub !== undefined)
+      return f.pinSub;
     const sp = f.subpath || "";
     if (!sp)
       return state.subfolder;
     const base = state.subfolder.replace(/\/+$/, "");
     return base ? `${base}/${sp}` : sp;
+  }
+  function fileType(f) {
+    return f.pinType ?? state.type;
+  }
+  function canWriteFile(f) {
+    return SANDBOXED_TYPES.includes(fileType(f));
+  }
+  function isPinnedView() {
+    return state.type === "pinned";
+  }
+  function canSelectHere() {
+    return SANDBOXED_TYPES.includes(state.type) || isPinnedView();
+  }
+  function filePinItem(f) {
+    return { kind: "file", type: fileType(f), subfolder: fileSub(f), name: f.name };
+  }
+  function pinItemOf(p) {
+    return p.kind === "file" ? { kind: "file", type: p.type, subfolder: p.subfolder, name: p.name } : { kind: "dir", type: p.type, subfolder: p.subfolder };
+  }
+  function pinsUnder(type, sub) {
+    return pinEntries.filter((p) => p.type === type && (p.subfolder === sub || p.subfolder.startsWith(`${sub}/`))).map(pinItemOf);
   }
   function locationKey() {
     const view = isFlat() ? ":flat" : "";
@@ -1743,17 +1848,8 @@ function openImageBrowser() {
     loadAndRender();
   });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
-  pinToggleEl.addEventListener("click", () => {
-    if (!SANDBOXED_TYPES.includes(state.type))
-      return;
-    const cur = { type: state.type, subfolder: state.subfolder };
-    const pins = loadPins();
-    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
-    if (next.length === pins.length)
-      next.push(cur);
-    savePins(next);
-    renderPins();
-  });
+  pinToggleEl.addEventListener("click", () => void toggleFolderPinHere());
+  pruneEl.addEventListener("click", () => void onPruneMissing());
   pinsEl.addEventListener("click", (e) => {
     const t = e.target;
     const chip = t.closest("[data-pin-type]");
@@ -1762,10 +1858,9 @@ function openImageBrowser() {
     const type = chip.dataset.pinType;
     if (!SANDBOXED_TYPES.includes(type))
       return;
-    const pin = { type, subfolder: chip.dataset.pinSub || "" };
+    const pin = { kind: "dir", type, subfolder: chip.dataset.pinSub || "" };
     if (t.closest(".ib-pin-x")) {
-      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
-      renderPins();
+      unpinFolder(pin);
       return;
     }
     if (pin.type === state.type && pin.subfolder === state.subfolder)
@@ -1784,6 +1879,8 @@ function openImageBrowser() {
       doMoveSelected();
     else if (action === "delete")
       doDelete();
+    else if (action === "pin")
+      doPinSelected();
     else if (action === "clear") {
       setSelectMode(false);
       clearSelection();
@@ -1846,6 +1943,9 @@ function openImageBrowser() {
       rememberScroll();
       state.viewMode = "folder";
       saveView("folder");
+      const t = subEl.dataset.pinType;
+      if (t && SANDBOXED_TYPES.includes(t))
+        state.type = t;
       state.subfolder = subEl.dataset.sub || "";
       loadAndRender();
       return;
@@ -1861,7 +1961,7 @@ function openImageBrowser() {
     if (star) {
       e.stopPropagation();
       const row = star.closest(".ib-stars");
-      if (!row || !SANDBOXED_TYPES.includes(state.type))
+      if (!row || !canWriteFile(f))
         return;
       const cur = Number(row.dataset.rating || "0");
       setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
@@ -1882,9 +1982,11 @@ function openImageBrowser() {
         onRename(f);
       else if (action === "move")
         onMove(f);
+      else if (action === "pin")
+        toggleFilePin(f);
       return;
     }
-    if (selectMode && SANDBOXED_TYPES.includes(state.type)) {
+    if (selectMode && canWriteFile(f)) {
       toggleSelectionAt(idx);
       return;
     }
@@ -1903,7 +2005,7 @@ function openImageBrowser() {
   }
   gridEl.addEventListener("pointerdown", (e) => {
     suppressClick = false;
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!canSelectHere())
       return;
     if (e.pointerType === "mouse" && e.button !== 0)
       return;
@@ -1978,7 +2080,7 @@ function openImageBrowser() {
     applyStars(row, next);
     f.rating = next;
     const addr = {
-      type: state.type,
+      type: fileType(f),
       subfolder: fileSub(f),
       absDir: state.absPath,
       name: f.name
@@ -1995,7 +2097,7 @@ function openImageBrowser() {
     });
   }
   function openFull(f) {
-    const url = fullSrcURL(state.type, fileSub(f), f.name, state.absPath);
+    const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
   const copyFeedback = new WeakMap;
@@ -2025,8 +2127,9 @@ function openImageBrowser() {
   }
   async function loadWorkflow(f) {
     const sub = fileSub(f);
+    const type = fileType(f);
     try {
-      const meta = await fetchMetadata(state.type, sub, f.name, state.absPath);
+      const meta = await fetchMetadata(type, sub, f.name, state.absPath);
       const graphJSON = embeddedWorkflowJSON(meta);
       if (!graphJSON) {
         notify({
@@ -2043,7 +2146,7 @@ function openImageBrowser() {
         await app.handleFile(file2);
         return;
       }
-      const res = await fetch(fullSrcURL(state.type, sub, f.name, state.absPath));
+      const res = await fetch(fullSrcURL(type, sub, f.name, state.absPath));
       if (!res.ok)
         throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
@@ -2080,7 +2183,7 @@ function openImageBrowser() {
     ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
     let data;
     try {
-      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+      data = await fetchMetadata(fileType(f), fileSub(f), f.name, state.absPath);
     } catch (e) {
       close();
       reportError("Metadata read failed", e);
@@ -2143,8 +2246,10 @@ function openImageBrowser() {
     });
     if (!ok)
       return;
+    const pin = filePinItem(f);
     try {
-      await deleteFile(state.type, fileSub(f), f.name);
+      await deleteFile(fileType(f), fileSub(f), f.name);
+      await followPins([{ from: pin, to: null }]);
       state.files = state.files.filter((x) => x !== f);
       renderGrid();
     } catch (e) {
@@ -2174,8 +2279,10 @@ function openImageBrowser() {
     });
     if (!newName || newName === name)
       return;
+    const from = filePinItem(f);
     try {
-      await renameFile(state.type, fileSub(f), name, newName);
+      await renameFile(fileType(f), fileSub(f), name, newName);
+      await followPins([{ from, to: { ...from, name: newName } }]);
       f.name = newName;
       renderGrid();
     } catch (e) {
@@ -2184,14 +2291,18 @@ function openImageBrowser() {
   }
   async function onMove(f) {
     const dest = await pickDestination(modal, {
-      type: state.type,
+      type: fileType(f),
       subfolder: fileSub(f)
     });
     if (!dest)
       return;
+    const from = filePinItem(f);
     try {
-      await moveFile(state.type, fileSub(f), f.name, dest.type, dest.subfolder);
+      await moveFile(fileType(f), fileSub(f), f.name, dest.type, dest.subfolder);
       saveDest(dest);
+      await followPins([
+        { from, to: { kind: "file", type: dest.type, subfolder: dest.subfolder, name: f.name } }
+      ]);
       state.files = state.files.filter((x) => x !== f);
       renderGrid();
       notify({
@@ -2203,12 +2314,121 @@ function openImageBrowser() {
       reportError("Move failed", e);
     }
   }
+  function refreshPinButtons() {
+    for (const [i, c] of fileCards().entries()) {
+      const f = renderedFiles[i];
+      const btn = c.querySelector('[data-action="pin"]');
+      if (!f || !btn)
+        continue;
+      const on = isPinned(filePinItem(f));
+      btn.classList.toggle("is-pinned", on);
+      btn.title = on ? "Unpin this file" : "Pin this file";
+    }
+  }
+  async function refreshPinnedUI() {
+    if (isPinnedView()) {
+      await loadAndRender({ preserveScroll: true });
+      return;
+    }
+    renderPins();
+    refreshPinButtons();
+  }
+  async function toggleFolderPinHere() {
+    if (!SANDBOXED_TYPES.includes(state.type))
+      return;
+    const item = { kind: "dir", type: state.type, subfolder: state.subfolder };
+    const pinned = isPinned(item);
+    try {
+      setPinCache((await postPinDelta(pinned ? "remove" : "add", item)).pins);
+      renderPins();
+    } catch (e) {
+      reportError(pinned ? "Unpin failed" : "Pin failed", e);
+    }
+  }
+  async function unpinFolder(item) {
+    try {
+      setPinCache((await postPinDelta("remove", item)).pins);
+      renderPins();
+    } catch (e) {
+      reportError("Unpin failed", e);
+    }
+  }
+  async function toggleFilePin(f) {
+    if (!canWriteFile(f))
+      return;
+    const item = filePinItem(f);
+    const pinned = isPinned(item);
+    try {
+      setPinCache((await postPinDelta(pinned ? "remove" : "add", item)).pins);
+      await refreshPinnedUI();
+    } catch (e) {
+      reportError(pinned ? "Unpin failed" : "Pin failed", e);
+    }
+  }
+  async function doPinSelected() {
+    const items = collectSelectedOrFocused();
+    if (items.length === 0)
+      return;
+    let added = 0;
+    const failures = new Set;
+    for (const it of items) {
+      try {
+        const res = await postPinDelta("add", {
+          kind: "file",
+          type: it.type,
+          subfolder: it.subfolder,
+          name: it.name
+        });
+        setPinCache(res.pins);
+        added++;
+      } catch (e) {
+        failures.add(e instanceof Error ? e.message : String(e));
+      }
+    }
+    await refreshPinnedUI();
+    if (failures.size > 0) {
+      reportError(`Pinned ${added}, ${items.length - added} failed`, new Error(Array.from(failures).join("; ")));
+      return;
+    }
+    notify({ severity: "success", summary: "Pinned", detail: `${added} file(s)` });
+  }
+  async function onPruneMissing() {
+    const before = pinEntries.length;
+    try {
+      const res = await postPinDelta("prune");
+      const removed = before - res.pins.length;
+      setPinCache(res.pins);
+      await refreshPinnedUI();
+      notify({
+        severity: "success",
+        summary: "Pins pruned",
+        detail: `${removed} missing pin(s) removed`
+      });
+    } catch (e) {
+      reportError("Prune failed", e);
+    }
+  }
+  async function followPins(changes) {
+    const live = changes.filter((c) => isPinned(c.from));
+    if (live.length === 0)
+      return;
+    try {
+      for (const c of live) {
+        setPinCache((await postPinDelta("remove", c.from)).pins);
+        if (c.to)
+          setPinCache((await postPinDelta("add", c.to)).pins);
+      }
+      renderPins();
+    } catch (e) {
+      reportError("Pin list not updated for this change", e);
+    }
+  }
   function renderTabs() {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
       b.classList.toggle("is-active", b.dataset.type === state.type);
     }
     const canWrite = SANDBOXED_TYPES.includes(state.type);
-    selectToggleEl.style.display = canWrite ? "" : "none";
+    selectToggleEl.style.display = canSelectHere() ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
     viewToggleEl.style.display = canWrite ? "" : "none";
     viewToggleEl.classList.toggle("is-active", isFlat());
@@ -2218,12 +2438,13 @@ function openImageBrowser() {
     }
   }
   function renderPins() {
-    const pins = loadPins();
+    const pins = folderPins();
     const canPin = SANDBOXED_TYPES.includes(state.type);
     pinToggleEl.style.display = canPin ? "" : "none";
-    const herePinned = canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+    const herePinned = canPin && isPinned({ kind: "dir", type: state.type, subfolder: state.subfolder });
     pinToggleEl.classList.toggle("is-active", herePinned);
     pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    pruneEl.style.display = isPinnedView() && pinEntries.some((p) => p.exists === false) ? "" : "none";
     pinsEl.innerHTML = "";
     pinsEl.style.display = pins.length ? "" : "none";
     for (const p of pins) {
@@ -2284,25 +2505,33 @@ function openImageBrowser() {
     modal.setStatus("Loading…");
     markFlatPending(isFlat());
     try {
-      const data = await fetchListing({
-        type: state.type,
-        subfolder: state.subfolder,
-        path: state.absPath,
-        recursive: isFlat(),
-        kind: state.typeFilter
-      });
-      state.dirs = data.dirs || [];
-      state.files = data.files || [];
-      modal.setStatus(data.exists ? "" : "Directory not found.");
-      if (data.truncated) {
-        notify({
-          severity: "warn",
-          summary: `Showing the newest ${state.files.length}`,
-          detail: "This folder's subtree has more files than the flat view returns; older ones are not listed."
+      if (isPinnedView()) {
+        const res = await fetchPins();
+        setPinCache(res.pins);
+        state.dirs = [];
+        state.files = narrowByKind(pinsToFiles(res.pins), state.typeFilter);
+        modal.setStatus(res.pins.length ? "" : "Nothing pinned yet.");
+      } else {
+        const data = await fetchListing({
+          type: state.type,
+          subfolder: state.subfolder,
+          path: state.absPath,
+          recursive: isFlat(),
+          kind: state.typeFilter
         });
+        state.dirs = data.dirs || [];
+        state.files = data.files || [];
+        modal.setStatus(data.exists ? "" : "Directory not found.");
+        if (data.truncated) {
+          notify({
+            severity: "warn",
+            summary: `Showing the newest ${state.files.length}`,
+            detail: "This folder's subtree has more files than the flat view returns; older ones are not listed."
+          });
+        }
       }
     } catch (e) {
-      reportError("Failed to load directory", e);
+      reportError(isPinnedView() ? "Failed to load pins" : "Failed to load directory", e);
       modal.setStatus(`Error: ${e.message}`);
       state.dirs = [];
       state.files = [];
@@ -2314,19 +2543,28 @@ function openImageBrowser() {
     });
     markFlatPending(false);
   }
+  function narrowByKind(files, filter) {
+    if (filter === "all")
+      return files;
+    const want = filter === "images" ? IMG_EXTS : VIDEO_EXTS;
+    return files.filter((f) => want.has((f.ext || "").toLowerCase()));
+  }
   function thumbForFile(f) {
+    if (f.pinExists === false)
+      return { kind: "icon", text: "⚠" };
     const ext = (f.ext || "").toLowerCase();
     const sub = fileSub(f);
+    const type = fileType(f);
     if (IMG_EXTS.has(ext)) {
       return {
         kind: "img",
-        src: imageThumbURL(state.type, sub, f.name, state.absPath, thumbVersion(f.mtime, f.size))
+        src: imageThumbURL(type, sub, f.name, state.absPath, thumbVersion(f.mtime, f.size))
       };
     }
     if (VIDEO_EXTS.has(ext)) {
       return {
         kind: "video",
-        src: videoSrcURL(state.type, sub, f.name, state.absPath)
+        src: videoSrcURL(type, sub, f.name, state.absPath)
       };
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
@@ -2337,6 +2575,7 @@ function openImageBrowser() {
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     const flat = isFlat();
+    const pinnedView = isPinnedView();
     const showUp = !flat && canGoUp();
     if (showUp) {
       const up = document.createElement("div");
@@ -2384,8 +2623,12 @@ function openImageBrowser() {
         continue;
       const c = document.createElement("div");
       c.className = "ib-card is-file";
-      if (flat)
+      const canWriteThis = canWriteFile(f);
+      const missing = f.pinExists === false;
+      if (flat || pinnedView)
         c.classList.add("is-flat");
+      if (missing)
+        c.classList.add("is-missing");
       if (fi === focusIndex)
         c.classList.add("is-focused");
       if (isSelected(f))
@@ -2404,14 +2647,21 @@ ${when}`;
       const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
       const metaBtn = hasMeta ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
       const wfBtn = hasMeta ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
-      const moveBtn = canWrite ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
-      const writeBtns = canWrite ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
+      const moveBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
+      const writeBtns = canWriteThis ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
            ${moveBtn}
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
-      const starsRow = canWrite ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
-      const checkBtn = canWrite ? `<button type="button" class="ib-check" data-check aria-label="Select ${escapeHTML(f.name)}">✓</button>` : "";
-      const subLabel = flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
-      c.innerHTML = `
+      const isFilePinned = canWriteThis && isPinned(filePinItem(f));
+      const pinBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
+      const starsRow = canWriteThis ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
+      const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="Select ${escapeHTML(f.name)}">✓</button>` : "";
+      const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${escapeHTML(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
+      c.innerHTML = missing ? `
+        ${subLabel}
+        <div class="ib-thumb">${thumbInner}</div>
+        <div class="ib-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</div>
+        <div class="ib-meta">missing</div>
+        <div class="ib-actions">${pinBtn}</div>` : `
         ${subLabel}
         ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
@@ -2422,6 +2672,7 @@ ${when}`;
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
           ${metaBtn}
           ${wfBtn}
+          ${pinBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -2430,7 +2681,7 @@ ${when}`;
     if (!visible && !state.dirs.length && !showUp) {
       const el = document.createElement("div");
       el.className = "ib-empty";
-      el.textContent = "No matching files in this folder.";
+      el.textContent = pinnedView ? "No pinned files. Tap \uD83D\uDCCC on a card to add one." : "No matching files in this folder.";
       gridEl.appendChild(el);
     }
     setCount(visible, state.files.length);
@@ -2458,9 +2709,9 @@ ${when}`;
     return `${type}:${subfolder}:${name}`;
   }
   function isSelected(f) {
-    if (state.type === "path")
+    if (!canWriteFile(f))
       return false;
-    return selected.has(selectionKey(state.type, fileSub(f), f.name));
+    return selected.has(selectionKey(fileType(f), fileSub(f), f.name));
   }
   function fileCards() {
     return Array.from(gridEl.querySelectorAll(".ib-card.is-file"));
@@ -2528,71 +2779,64 @@ ${when}`;
     selBarCount.textContent = `${n} selected`;
   }
   function setSelectMode(on) {
-    if (on && !SANDBOXED_TYPES.includes(state.type))
+    if (on && !canSelectHere())
       return;
     selectMode = on;
     selectToggleEl.classList.toggle("is-active", on);
     modal.dialog.classList.toggle("is-selecting", on);
   }
-  function toggleSelectionAt(i) {
-    if (!SANDBOXED_TYPES.includes(state.type))
-      return;
-    const f = renderedFiles[i];
-    if (!f)
-      return;
+  function selectFile(f) {
     const sub = fileSub(f);
-    const key = selectionKey(state.type, sub, f.name);
+    selected.set(selectionKey(fileType(f), sub, f.name), {
+      file: f,
+      type: fileType(f),
+      subfolder: sub
+    });
+  }
+  function toggleSelectionAt(i) {
+    const f = renderedFiles[i];
+    if (!f || !canWriteFile(f))
+      return;
+    const key = selectionKey(fileType(f), fileSub(f), f.name);
     if (selected.has(key))
       selected.delete(key);
     else
-      selected.set(key, { file: f, type: state.type, subfolder: sub });
+      selectFile(f);
     refreshSelectionClasses();
     updateSelectedCount();
   }
   function setSelectedRange(a, b, on) {
-    if (!SANDBOXED_TYPES.includes(state.type))
-      return;
     const lo = Math.min(a, b);
     const hi = Math.max(a, b);
     for (let i = lo;i <= hi; i++) {
       const f = renderedFiles[i];
-      if (!f)
+      if (!f || !canWriteFile(f))
         continue;
-      const sub = fileSub(f);
-      const key = selectionKey(state.type, sub, f.name);
       if (on)
-        selected.set(key, { file: f, type: state.type, subfolder: sub });
+        selectFile(f);
       else
-        selected.delete(key);
+        selected.delete(selectionKey(fileType(f), fileSub(f), f.name));
     }
     refreshSelectionClasses();
     updateSelectedCount();
   }
   function extendSelectionTo(i) {
-    if (!SANDBOXED_TYPES.includes(state.type))
-      return;
     const lo = Math.min(visualAnchor, i);
     const hi = Math.max(visualAnchor, i);
     for (let k = lo;k <= hi; k++) {
       const f = renderedFiles[k];
-      if (!f)
+      if (!f || !canWriteFile(f))
         continue;
-      const sub = fileSub(f);
-      const key = selectionKey(state.type, sub, f.name);
-      if (!selected.has(key))
-        selected.set(key, { file: f, type: state.type, subfolder: sub });
+      selectFile(f);
     }
     refreshSelectionClasses();
     updateSelectedCount();
   }
   function selectAllVisible() {
-    if (!SANDBOXED_TYPES.includes(state.type))
-      return;
     for (const f of renderedFiles) {
-      const sub = fileSub(f);
-      const key = selectionKey(state.type, sub, f.name);
-      if (!selected.has(key))
-        selected.set(key, { file: f, type: state.type, subfolder: sub });
+      if (!canWriteFile(f))
+        continue;
+      selectFile(f);
     }
     refreshSelectionClasses();
     updateSelectedCount();
@@ -2603,7 +2847,7 @@ ${when}`;
     updateSelectedCount();
   }
   function toggleVisualMode() {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!canSelectHere())
       return;
     if (renderedFiles.length === 0)
       return;
@@ -2625,9 +2869,9 @@ ${when}`;
       }));
     }
     const f = renderedFiles[focusIndex];
-    if (!f || state.type === "path")
+    if (!f || !canWriteFile(f))
       return [];
-    return [{ type: state.type, subfolder: fileSub(f), name: f.name }];
+    return [{ type: fileType(f), subfolder: fileSub(f), name: f.name }];
   }
   function setPending(op) {
     clearPending();
@@ -2660,12 +2904,16 @@ ${when}`;
     try {
       const result = await deleteMany(items);
       const errored = new Set((result.errors ?? []).map((e) => e.name));
-      const succeeded = new Set(items.filter((it) => it.type === state.type && !errored.has(it.name)).map((it) => selectionKey(it.type, it.subfolder, it.name)));
-      state.files = state.files.filter((f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)));
+      const succeeded = new Set(items.filter((it) => !errored.has(it.name)).map((it) => selectionKey(it.type, it.subfolder, it.name)));
+      state.files = state.files.filter((f) => !succeeded.has(selectionKey(fileType(f), fileSub(f), f.name)));
       for (const it of items) {
         if (!errored.has(it.name))
           selected.delete(selectionKey(it.type, it.subfolder, it.name));
       }
+      await followPins(items.filter((it) => !errored.has(it.name)).map((it) => ({
+        from: { kind: "file", type: it.type, subfolder: it.subfolder, name: it.name },
+        to: null
+      })));
       updateSelectedCount();
       renderGrid();
       if (result.errors && result.errors.length > 0) {
@@ -2698,11 +2946,20 @@ ${when}`;
       updateSelectedCount();
       if (result.moved > 0)
         saveDest(dest);
-      if (isFlat() || dest.type === state.type && dest.subfolder === state.subfolder) {
+      await followPins(items.filter((it) => !errored.has(it.name)).map((it) => ({
+        from: { kind: "file", type: it.type, subfolder: it.subfolder, name: it.name },
+        to: {
+          kind: "file",
+          type: dest.type,
+          subfolder: dest.subfolder,
+          name: it.name
+        }
+      })));
+      if (isFlat() || isPinnedView() || dest.type === state.type && dest.subfolder === state.subfolder) {
         await loadAndRender({ preserveScroll: true });
       } else {
-        const succeeded = new Set(items.filter((it) => it.type === state.type && !errored.has(it.name)).map((it) => selectionKey(it.type, it.subfolder, it.name)));
-        state.files = state.files.filter((f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)));
+        const succeeded = new Set(items.filter((it) => !errored.has(it.name)).map((it) => selectionKey(it.type, it.subfolder, it.name)));
+        state.files = state.files.filter((f) => !succeeded.has(selectionKey(fileType(f), fileSub(f), f.name)));
         renderGrid();
       }
       if (result.errors && result.errors.length > 0) {
@@ -2767,7 +3024,7 @@ ${when}`;
         return;
       }
       state.dirs = state.dirs.filter((d) => d.name !== name);
-      savePins(loadPins().filter((p) => p.type !== state.type || p.subfolder !== srcSub && !p.subfolder.startsWith(`${srcSub}/`)));
+      await followPins(pinsUnder(state.type, srcSub).map((from) => ({ from, to: null })));
       renderPins();
       renderGrid();
       notify({
@@ -2800,7 +3057,7 @@ ${when}`;
       }
       state.dirs = state.dirs.filter((d) => d.name !== name);
       const gone = state.subfolder ? `${state.subfolder}/${name}` : name;
-      savePins(loadPins().filter((p) => p.type !== state.type || p.subfolder !== gone && !p.subfolder.startsWith(`${gone}/`)));
+      await followPins(pinsUnder(state.type, gone).map((from) => ({ from, to: null })));
       renderPins();
       renderGrid();
       notify({
@@ -2813,7 +3070,7 @@ ${when}`;
     }
   }
   function doYank() {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!canSelectHere())
       return;
     const items = collectSelectedOrFocused();
     if (items.length === 0)
@@ -2834,11 +3091,18 @@ ${when}`;
     }
     try {
       const result = await moveMany(yanked, state.type, state.subfolder);
-      for (const it of yanked) {
-        const errored = result.errors?.some((e) => e.name === it.name);
-        if (!errored)
-          selected.delete(selectionKey(it.type, it.subfolder, it.name));
-      }
+      const landed = yanked.filter((it) => !result.errors?.some((e) => e.name === it.name));
+      for (const it of landed)
+        selected.delete(selectionKey(it.type, it.subfolder, it.name));
+      await followPins(landed.map((it) => ({
+        from: { kind: "file", type: it.type, subfolder: it.subfolder, name: it.name },
+        to: {
+          kind: "file",
+          type: state.type,
+          subfolder: state.subfolder,
+          name: it.name
+        }
+      })));
       yanked = null;
       updateSelectedCount();
       if (result.moved > 0)
@@ -3114,14 +3378,14 @@ ${when}`;
           openMetadata(f);
         break;
       case "r":
-        if (SANDBOXED_TYPES.includes(state.type) && f) {
+        if (f && canWriteFile(f)) {
           e.preventDefault();
           e.stopPropagation();
           onRename(f);
         }
         break;
       case "m":
-        if (selected.size > 0 || SANDBOXED_TYPES.includes(state.type) && f) {
+        if (selected.size > 0 || f && canWriteFile(f)) {
           e.preventDefault();
           e.stopPropagation();
           doMoveSelected();
@@ -3142,6 +3406,17 @@ ${when}`;
     }
   }
   window.addEventListener("keydown", onWindowKey, true);
+  async function initPins() {
+    try {
+      await migrateLocalPins();
+      setPinCache((await fetchPins()).pins);
+      renderPins();
+      refreshPinButtons();
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] pin list unavailable`, e);
+    }
+  }
+  initPins();
   loadAndRender();
   if (savedView.recovered) {
     notify({
@@ -3234,7 +3509,7 @@ function pickDestination(modal, start, exclude) {
           return load();
         }
         status.textContent = "";
-        for (const p of loadPins()) {
+        for (const p of folderPins()) {
           if (p.type === cur.type && p.subfolder === cur.subfolder)
             continue;
           if (inExcluded(p.type, p.subfolder))
@@ -3502,6 +3777,16 @@ var BROWSER_CSS = `
 }
 .ib-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
 .ib-move-row.is-pin { color: #9ec6ff; }
+/* Per-card \uD83D\uDCCC — filled while the file is pinned, matching the toolbar toggle's
+   active look so "pinned" reads the same in both places. */
+.ib-act-pin.is-pinned { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* A pin whose target is gone. Dimmed rather than hidden: "the file moved" and
+   "you never pinned it" are different facts, so the card stays — with only its
+   unpin affordance — until it is pruned. */
+.ib-card.is-missing { opacity: 0.45; }
+.ib-card.is-missing:hover { border-color: #78384a; transform: none; }
+.ib-card.is-missing .ib-meta { color: #c07a8a; font-style: italic; }
+.ib-prune { white-space: nowrap; }
 /* Folder delete — corner overlay on dir cards (write-gated). */
 .ib-dir-del {
     position: absolute; top: 4px; right: 4px; z-index: 2;

@@ -40,6 +40,7 @@ import {
   fetchBasePaths,
   fetchListing,
   fetchMetadata,
+  fetchPins,
   fullSrcURL,
   IMG_EXTS,
   type ImageMetadata,
@@ -55,6 +56,11 @@ import {
   moveDir,
   moveFile,
   moveMany,
+  type PinEntry,
+  type PinItem,
+  pinKeyOf,
+  pinsToFiles,
+  postPinDelta,
   RATING_URL,
   removeDir,
   renameFile,
@@ -228,44 +234,81 @@ function saveDest(d: Destination): void {
 // folder still starts at the top.
 const scrollMemory = new Map<string, number>();
 
-// Pinned directories — quick-nav chips in the toolbar and shortcut rows in
-// the move-destination picker, for sorting big batches between a few folders.
-// Sandboxed roots only (pins exist to reach write targets fast).
-const PINS_STORAGE_KEY = "comfyui-image-browser:pins";
+// Pins — folders (quick-nav chips in the toolbar, shortcut rows in the
+// move-destination picker) AND individual files (the 📌 pinned tab). Sandboxed
+// roots only, and the list lives on the SERVER (see api.ts's pins section):
+// localStorage cannot span a phone and a desktop, which are two browsers
+// against one ComfyUI, nor the sibling comfyui-gallery-loader pack.
+//
+// Module-level mirror of that list, refreshed from EVERY /pins response (the GET
+// and the delta POST both answer with the whole freshly-resolved list, which is
+// why no call here ever needs a follow-up GET). Module-level for two reasons:
+// the pinned state must be readable SYNCHRONOUSLY while renderGrid builds cards
+// — a GET per card is not an option — and pickDestination lives outside
+// openImageBrowser's closure yet needs the folder pins on every load().
+let pinEntries: PinEntry[] = [];
+let pinKeys = new Set<string>();
 
-interface Pin {
-  type: BrowseType;
-  subfolder: string;
+function setPinCache(entries: PinEntry[]): void {
+  pinEntries = entries;
+  pinKeys = new Set(entries.map(pinKeyOf));
 }
 
-function pinKey(p: Pin): string {
-  return `${p.type}:${p.subfolder}`;
+function isPinned(item: PinItem): boolean {
+  return pinKeys.has(pinKeyOf(item));
 }
 
-function pinLabel(p: Pin): string {
+// Folder pins only — what the toolbar chips and the picker's shortcut rows are.
+function folderPins(): PinEntry[] {
+  return pinEntries.filter((p) => p.kind === "dir");
+}
+
+function pinLabel(p: PinItem): string {
   return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
 }
 
-function loadPins(): Pin[] {
-  try {
-    const raw = localStorage.getItem(PINS_STORAGE_KEY);
-    if (!raw) return [];
-    const arr: unknown = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    return arr.filter(
-      (p): p is Pin =>
-        !!p &&
-        typeof (p as Pin).subfolder === "string" &&
-        SANDBOXED_TYPES.includes((p as Pin).type),
-    );
-  } catch {
-    return [];
-  }
-}
+// The pre-server list. Replayed into the store once, then deleted. Every entry
+// was a FOLDER pin — file pins never existed client-side.
+const PINS_STORAGE_KEY = "comfyui-image-browser:pins";
 
-function savePins(pins: Pin[]): void {
+/**
+ * Move any localStorage pin list into the server store, then drop the key.
+ *
+ * Idempotent by construction: add-of-an-existing-pin is a successful no-op
+ * server-side, so a second run — or two devices migrating the same folders —
+ * cannot fail or duplicate. Never throws: the browser must open even when the
+ * store is unreachable, and a migration that could block the modal would be a
+ * worse bug than the one it fixes.
+ */
+async function migrateLocalPins(): Promise<void> {
+  let raw: string | null = null;
   try {
-    localStorage.setItem(PINS_STORAGE_KEY, JSON.stringify(pins));
+    raw = localStorage.getItem(PINS_STORAGE_KEY);
+  } catch {
+    return; // private-mode / disabled storage — nothing to migrate
+  }
+  if (!raw) return;
+  let legacy: { type?: unknown; subfolder?: unknown }[] = [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) legacy = parsed;
+  } catch {
+    legacy = [];
+  }
+  for (const p of legacy) {
+    const type = p?.type as BrowseType;
+    if (!p || typeof p.subfolder !== "string" || !SANDBOXED_TYPES.includes(type)) continue;
+    try {
+      setPinCache((await postPinDelta("add", { kind: "dir", type, subfolder: p.subfolder })).pins);
+    } catch (e) {
+      // A single rejected entry (or a full store) must not strand the rest, and
+      // must not keep the key alive forever — the pin is recoverable by hand,
+      // an un-migratable key is a permanent replay on every open.
+      console.warn(`[${EXT_NAME}] pin migration skipped ${type}/${p.subfolder}`, e);
+    }
+  }
+  try {
+    localStorage.removeItem(PINS_STORAGE_KEY);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -350,12 +393,12 @@ export function openImageBrowser(): ModalShellController {
   // ---- Toolbar: tabs + breadcrumbs + sort + refresh --------------
   const tabsEl = document.createElement("div");
   tabsEl.className = "ib-tabs";
-  for (const t of ["input", "output", "temp", "path"] as BrowseType[]) {
+  for (const t of ["input", "output", "temp", "path", "pinned"] as BrowseType[]) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "ib-tab";
     b.dataset.type = t;
-    b.textContent = t === "path" ? "browse…" : t;
+    b.textContent = t === "path" ? "browse…" : t === "pinned" ? "📌 pinned" : t;
     tabsEl.appendChild(b);
   }
 
@@ -415,6 +458,17 @@ export function openImageBrowser(): ModalShellController {
   newFolderEl.title = "New folder";
   newFolderEl.textContent = "📁+";
 
+  // Drop every pin whose file or folder is gone. Shown only in the pinned view,
+  // and only while there is something to prune — there is no watcher (a file
+  // deleted from the other pack, or over ssh, cannot notify this one), so a
+  // stale pin surfaces as a dimmed card and THIS is how it leaves the list.
+  const pruneEl = document.createElement("button");
+  pruneEl.type = "button";
+  pruneEl.className = "ib-control ib-prune";
+  pruneEl.title = "Remove pins whose file or folder no longer exists";
+  pruneEl.textContent = "🧹 Prune missing";
+  pruneEl.style.display = "none";
+
   // Media-type filter — a segmented All / 🖼 Images / 🎬 Videos control on its
   // own full-width toolbar row (.ib-filter is the row, .ib-filter-group the
   // pill; flex-basis:100% on the pill itself would stretch its border across
@@ -453,6 +507,7 @@ export function openImageBrowser(): ModalShellController {
     selectToggleEl,
     pinToggleEl,
     newFolderEl,
+    pruneEl,
     sortEl,
     refreshEl,
     filterEl,
@@ -649,6 +704,7 @@ export function openImageBrowser(): ModalShellController {
   selBar.className = "ib-selbar";
   selBar.innerHTML = `
     <span class="ib-selbar-count"></span>
+    <button type="button" class="ib-selbar-btn" data-selbar="pin">📌 Pin</button>
     <button type="button" class="ib-selbar-btn" data-selbar="move">⇄ Move…</button>
     <button type="button" class="ib-selbar-btn ib-selbar-danger" data-selbar="delete">🗑 Delete</button>
     <button type="button" class="ib-selbar-btn" data-selbar="clear">✕</button>`;
@@ -693,10 +749,66 @@ export function openImageBrowser(): ModalShellController {
   // move, rating, selection key) routes through this so both views share one
   // code path.
   function fileSub(f: ListingFile): string {
+    // A pinned card carries its own absolute-within-the-root subfolder; there is
+    // no "requested subfolder" for it to be relative to (see api.ts's pinSub).
+    if (f.pinSub !== undefined) return f.pinSub;
     const sp = f.subpath || "";
     if (!sp) return state.subfolder;
     const base = state.subfolder.replace(/\/+$/, "");
     return base ? `${base}/${sp}` : sp;
+  }
+
+  // Sibling of fileSub(). In folder/flat view every card lives under state.type;
+  // in the pinned view each card carries its own root, because pins span roots.
+  // Every per-file address (thumbnail, open, delete, rename, move, rating,
+  // selection key, pin) pairs this with fileSub() — pairing fileSub() with the
+  // bare state.type would address the pinned file's name under the WRONG root.
+  function fileType(f: ListingFile): BrowseType {
+    return f.pinType ?? state.type;
+  }
+
+  // Per-card write gate — the mirror of the backend's sandbox, evaluated for the
+  // CARD rather than the location. This is what keeps rename/move/delete/stars/
+  // ✓ alive in the pinned view, where the LOCATION type ("pinned") is not a
+  // sandboxed root but every card's own type is.
+  function canWriteFile(f: ListingFile): boolean {
+    return SANDBOXED_TYPES.includes(fileType(f));
+  }
+
+  function isPinnedView(): boolean {
+    return state.type === "pinned";
+  }
+
+  // Location-level selection gate. Selection is meaningful wherever the cards
+  // are writable — the sandboxed tabs and the pinned view — and never on
+  // browse…/path. The per-card guards below are the ones that decide what a
+  // given tap may actually select.
+  function canSelectHere(): boolean {
+    return SANDBOXED_TYPES.includes(state.type) || isPinnedView();
+  }
+
+  // The pin that addresses this card's file.
+  function filePinItem(f: ListingFile): PinItem {
+    return { kind: "file", type: fileType(f), subfolder: fileSub(f), name: f.name };
+  }
+
+  // Project a cached PinEntry back to the four keys the store owns. A PinEntry
+  // also carries the RESOLVED fields (exists, mtime, size, …), and the store
+  // preserves unknown keys verbatim by design — so posting an entry back
+  // unprojected would persist a stale stat block into the shared file.
+  function pinItemOf(p: PinItem): PinItem {
+    return p.kind === "file"
+      ? { kind: "file", type: p.type, subfolder: p.subfolder, name: p.name }
+      : { kind: "dir", type: p.type, subfolder: p.subfolder };
+  }
+
+  // Every pin addressing a folder, or anything inside it. Used when this pack
+  // deletes or moves a directory: those pins are dead addresses the moment the
+  // folder goes, whether they are the folder itself or files under it.
+  function pinsUnder(type: BrowseType, sub: string): PinItem[] {
+    return pinEntries
+      .filter((p) => p.type === type && (p.subfolder === sub || p.subfolder.startsWith(`${sub}/`)))
+      .map(pinItemOf);
   }
 
   // Key for the CURRENT location's scroll-memory slot. Distinct namespaces
@@ -829,25 +941,17 @@ export function openImageBrowser(): ModalShellController {
     loadAndRender();
   });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
-  pinToggleEl.addEventListener("click", () => {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
-    const cur: Pin = { type: state.type, subfolder: state.subfolder };
-    const pins = loadPins();
-    const next = pins.filter((p) => pinKey(p) !== pinKey(cur));
-    if (next.length === pins.length) next.push(cur);
-    savePins(next);
-    renderPins();
-  });
+  pinToggleEl.addEventListener("click", () => void toggleFolderPinHere());
+  pruneEl.addEventListener("click", () => void onPruneMissing());
   pinsEl.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
     const chip = t.closest("[data-pin-type]") as HTMLElement | null;
     if (!chip) return;
     const type = chip.dataset.pinType as BrowseType;
     if (!SANDBOXED_TYPES.includes(type)) return;
-    const pin: Pin = { type, subfolder: chip.dataset.pinSub || "" };
+    const pin: PinItem = { kind: "dir", type, subfolder: chip.dataset.pinSub || "" };
     if (t.closest(".ib-pin-x")) {
-      savePins(loadPins().filter((p) => pinKey(p) !== pinKey(pin)));
-      renderPins();
+      void unpinFolder(pin);
       return;
     }
     if (pin.type === state.type && pin.subfolder === state.subfolder) return;
@@ -862,6 +966,7 @@ export function openImageBrowser(): ModalShellController {
     const action = b.dataset.selbar;
     if (action === "move") void doMoveSelected();
     else if (action === "delete") void doDelete();
+    else if (action === "pin") void doPinSelected();
     else if (action === "clear") {
       setSelectMode(false);
       clearSelection();
@@ -924,6 +1029,11 @@ export function openImageBrowser(): ModalShellController {
       rememberScroll();
       state.viewMode = "folder";
       saveView("folder");
+      // In the pinned view the label carries the card's own ROOT as well, since
+      // pins span roots; in flat view it is always the current root, and the
+      // attribute is absent.
+      const t = subEl.dataset.pinType as BrowseType | undefined;
+      if (t && SANDBOXED_TYPES.includes(t)) state.type = t;
       state.subfolder = subEl.dataset.sub || "";
       loadAndRender();
       return;
@@ -940,9 +1050,10 @@ export function openImageBrowser(): ModalShellController {
     if (star) {
       e.stopPropagation();
       const row = star.closest(".ib-stars") as HTMLElement | null;
-      // Interactive stars only render for the sandboxed roots (canWrite);
-      // the defensive gate keeps a stale DOM from posting a path write.
-      if (!row || !SANDBOXED_TYPES.includes(state.type)) return;
+      // Interactive stars only render for a card whose OWN root is sandboxed
+      // (canWriteFile); the defensive gate keeps a stale DOM from posting a
+      // path write.
+      if (!row || !canWriteFile(f)) return;
       const cur = Number(row.dataset.rating || "0");
       setStarRating(f, row, nextRating(cur, Number(star.dataset.val)));
       return;
@@ -956,10 +1067,11 @@ export function openImageBrowser(): ModalShellController {
       else if (action === "delete") onDelete(f);
       else if (action === "rename") onRename(f);
       else if (action === "move") onMove(f);
+      else if (action === "pin") void toggleFilePin(f);
       return;
     }
     // In select mode a card tap toggles selection instead of opening.
-    if (selectMode && SANDBOXED_TYPES.includes(state.type)) {
+    if (selectMode && canWriteFile(f)) {
       toggleSelectionAt(idx);
       return;
     }
@@ -984,7 +1096,7 @@ export function openImageBrowser(): ModalShellController {
     // A suppress flag can go stale when its gesture never produces a click
     // (long-press followed by a scroll) — a new gesture always starts clean.
     suppressClick = false;
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    if (!canSelectHere()) return;
     // Secondary mouse buttons never select — and must not arm the long-press,
     // or the contextmenu guard below would eat desktop right-click.
     if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -1077,7 +1189,7 @@ export function openImageBrowser(): ModalShellController {
     applyStars(row, next);
     f.rating = next;
     const addr: RatingAddress = {
-      type: state.type,
+      type: fileType(f),
       subfolder: fileSub(f),
       absDir: state.absPath,
       name: f.name,
@@ -1097,7 +1209,7 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function openFull(f: ListingFile): void {
-    const url = fullSrcURL(state.type, fileSub(f), f.name, state.absPath);
+    const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
 
@@ -1165,8 +1277,9 @@ export function openImageBrowser(): ModalShellController {
   // see is the wrong end state.
   async function loadWorkflow(f: ListingFile): Promise<void> {
     const sub = fileSub(f);
+    const type = fileType(f);
     try {
-      const meta = await fetchMetadata(state.type, sub, f.name, state.absPath);
+      const meta = await fetchMetadata(type, sub, f.name, state.absPath);
       const graphJSON = embeddedWorkflowJSON(meta);
       if (!graphJSON) {
         notify({
@@ -1204,7 +1317,7 @@ export function openImageBrowser(): ModalShellController {
         await app.handleFile(file);
         return;
       }
-      const res = await fetch(fullSrcURL(state.type, sub, f.name, state.absPath));
+      const res = await fetch(fullSrcURL(type, sub, f.name, state.absPath));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       // handleFile keys the workflow's tab name off file.name, so pass the real
@@ -1251,7 +1364,7 @@ export function openImageBrowser(): ModalShellController {
 
     let data: ImageMetadata;
     try {
-      data = await fetchMetadata(state.type, fileSub(f), f.name, state.absPath);
+      data = await fetchMetadata(fileType(f), fileSub(f), f.name, state.absPath);
     } catch (e) {
       // Close FIRST, then report: the copyable error toast must not land on an
       // open overlay (same toast-over-dialog constraint as copyInto above).
@@ -1341,8 +1454,14 @@ export function openImageBrowser(): ModalShellController {
       danger: true,
     });
     if (!ok) return;
+    const pin = filePinItem(f);
     try {
-      await deleteFile(state.type, fileSub(f), f.name);
+      await deleteFile(fileType(f), fileSub(f), f.name);
+      // The file is gone, so its pin is a dead address — drop it in the SAME
+      // handler rather than leaving it for the user to prune. (Out-of-band
+      // deletions, from the other pack or over ssh, still fall to dimmed +
+      // prune: there is no watcher and we are not adding one.)
+      await followPins([{ from: pin, to: null }]);
       state.files = state.files.filter((x) => x !== f);
       renderGrid();
     } catch (e) {
@@ -1368,8 +1487,12 @@ export function openImageBrowser(): ModalShellController {
       },
     });
     if (!newName || newName === name) return;
+    const from = filePinItem(f);
     try {
-      await renameFile(state.type, fileSub(f), name, newName);
+      await renameFile(fileType(f), fileSub(f), name, newName);
+      // A pin addresses a file BY NAME, so a rename must carry the pin with it
+      // or the user's pin silently becomes a dangling one.
+      await followPins([{ from, to: { ...from, name: newName } }]);
       f.name = newName;
       renderGrid();
     } catch (e) {
@@ -1379,13 +1502,18 @@ export function openImageBrowser(): ModalShellController {
 
   async function onMove(f: ListingFile): Promise<void> {
     const dest = await pickDestination(modal, {
-      type: state.type,
+      type: fileType(f),
       subfolder: fileSub(f),
     });
     if (!dest) return;
+    const from = filePinItem(f);
     try {
-      await moveFile(state.type, fileSub(f), f.name, dest.type, dest.subfolder);
+      await moveFile(fileType(f), fileSub(f), f.name, dest.type, dest.subfolder);
       saveDest(dest);
+      // Same reasoning as rename: the pin's address changed, so re-point it.
+      await followPins([
+        { from, to: { kind: "file", type: dest.type, subfolder: dest.subfolder, name: f.name } },
+      ]);
       state.files = state.files.filter((x) => x !== f);
       renderGrid();
       notify({
@@ -1398,6 +1526,163 @@ export function openImageBrowser(): ModalShellController {
     }
   }
 
+  // ---- Pins ------------------------------------------------------
+  //
+  // Every mutation here is ONE delta whose response is the whole list, so each
+  // helper refreshes the module cache from what came back rather than patching
+  // it locally — a local patch would diverge the moment the other pack (or the
+  // other device) touched the same store between two of our calls.
+
+  /**
+   * Repaint the per-card 📌 state IN PLACE.
+   *
+   * Deliberately not a renderGrid(): a re-render captures and then re-asserts a
+   * scroll offset for ~200 ms (see the scroll-restore block), so running one at
+   * an unpredictable moment — e.g. when the initial pin fetch happens to land
+   * mid-restore — would collapse an in-flight restore onto whatever the
+   * scroller had reached. Only the buttons can have changed, so only the
+   * buttons are touched.
+   */
+  function refreshPinButtons(): void {
+    for (const [i, c] of fileCards().entries()) {
+      const f = renderedFiles[i];
+      const btn = c.querySelector<HTMLElement>('[data-action="pin"]');
+      if (!f || !btn) continue;
+      const on = isPinned(filePinItem(f));
+      btn.classList.toggle("is-pinned", on);
+      btn.title = on ? "Unpin this file" : "Pin this file";
+    }
+  }
+
+  /** Repaint whatever the current view shows pins through. */
+  async function refreshPinnedUI(): Promise<void> {
+    if (isPinnedView()) {
+      // The pinned view IS the pin list — re-list it (which re-resolves every
+      // entry's `exists` and stats) rather than trying to splice a card out.
+      await loadAndRender({ preserveScroll: true });
+      return;
+    }
+    renderPins();
+    refreshPinButtons();
+  }
+
+  async function toggleFolderPinHere(): Promise<void> {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const item: PinItem = { kind: "dir", type: state.type, subfolder: state.subfolder };
+    const pinned = isPinned(item);
+    try {
+      setPinCache((await postPinDelta(pinned ? "remove" : "add", item)).pins);
+      renderPins();
+    } catch (e) {
+      // Surfaces the backend's own refusal verbatim — notably
+      // "pin limit reached (max 200)", which must never be a silent no-op.
+      reportError(pinned ? "Unpin failed" : "Pin failed", e);
+    }
+  }
+
+  async function unpinFolder(item: PinItem): Promise<void> {
+    try {
+      setPinCache((await postPinDelta("remove", item)).pins);
+      renderPins();
+    } catch (e) {
+      reportError("Unpin failed", e);
+    }
+  }
+
+  async function toggleFilePin(f: ListingFile): Promise<void> {
+    // Pins address sandboxed roots only — the same perimeter as every write —
+    // so a browse…/path card has no 📌 and this defends a stale DOM.
+    if (!canWriteFile(f)) return;
+    const item = filePinItem(f);
+    const pinned = isPinned(item);
+    try {
+      setPinCache((await postPinDelta(pinned ? "remove" : "add", item)).pins);
+      await refreshPinnedUI();
+    } catch (e) {
+      reportError(pinned ? "Unpin failed" : "Pin failed", e);
+    }
+  }
+
+  async function doPinSelected(): Promise<void> {
+    const items = collectSelectedOrFocused();
+    if (items.length === 0) return;
+    let added = 0;
+    // Deduped: once the store is full EVERY remaining add fails with the same
+    // sentence, and N copies of it in one toast is noise, not information.
+    const failures = new Set<string>();
+    // Sequential, not Promise.all: each delta is a read-modify-write of one
+    // shared file, and the response of each is the list the next one's result
+    // must be read against.
+    for (const it of items) {
+      try {
+        const res = await postPinDelta("add", {
+          kind: "file",
+          type: it.type,
+          subfolder: it.subfolder,
+          name: it.name,
+        });
+        setPinCache(res.pins);
+        added++;
+      } catch (e) {
+        failures.add(e instanceof Error ? e.message : String(e));
+      }
+    }
+    await refreshPinnedUI();
+    if (failures.size > 0) {
+      reportError(
+        `Pinned ${added}, ${items.length - added} failed`,
+        new Error(Array.from(failures).join("; ")),
+      );
+      return;
+    }
+    notify({ severity: "success", summary: "Pinned", detail: `${added} file(s)` });
+  }
+
+  async function onPruneMissing(): Promise<void> {
+    const before = pinEntries.length;
+    try {
+      const res = await postPinDelta("prune");
+      const removed = before - res.pins.length;
+      setPinCache(res.pins);
+      await refreshPinnedUI();
+      notify({
+        severity: "success",
+        summary: "Pins pruned",
+        detail: `${removed} missing pin(s) removed`,
+      });
+    } catch (e) {
+      reportError("Prune failed", e);
+    }
+  }
+
+  /**
+   * Carry pins across a mutation this pack just performed.
+   *
+   * `to: null` drops the pin (a delete); otherwise the pin is removed at its old
+   * address and re-added at the new one. Entries that were never pinned cost
+   * nothing — the check is against the local key set, not a request.
+   *
+   * This covers ONLY changes made through this pack. A file moved from the
+   * sibling pack, or renamed over ssh, cannot notify us: there is no watcher and
+   * we are deliberately not adding one. Those pins go stale, render dimmed, and
+   * leave via "Prune missing".
+   */
+  async function followPins(changes: { from: PinItem; to: PinItem | null }[]): Promise<void> {
+    const live = changes.filter((c) => isPinned(c.from));
+    if (live.length === 0) return;
+    try {
+      for (const c of live) {
+        setPinCache((await postPinDelta("remove", c.from)).pins);
+        if (c.to) setPinCache((await postPinDelta("add", c.to)).pins);
+      }
+      renderPins();
+    } catch (e) {
+      // The mutation itself already succeeded; say so plainly rather than
+      // letting the caller's catch report the file operation as failed.
+      reportError("Pin list not updated for this change", e);
+    }
+  }
+
   // ---- Render ----------------------------------------------------
   function renderTabs(): void {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
@@ -1406,8 +1691,14 @@ export function openImageBrowser(): ModalShellController {
     // The browse…/path tab is read-only — no selection to toggle and no folder
     // to create there (both are sandboxed writes). Flat view is likewise
     // sandboxed-only, so its toggle hides there too.
+    //
+    // The pinned view is neither: it is not a directory, so ≣ (fold this
+    // subtree), 📁+ (create here) and 📌 (pin this folder) have nothing to
+    // operate on and stay hidden — but its cards ARE writable, so multi-select
+    // stays. That split is why the location-level flag below is not the same
+    // predicate as the per-card canWriteFile().
     const canWrite = SANDBOXED_TYPES.includes(state.type);
-    selectToggleEl.style.display = canWrite ? "" : "none";
+    selectToggleEl.style.display = canSelectHere() ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
     viewToggleEl.style.display = canWrite ? "" : "none";
     viewToggleEl.classList.toggle("is-active", isFlat());
@@ -1420,13 +1711,19 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function renderPins(): void {
-    const pins = loadPins();
+    const pins = folderPins();
     const canPin = SANDBOXED_TYPES.includes(state.type);
     pinToggleEl.style.display = canPin ? "" : "none";
     const herePinned =
-      canPin && pins.some((p) => p.type === state.type && p.subfolder === state.subfolder);
+      canPin && isPinned({ kind: "dir", type: state.type, subfolder: state.subfolder });
     pinToggleEl.classList.toggle("is-active", herePinned);
     pinToggleEl.title = herePinned ? "Unpin this folder" : "Pin this folder";
+    // Prune is offered only where it means something AND only while there is
+    // something to prune — an always-on button that usually removes nothing
+    // reads as broken. Set here rather than in renderTabs because the answer
+    // depends on the pin list, which lands after renderTabs has already run.
+    pruneEl.style.display =
+      isPinnedView() && pinEntries.some((p) => p.exists === false) ? "" : "none";
     pinsEl.innerHTML = "";
     pinsEl.style.display = pins.length ? "" : "none";
     for (const p of pins) {
@@ -1492,29 +1789,46 @@ export function openImageBrowser(): ModalShellController {
     // got there (a tab the render killed) leaves it set.
     markFlatPending(isFlat());
     try {
-      const data = await fetchListing({
-        type: state.type,
-        subfolder: state.subfolder,
-        path: state.absPath,
-        recursive: isFlat(),
-        kind: state.typeFilter,
-      });
-      state.dirs = data.dirs || [];
-      state.files = data.files || [];
-      modal.setStatus(data.exists ? "" : "Directory not found.");
-      if (data.truncated) {
-        notify({
-          severity: "warn",
-          summary: `Showing the newest ${state.files.length}`,
-          detail:
-            "This folder's subtree has more files than the flat view returns; older ones are not listed.",
+      if (isPinnedView()) {
+        // The pinned view is not a directory: its grid comes from /pins, and
+        // every card carries its own root (fileType) and subfolder (fileSub).
+        // Everything downstream — renderGrid, ratings, ⓘ/⤓, multi-select, the
+        // write buttons — then works unmodified.
+        const res = await fetchPins();
+        setPinCache(res.pins);
+        state.dirs = [];
+        // Narrowed CLIENT-side, and only here. The reasoning in api.ts's
+        // ListParams.kind — filter on the server, above the cap — does not
+        // apply: /pins has no cap to spend (the store itself is capped at 200
+        // and is always returned whole), so narrowing the response cannot
+        // under-report the way filtering an already-truncated listing would.
+        state.files = narrowByKind(pinsToFiles(res.pins), state.typeFilter);
+        modal.setStatus(res.pins.length ? "" : "Nothing pinned yet.");
+      } else {
+        const data = await fetchListing({
+          type: state.type,
+          subfolder: state.subfolder,
+          path: state.absPath,
+          recursive: isFlat(),
+          kind: state.typeFilter,
         });
+        state.dirs = data.dirs || [];
+        state.files = data.files || [];
+        modal.setStatus(data.exists ? "" : "Directory not found.");
+        if (data.truncated) {
+          notify({
+            severity: "warn",
+            summary: `Showing the newest ${state.files.length}`,
+            detail:
+              "This folder's subtree has more files than the flat view returns; older ones are not listed.",
+          });
+        }
       }
     } catch (e) {
       // Surface via the copyable notify() popup (reportError) in addition to
       // the inline status text — a list-load failure was previously
       // console-only from the user's perspective.
-      reportError("Failed to load directory", e);
+      reportError(isPinnedView() ? "Failed to load pins" : "Failed to load directory", e);
       modal.setStatus(`Error: ${(e as Error).message}`);
       state.dirs = [];
       state.files = [];
@@ -1541,19 +1855,32 @@ export function openImageBrowser(): ModalShellController {
     markFlatPending(false);
   }
 
+  // Client-side media narrowing for the pinned view only — see the comment at
+  // its call site in loadAndRender for why filtering the response is correct
+  // there and wrong for /list.
+  function narrowByKind(files: ListingFile[], filter: TypeFilter): ListingFile[] {
+    if (filter === "all") return files;
+    const want = filter === "images" ? IMG_EXTS : VIDEO_EXTS;
+    return files.filter((f) => want.has((f.ext || "").toLowerCase()));
+  }
+
   function thumbForFile(f: ListingFile): ThumbDescriptor {
+    // A pin whose file is gone has nothing to fetch — a thumbnail request for it
+    // would 404 per card. Say so instead.
+    if (f.pinExists === false) return { kind: "icon", text: "⚠" };
     const ext = (f.ext || "").toLowerCase();
     const sub = fileSub(f);
+    const type = fileType(f);
     if (IMG_EXTS.has(ext)) {
       return {
         kind: "img",
-        src: imageThumbURL(state.type, sub, f.name, state.absPath, thumbVersion(f.mtime, f.size)),
+        src: imageThumbURL(type, sub, f.name, state.absPath, thumbVersion(f.mtime, f.size)),
       };
     }
     if (VIDEO_EXTS.has(ext)) {
       return {
         kind: "video",
-        src: videoSrcURL(state.type, sub, f.name, state.absPath),
+        src: videoSrcURL(type, sub, f.name, state.absPath),
       };
     }
     return { kind: "icon", text: "📄" };
@@ -1568,10 +1895,17 @@ export function openImageBrowser(): ModalShellController {
     // remembered offset, or 0 for a new search/sort) — see loadAndRender.
     const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
     gridEl.innerHTML = "";
+    // LOCATION-level write flag — it governs the ".." / folder cards, which
+    // belong to the directory being shown. Per-CARD controls must NOT use it:
+    // in the pinned view state.type is "pinned" (not a sandboxed root) while
+    // every card's own root is, so using this for the card buttons would ship a
+    // pinned grid with no rename/move/delete/stars/✓ at all. Cards use
+    // canWriteFile(f).
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     // Flat view collapses the subtree into files only — no ".." card and no
     // folder cards (the backend returns dirs:[] recursively anyway).
     const flat = isFlat();
+    const pinnedView = isPinnedView();
 
     const showUp = !flat && canGoUp();
     if (showUp) {
@@ -1626,9 +1960,16 @@ export function openImageBrowser(): ModalShellController {
       if (!f) continue;
       const c = document.createElement("div");
       c.className = "ib-card is-file";
+      // Per-card write gate — the card's OWN root, not the location's.
+      const canWriteThis = canWriteFile(f);
+      // A pin whose target is gone. Dimmed and stripped back to its unpin
+      // affordance: every other control would address a file that isn't there.
+      const missing = f.pinExists === false;
       // Flat cards carry a subpath row above the thumb — the marker lets CSS
-      // drop the selection checkbox below it so the two don't overlap.
-      if (flat) c.classList.add("is-flat");
+      // drop the selection checkbox below it so the two don't overlap. Pinned
+      // cards carry the same row (their full address), so they share the class.
+      if (flat || pinnedView) c.classList.add("is-flat");
+      if (missing) c.classList.add("is-missing");
       if (fi === focusIndex) c.classList.add("is-focused");
       if (isSelected(f)) c.classList.add("is-selected");
       c.dataset.name = f.name;
@@ -1664,17 +2005,25 @@ export function openImageBrowser(): ModalShellController {
         ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>`
         : "";
       // Move is only offered for the sandboxed roots (backend rejects path writes).
-      const moveBtn = canWrite
+      const moveBtn = canWriteThis
         ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>`
         : "";
-      const writeBtns = canWrite
+      const writeBtns = canWriteThis
         ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
            ${moveBtn}
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">🗑</button>`
         : "";
+      // Pin/unpin this file. Same perimeter as the writes — a pin addresses a
+      // sandboxed root only — so the browse…/path tab gets none, and the state
+      // is read SYNCHRONOUSLY off the module cache (a GET per card is not an
+      // option). Filled while pinned.
+      const isFilePinned = canWriteThis && isPinned(filePinItem(f));
+      const pinBtn = canWriteThis
+        ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">📌</button>`
+        : "";
       // Rating writes are sandboxed like the other mutations, so path mode
       // gets a read-only star display (when rated) instead of dead buttons.
-      const starsRow = canWrite
+      const starsRow = canWriteThis
         ? starsHTML("ib", ratingOf(f))
         : ratingOf(f)
           ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>`
@@ -1682,18 +2031,32 @@ export function openImageBrowser(): ModalShellController {
       // The selection checkbox is the touch affordance for multi-select: it
       // has touch-action:none, so a drag starting on it sweeps a range
       // instead of scrolling. Only where writes are allowed.
-      const checkBtn = canWrite
+      const checkBtn = canWriteThis
         ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>`
         : "";
       // Flat view: show the file's folder above the thumbnail. It's a button —
       // tapping it drops back to folder view at that directory. Top-level files
       // (subpath "") get a muted "/" so the row height stays consistent.
-      const subLabel = flat
-        ? f.subpath
-          ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
-          : `<div class="ib-subpath is-root" title="Top level">/</div>`
-        : "";
-      c.innerHTML = `
+      //
+      // The pinned view reuses the same row for the FULL address (root
+      // included), because pins span roots and a bare subfolder would not say
+      // which one — so its label also carries data-pin-type, and tapping it
+      // switches root as well as folder.
+      const subLabel = pinnedView
+        ? `<button type="button" class="ib-subpath" data-pin-type="${escHTML(fileType(f))}" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(pinLabel(filePinItem(f)))}">${escHTML(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>`
+        : flat
+          ? f.subpath
+            ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${escHTML(f.subpath)}</button>`
+            : `<div class="ib-subpath is-root" title="Top level">/</div>`
+          : "";
+      c.innerHTML = missing
+        ? `
+        ${subLabel}
+        <div class="ib-thumb">${thumbInner}</div>
+        <div class="ib-name" title="${escHTML(f.name)}">${escHTML(f.name)}</div>
+        <div class="ib-meta">missing</div>
+        <div class="ib-actions">${pinBtn}</div>`
+        : `
         ${subLabel}
         ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
@@ -1704,6 +2067,7 @@ export function openImageBrowser(): ModalShellController {
           <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
           ${metaBtn}
           ${wfBtn}
+          ${pinBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -1713,7 +2077,9 @@ export function openImageBrowser(): ModalShellController {
     if (!visible && !state.dirs.length && !showUp) {
       const el = document.createElement("div");
       el.className = "ib-empty";
-      el.textContent = "No matching files in this folder.";
+      el.textContent = pinnedView
+        ? "No pinned files. Tap 📌 on a card to add one."
+        : "No matching files in this folder.";
       gridEl.appendChild(el);
     }
 
@@ -1767,8 +2133,10 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function isSelected(f: ListingFile): boolean {
-    if (state.type === "path") return false;
-    return selected.has(selectionKey(state.type, fileSub(f), f.name));
+    // Keyed on the CARD's root, so a pinned card and the same file seen in its
+    // own folder are one selection, not two.
+    if (!canWriteFile(f)) return false;
+    return selected.has(selectionKey(fileType(f), fileSub(f), f.name));
   }
 
   function fileCards(): HTMLElement[] {
@@ -1846,61 +2214,64 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function setSelectMode(on: boolean): void {
-    if (on && !SANDBOXED_TYPES.includes(state.type)) return;
+    if (on && !canSelectHere()) return;
     selectMode = on;
     selectToggleEl.classList.toggle("is-active", on);
     modal.dialog.classList.toggle("is-selecting", on);
   }
 
-  function toggleSelectionAt(i: number): void {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
-    const f = renderedFiles[i];
-    if (!f) return;
+  // The four selectors below take their guard AND their key from the CARD, not
+  // from the location: in the pinned view one grid holds cards from several
+  // roots, so a location-level `state.type` guard would refuse the whole view
+  // and a location-level key would file every card under "pinned:".
+  function selectFile(f: ListingFile): void {
     const sub = fileSub(f);
-    const key = selectionKey(state.type, sub, f.name);
+    selected.set(selectionKey(fileType(f), sub, f.name), {
+      file: f,
+      type: fileType(f),
+      subfolder: sub,
+    });
+  }
+
+  function toggleSelectionAt(i: number): void {
+    const f = renderedFiles[i];
+    if (!f || !canWriteFile(f)) return;
+    const key = selectionKey(fileType(f), fileSub(f), f.name);
     if (selected.has(key)) selected.delete(key);
-    else selected.set(key, { file: f, type: state.type, subfolder: sub });
+    else selectFile(f);
     refreshSelectionClasses();
     updateSelectedCount();
   }
 
   function setSelectedRange(a: number, b: number, on: boolean): void {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
     const lo = Math.min(a, b);
     const hi = Math.max(a, b);
     for (let i = lo; i <= hi; i++) {
       const f = renderedFiles[i];
-      if (!f) continue;
-      const sub = fileSub(f);
-      const key = selectionKey(state.type, sub, f.name);
-      if (on) selected.set(key, { file: f, type: state.type, subfolder: sub });
-      else selected.delete(key);
+      if (!f || !canWriteFile(f)) continue;
+      if (on) selectFile(f);
+      else selected.delete(selectionKey(fileType(f), fileSub(f), f.name));
     }
     refreshSelectionClasses();
     updateSelectedCount();
   }
 
   function extendSelectionTo(i: number): void {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
     const lo = Math.min(visualAnchor, i);
     const hi = Math.max(visualAnchor, i);
     for (let k = lo; k <= hi; k++) {
       const f = renderedFiles[k];
-      if (!f) continue;
-      const sub = fileSub(f);
-      const key = selectionKey(state.type, sub, f.name);
-      if (!selected.has(key)) selected.set(key, { file: f, type: state.type, subfolder: sub });
+      if (!f || !canWriteFile(f)) continue;
+      selectFile(f);
     }
     refreshSelectionClasses();
     updateSelectedCount();
   }
 
   function selectAllVisible(): void {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
     for (const f of renderedFiles) {
-      const sub = fileSub(f);
-      const key = selectionKey(state.type, sub, f.name);
-      if (!selected.has(key)) selected.set(key, { file: f, type: state.type, subfolder: sub });
+      if (!canWriteFile(f)) continue;
+      selectFile(f);
     }
     refreshSelectionClasses();
     updateSelectedCount();
@@ -1913,7 +2284,7 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function toggleVisualMode(): void {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    if (!canSelectHere()) return;
     if (renderedFiles.length === 0) return;
     visualMode = !visualMode;
     if (visualMode) {
@@ -1933,8 +2304,8 @@ export function openImageBrowser(): ModalShellController {
       }));
     }
     const f = renderedFiles[focusIndex];
-    if (!f || state.type === "path") return [];
-    return [{ type: state.type, subfolder: fileSub(f), name: f.name }];
+    if (!f || !canWriteFile(f)) return [];
+    return [{ type: fileType(f), subfolder: fileSub(f), name: f.name }];
   }
 
   function setPending(op: "d" | "y" | "g"): void {
@@ -1975,21 +2346,31 @@ export function openImageBrowser(): ModalShellController {
     try {
       const result = await deleteMany(items);
       const errored = new Set((result.errors ?? []).map((e) => e.name));
-      // items span all folders (selection persists across tabs, and flat view
-      // shows many at once); state.files is only what's on screen — so scope the
-      // view removal by full selection key (type+subfolder+name), not bare name,
-      // so a same-named file in another folder is never removed by mistake.
+      // items span all folders AND (in the pinned view) all roots — selection
+      // persists across tabs, and flat/pinned views show many at once; state.files
+      // is only what's on screen. So scope the view removal by full selection key
+      // (type+subfolder+name), never by bare name, and read the on-screen card's
+      // key through fileType/fileSub so a pinned card matches its own root.
       const succeeded = new Set(
         items
-          .filter((it) => it.type === state.type && !errored.has(it.name))
+          .filter((it) => !errored.has(it.name))
           .map((it) => selectionKey(it.type, it.subfolder, it.name)),
       );
       state.files = state.files.filter(
-        (f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)),
+        (f) => !succeeded.has(selectionKey(fileType(f), fileSub(f), f.name)),
       );
       for (const it of items) {
         if (!errored.has(it.name)) selected.delete(selectionKey(it.type, it.subfolder, it.name));
       }
+      // Deleted files' pins are dead addresses — drop them in this handler.
+      await followPins(
+        items
+          .filter((it) => !errored.has(it.name))
+          .map((it) => ({
+            from: { kind: "file" as const, type: it.type, subfolder: it.subfolder, name: it.name },
+            to: null,
+          })),
+      );
       updateSelectedCount();
       renderGrid();
       if (result.errors && result.errors.length > 0) {
@@ -2020,19 +2401,39 @@ export function openImageBrowser(): ModalShellController {
       }
       updateSelectedCount();
       if (result.moved > 0) saveDest(dest);
-      if (isFlat() || (dest.type === state.type && dest.subfolder === state.subfolder)) {
+      // Moved files keep their pins, at the new address.
+      await followPins(
+        items
+          .filter((it) => !errored.has(it.name))
+          .map((it) => ({
+            from: { kind: "file" as const, type: it.type, subfolder: it.subfolder, name: it.name },
+            to: {
+              kind: "file" as const,
+              type: dest.type,
+              subfolder: dest.subfolder,
+              name: it.name,
+            },
+          })),
+      );
+      if (
+        isFlat() ||
+        isPinnedView() ||
+        (dest.type === state.type && dest.subfolder === state.subfolder)
+      ) {
         // Flat view spans the whole subtree (a moved file may still be in view),
-        // and in folder view files may have arrived INTO the current folder —
-        // either way the surgical removal below can't be trusted, so re-list.
+        // in folder view files may have arrived INTO the current folder, and the
+        // pinned view's cards are the pin list itself (whose addresses just
+        // changed) — either way the surgical removal below can't be trusted, so
+        // re-list.
         await loadAndRender({ preserveScroll: true });
       } else {
         const succeeded = new Set(
           items
-            .filter((it) => it.type === state.type && !errored.has(it.name))
+            .filter((it) => !errored.has(it.name))
             .map((it) => selectionKey(it.type, it.subfolder, it.name)),
         );
         state.files = state.files.filter(
-          (f) => !succeeded.has(selectionKey(state.type, fileSub(f), f.name)),
+          (f) => !succeeded.has(selectionKey(fileType(f), fileSub(f), f.name)),
         );
         renderGrid();
       }
@@ -2108,14 +2509,9 @@ export function openImageBrowser(): ModalShellController {
       }
       state.dirs = state.dirs.filter((d) => d.name !== name);
       // A pin at (or under) the moved folder now points at a dead path — the
-      // folder lives elsewhere. Drop it (same treatment as folder delete).
-      savePins(
-        loadPins().filter(
-          (p) =>
-            p.type !== state.type ||
-            (p.subfolder !== srcSub && !p.subfolder.startsWith(`${srcSub}/`)),
-        ),
-      );
+      // folder lives elsewhere. Drop it (same treatment as folder delete), and
+      // drop the FILE pins inside it for the same reason.
+      await followPins(pinsUnder(state.type, srcSub).map((from) => ({ from, to: null })));
       renderPins();
       renderGrid();
       notify({
@@ -2147,14 +2543,10 @@ export function openImageBrowser(): ModalShellController {
         await removeDir(state.type, state.subfolder, name, true);
       }
       state.dirs = state.dirs.filter((d) => d.name !== name);
-      // A pin pointing at (or under) the deleted folder is now a dead end.
+      // A pin pointing at (or under) the deleted folder is now a dead end —
+      // folder pins and the file pins inside it alike.
       const gone = state.subfolder ? `${state.subfolder}/${name}` : name;
-      savePins(
-        loadPins().filter(
-          (p) =>
-            p.type !== state.type || (p.subfolder !== gone && !p.subfolder.startsWith(`${gone}/`)),
-        ),
-      );
+      await followPins(pinsUnder(state.type, gone).map((from) => ({ from, to: null })));
       renderPins();
       renderGrid();
       notify({
@@ -2168,7 +2560,10 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function doYank(): void {
-    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    // Location-level, not per-file: yank only records self-describing items
+    // (collectSelectedOrFocused already refuses a non-writable card), and the
+    // pinned view's cards are writable.
+    if (!canSelectHere()) return;
     const items = collectSelectedOrFocused();
     if (items.length === 0) return;
     yanked = items;
@@ -2180,6 +2575,8 @@ export function openImageBrowser(): ModalShellController {
   }
 
   async function doPaste(): Promise<void> {
+    // Stays strictly sandboxed: unlike yank, paste's destination IS the current
+    // location, and the pinned view is not a directory to move files into.
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     if (!yanked || yanked.length === 0) {
       notify({ severity: "info", summary: "Nothing to paste", detail: "Yank files first with yy" });
@@ -2187,10 +2584,20 @@ export function openImageBrowser(): ModalShellController {
     }
     try {
       const result = await moveMany(yanked, state.type, state.subfolder);
-      for (const it of yanked) {
-        const errored = result.errors?.some((e) => e.name === it.name);
-        if (!errored) selected.delete(selectionKey(it.type, it.subfolder, it.name));
-      }
+      const landed = yanked.filter((it) => !result.errors?.some((e) => e.name === it.name));
+      for (const it of landed) selected.delete(selectionKey(it.type, it.subfolder, it.name));
+      // Same as the batch move: a pasted (moved) file keeps its pin, re-pointed.
+      await followPins(
+        landed.map((it) => ({
+          from: { kind: "file" as const, type: it.type, subfolder: it.subfolder, name: it.name },
+          to: {
+            kind: "file" as const,
+            type: state.type,
+            subfolder: state.subfolder,
+            name: it.name,
+          },
+        })),
+      );
       yanked = null;
       updateSelectedCount();
       if (result.moved > 0) saveDest({ type: state.type, subfolder: state.subfolder });
@@ -2476,7 +2883,8 @@ export function openImageBrowser(): ModalShellController {
         if (f && META_EXTS.has((f.ext || "").toLowerCase())) void openMetadata(f);
         break;
       case "r":
-        if (SANDBOXED_TYPES.includes(state.type) && f) {
+        // Per-card, like the ✎ button: the focused card's own root decides.
+        if (f && canWriteFile(f)) {
           e.preventDefault();
           e.stopPropagation();
           void onRename(f);
@@ -2484,7 +2892,7 @@ export function openImageBrowser(): ModalShellController {
         break;
       case "m":
         // Moves the selection when one exists, else the focused file.
-        if (selected.size > 0 || (SANDBOXED_TYPES.includes(state.type) && f)) {
+        if (selected.size > 0 || (f && canWriteFile(f))) {
           e.preventDefault();
           e.stopPropagation();
           void doMoveSelected();
@@ -2511,6 +2919,31 @@ export function openImageBrowser(): ModalShellController {
   // — the shell's real close paths bypass controller.close, so wrapping it
   // would leak this listener.
   window.addEventListener("keydown", onWindowKey, true);
+
+  /**
+   * Bring the pin list up before anything renders through it.
+   *
+   * Runs alongside the first loadAndRender rather than blocking it: the grid
+   * must not wait on the pin store, and renderPins() is called again here once
+   * the list lands. Wrapped whole — an unreachable store (or a migration that
+   * cannot finish) must leave a working browser with no pins, never a modal
+   * that fails to open.
+   */
+  async function initPins(): Promise<void> {
+    try {
+      await migrateLocalPins();
+      setPinCache((await fetchPins()).pins);
+      // The browser always opens on a directory tab (output), so the grid itself
+      // never depends on this — only the chip row and the per-card 📌 state do,
+      // and both are repainted without re-rendering (which would fight the
+      // first load's scroll restore; this lands at an unpredictable moment).
+      renderPins();
+      refreshPinButtons();
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] pin list unavailable`, e);
+    }
+  }
+  void initPins();
 
   loadAndRender();
   if (savedView.recovered) {
@@ -2650,8 +3083,11 @@ function pickDestination(
         }
         status.textContent = "";
         // Pinned folders jump the picker straight to a frequent destination —
-        // the current location is omitted (moving here would be a no-op).
-        for (const p of loadPins()) {
+        // the current location is omitted (moving here would be a no-op). Read
+        // from the module-level cache the browser keeps fresh, NOT re-fetched:
+        // this runs on every load() (tab, crumb, descend), and a request per
+        // navigation would be a round-trip in front of every folder tap.
+        for (const p of folderPins()) {
           if (p.type === cur.type && p.subfolder === cur.subfolder) continue;
           if (inExcluded(p.type, p.subfolder)) continue;
           const r = document.createElement("button");
@@ -2925,6 +3361,16 @@ const BROWSER_CSS = `
 }
 .ib-pin-x:hover { background: #5c2a3c; color: #ff9eb0; }
 .ib-move-row.is-pin { color: #9ec6ff; }
+/* Per-card 📌 — filled while the file is pinned, matching the toolbar toggle's
+   active look so "pinned" reads the same in both places. */
+.ib-act-pin.is-pinned { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* A pin whose target is gone. Dimmed rather than hidden: "the file moved" and
+   "you never pinned it" are different facts, so the card stays — with only its
+   unpin affordance — until it is pruned. */
+.ib-card.is-missing { opacity: 0.45; }
+.ib-card.is-missing:hover { border-color: #78384a; transform: none; }
+.ib-card.is-missing .ib-meta { color: #c07a8a; font-style: italic; }
+.ib-prune { white-space: nowrap; }
 /* Folder delete — corner overlay on dir cards (write-gated). */
 .ib-dir-del {
     position: absolute; top: 4px; right: 4px; z-index: 2;

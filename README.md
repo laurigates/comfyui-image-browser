@@ -62,6 +62,28 @@ ComfyUI.
   - **🗑 Delete** — with a confirm step.
   - **✎ Rename** — in place (extension preserved).
   - **⇄ Move** — into another root or subfolder via a destination picker.
+- **📌 Pin** folders *and* individual files. A pinned folder becomes a one-tap
+  chip in the toolbar and a shortcut row in the move picker; pinned files
+  collect on their own **📌 pinned** tab, where each card behaves exactly like
+  any other (thumbnail, stars, ⓘ/⤓, rename/move/delete, multi-select) and is
+  labelled with its full address, because pins span roots.
+
+  The pin list lives **on the server**, in `<user_dir>/comfy-pins.json` — not in
+  the browser. Two consequences worth knowing:
+
+  - It follows you between **devices** and is shared with
+    [`comfyui-gallery-loader`](https://github.com/laurigates/comfyui-gallery-loader):
+    pin six renders on your phone, they are there on the desktop, and in the
+    other pack's picker. A phone and a desktop are two browsers against one
+    ComfyUI, which browser-local storage cannot bridge — that is the whole
+    reason the list moved.
+  - It is therefore **per-install, not per-user**. Anyone else using that
+    ComfyUI sees and can change the same list. There are no accounts here.
+
+  Nothing watches the disk, so a pinned file deleted from elsewhere shows as a
+  dimmed card until you unpin it or hit **🧹 Prune missing**. Up to 200 pins;
+  past that an add is refused out loud rather than silently dropped. Any pins
+  you had before this version are migrated automatically on first open.
 
 ### Star ratings on ComfyUI's own Media Assets sidebar
 
