@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.24](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.23...comfyui-image-browser-v0.1.24) (2026-08-08)
+
+
+### Documentation
+
+* the top-bar button is the shared Touch Tools one, not our own ([#73](https://github.com/laurigates/comfyui-image-browser/issues/73)) ([94b4514](https://github.com/laurigates/comfyui-image-browser/commit/94b4514fcffae75febd4a00811f4997cdaf09d9e))
+
 ## [0.1.23](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.22...comfyui-image-browser-v0.1.23) (2026-08-08)
 
 
