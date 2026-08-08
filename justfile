@@ -51,7 +51,7 @@ test-e2e: build
 
 # Typecheck + build + lint + test in one shot — the local CI gate.
 [group: "quality"]
-check: typecheck build lint test test-e2e check-xmp-drift check-thumb-cache-drift
+check: typecheck build lint test test-e2e check-xmp-drift check-thumb-cache-drift check-pins-store-drift
 
 ##########
 # Vendored code
@@ -62,6 +62,9 @@ xmp-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-lo
 
 # Canonical home of the shared thumbnail-cache module (vendored verbatim here).
 thumb-cache-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/thumb_cache.py"
+
+# Canonical home of the shared pin-store module (vendored verbatim here).
+pins-store-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/pins_store.py"
 
 # Re-sync the vendored xmp_meta.py from its canonical home.
 [group: "vendored"]
@@ -74,6 +77,12 @@ sync-xmp:
 sync-thumb-cache:
     curl -fsSL {{thumb-cache-upstream}} -o thumb_cache.py
     @echo "thumb_cache.py synced from comfyui-gallery-loader@main"
+
+# Re-sync the vendored pins_store.py from its canonical home.
+[group: "vendored"]
+sync-pins-store:
+    curl -fsSL {{pins-store-upstream}} -o pins_store.py
+    @echo "pins_store.py synced from comfyui-gallery-loader@main"
 
 # Fail if the vendored xmp_meta.py has drifted from the canonical copy.
 [group: "vendored"]
@@ -88,6 +97,13 @@ check-thumb-cache-drift:
     @curl -fsSL {{thumb-cache-upstream}} | diff -u - thumb_cache.py \
         && echo "thumb_cache.py matches canonical" \
         || { echo "DRIFT: thumb_cache.py differs from comfyui-gallery-loader@main — run 'just sync-thumb-cache' (or land the fix upstream first)"; exit 1; }
+
+# Fail if the vendored pins_store.py has drifted from the canonical copy.
+[group: "vendored"]
+check-pins-store-drift:
+    @curl -fsSL {{pins-store-upstream}} | diff -u - pins_store.py \
+        && echo "pins_store.py matches canonical" \
+        || { echo "DRIFT: pins_store.py differs from comfyui-gallery-loader@main — run 'just sync-pins-store' (or land the fix upstream first)"; exit 1; }
 
 # Regenerate the README screenshot (docs/browser.png) via the containerized
 # Playwright pipeline. First build ~4 min; cached rebuild ~30 s. See
