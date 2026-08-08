@@ -16,6 +16,7 @@ const MOVE_DIR_URL = "/image_browser/move_dir";
 const MOVE_MANY_URL = "/image_browser/move_many";
 const RMDIR_URL = "/image_browser/rmdir";
 const MKDIR_URL = "/image_browser/mkdir";
+const PINS_URL = "/image_browser/pins";
 export const RATING_URL = "/image_browser/rating";
 
 export const IMG_EXTS = new Set([
@@ -57,9 +58,15 @@ export const META_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm", ".mkv"]
 export const META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);
 
 // The three sandboxed ComfyUI roots the browser exposes as tabs, plus the
-// arbitrary-path mode. Writes (delete/rename/move) are backend-restricted to
-// the sandboxed roots; "path" is browse-only.
-export type BrowseType = "input" | "output" | "temp" | "path";
+// arbitrary-path mode and the pinned view. Writes (delete/rename/move) are
+// backend-restricted to the sandboxed roots; "path" is browse-only.
+//
+// "pinned" is a VIEW, never a write target and never a request parameter: its
+// grid is assembled from /pins, and every card in it carries its OWN root in
+// `pinType` (pins span roots). It is deliberately absent from SANDBOXED_TYPES —
+// a per-card control must therefore gate on the card's own type, not on the
+// location's, which is what browser.ts's fileType()/canWriteFile() exist for.
+export type BrowseType = "input" | "output" | "temp" | "path" | "pinned";
 export const SANDBOXED_TYPES: BrowseType[] = ["input", "output", "temp"];
 
 interface BasePaths {
@@ -90,6 +97,20 @@ export interface ListingFile {
   // grid labels the card with it and joins it onto the request subfolder to
   // address the file's thumbnail and mutations.
   subpath?: string;
+  // The three below are present ONLY in a pinned listing (pinsToFiles), never in
+  // a /list response. Pins span roots, so a pinned card cannot be addressed off
+  // the location the way a folder/flat card can: it carries its own root and
+  // subfolder, which browser.ts's fileType()/fileSub() read in preference to
+  // state.type/state.subfolder. `subpath` is deliberately NOT reused for
+  // pinSub — subpath means "relative to the requested subfolder", and a pinned
+  // grid has no requested subfolder to be relative to.
+  pinType?: BrowseType;
+  pinSub?: string;
+  pinKind?: "dir" | "file";
+  // False when the pin no longer resolves on disk. Such an entry is RETURNED,
+  // not dropped ("the file moved" and "you never pinned it" are different
+  // facts), and renders dimmed with an unpin affordance.
+  pinExists?: boolean;
 }
 
 interface ListResponse {
@@ -571,4 +592,124 @@ export function moveMany(
 // with the backend's error message.
 export function makeDir(type: BrowseType, subfolder: string, name: string): Promise<void> {
   return postJSON(MKDIR_URL, { type, subfolder, name });
+}
+
+// ---- Pins (server-side, shared between packs AND devices) --------------
+//
+// The list lives in <user_dir>/comfy-pins.json (pins_store.py), NOT in
+// localStorage: a phone and a desktop are two browsers against one ComfyUI, and
+// localStorage structurally cannot span them. A pin addresses a sandboxed root
+// only — `type=path` is rejected by the store, the same perimeter as every
+// write.
+
+// One stored pin. `name` is present iff kind === "file"; `subfolder` is "" at a
+// root and otherwise forward-slashed and relative.
+export interface PinItem {
+  kind: "dir" | "file";
+  type: BrowseType;
+  subfolder: string;
+  name?: string;
+}
+
+// A pin as the endpoints ANSWER it: the stored item, plus `exists`, plus — for
+// a resolvable file — the same per-file keys /list emits, so the pinned view
+// renders through the ordinary renderGrid with no special-casing.
+export interface PinEntry extends PinItem {
+  exists: boolean;
+  ext?: string;
+  mtime?: number;
+  size?: number;
+  width?: number;
+  height?: number;
+  rating?: number;
+}
+
+// Not exported: callers consume it through fetchPins/postPinDelta's inferred
+// return type and never need to name it, exactly like ListResponse above.
+interface PinsResponse {
+  ok: boolean;
+  max: number;
+  pins: PinEntry[];
+}
+
+// Identity of a pin — what add/remove dedupe on, and what the frontend's
+// "is this pinned?" Set keys. Mirrors pins_store.pin_key: `kind` is part of the
+// key, so pinning `output/keep` as a folder does not collide with a file called
+// `keep` sitting beside it.
+export function pinKeyOf(p: PinItem): string {
+  return `${p.kind}:${p.type}:${p.subfolder}:${p.name ?? ""}`;
+}
+
+// Both /pins reads and /pins writes answer the SAME shape — the whole freshly
+// resolved list — so a delta needs no follow-up GET. Parse the body before
+// deciding the message (same discipline as fetchMetadata): a refusal carries
+// its reason in `error` alongside a 4xx, and a bare `HTTP 400` would hide
+// "pin limit reached (max 200)", which the UI must surface verbatim.
+async function readPinsResponse(r: Response): Promise<PinsResponse> {
+  let data: Partial<PinsResponse> & { error?: string } = {};
+  try {
+    data = await r.json();
+  } catch {
+    // fall through to status-based error below
+  }
+  if (!r.ok || !data.ok) {
+    throw new Error(data.error || `HTTP ${r.status}`);
+  }
+  return { ok: true, max: typeof data.max === "number" ? data.max : 0, pins: data.pins ?? [] };
+}
+
+export async function fetchPins(): Promise<PinsResponse> {
+  return readPinsResponse(await fetch(PINS_URL, { cache: "no-cache" }));
+}
+
+// One DELTA, never a whole-list PUT: two browsers with the modal open would each
+// send their own full list and the second write would silently discard the
+// first's pin. `item` is omitted for "prune". Adding an already-present pin is a
+// successful no-op, which is what makes the localStorage migration replayable.
+export async function postPinDelta(
+  op: "add" | "remove" | "prune",
+  item?: PinItem,
+): Promise<PinsResponse> {
+  const body: { op: string; item?: PinItem } = { op };
+  if (item) body.item = item;
+  const r = await fetch(PINS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return readPinsResponse(r);
+}
+
+// Turn a /pins response into the grid's own ListingFile[]. Folder pins are
+// dropped here — they are the toolbar chips and the picker's shortcut rows, not
+// cards.
+//
+// An exists:false entry carries no stats at all, so mtime/size/rating are
+// normalized to 0 rather than left undefined: sortFiles compares them
+// arithmetically and an undefined would produce NaN orderings that shuffle the
+// whole grid, not merely misplace the missing row.
+export function pinsToFiles(entries: PinEntry[]): ListingFile[] {
+  const out: ListingFile[] = [];
+  for (const e of entries) {
+    if (e.kind !== "file") continue;
+    const name = e.name;
+    if (!name) continue;
+    const dot = name.lastIndexOf(".");
+    out.push({
+      name,
+      // A missing file has no backend-reported ext; derive it from the pinned
+      // name so the card still routes to the right thumbnail kind if it returns.
+      ext: (e.ext ?? (dot >= 0 ? name.slice(dot) : "")).toLowerCase(),
+      mtime: e.exists ? (e.mtime ?? 0) : 0,
+      size: e.exists ? (e.size ?? 0) : 0,
+      width: e.width,
+      height: e.height,
+      rating: e.exists ? (e.rating ?? 0) : 0,
+      pinType: e.type,
+      pinSub: e.subfolder,
+      pinKind: "file",
+      pinExists: e.exists,
+    });
+  }
+  return out;
 }

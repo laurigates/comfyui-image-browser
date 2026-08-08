@@ -137,6 +137,12 @@ jobs:
             echo "::error::thumb_cache.py drifted from its canonical home (comfyui-gallery-loader). Run 'just sync-thumb-cache' — or land the fix upstream first."
             exit 1
           }
+      - name: Diff pins_store.py against comfyui-gallery-loader@main
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/pins_store.py | diff -u - pins_store.py || {
+            echo "::error::pins_store.py drifted from its canonical home (comfyui-gallery-loader). Run 'just sync-pins-store' — or land the fix upstream first."
+            exit 1
+          }
 
   security:
     name: Security scanning
