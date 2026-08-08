@@ -27,11 +27,13 @@ Restart ComfyUI; hard-refresh the browser tab (Ctrl+Shift+R / Cmd+Shift+R).
 
 ## What it does
 
-Adds an **Image Browser** button to the ComfyUI top bar (also a command in the
-palette and an **Extensions → Image Browser** menu entry). Clicking it opens a
-**full-viewport** file explorer that stands in for the canvas while open — a
-touch-first card grid of thumbnails you can browse and manage without leaving
-ComfyUI.
+Opens from the shared **Touch Tools** button in the ComfyUI top bar — one
+button for the whole pack family, listing **Image Browser** first. It is also a
+command in the palette and an **Extensions → Touch Tools → Image Browser** menu
+entry, and with no other Touch Tools pack installed the button opens this one
+directly. You get a **full-viewport** file explorer that stands in for the
+canvas while open — a touch-first card grid of thumbnails you can browse and
+manage without leaving ComfyUI.
 
 - **Browse** the **Input / Output / Temp** folders as tabs, plus a **browse…**
   tab for arbitrary absolute paths (`models/`, `custom_nodes/`, anywhere on
