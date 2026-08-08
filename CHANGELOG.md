@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.23](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.22...comfyui-image-browser-v0.1.23) (2026-08-08)
+
+
+### Bug Fixes
+
+* **deps:** bump @laurigates/comfy-modal-kit and move to the Touch Tools hub ([#71](https://github.com/laurigates/comfyui-image-browser/issues/71)) ([290523d](https://github.com/laurigates/comfyui-image-browser/commit/290523d60cd5481ef13bdfe11d3ab329582d7edd))
+
 ## [0.1.22](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.21...comfyui-image-browser-v0.1.22) (2026-08-08)
 
 
