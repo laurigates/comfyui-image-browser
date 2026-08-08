@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.22](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.21...comfyui-image-browser-v0.1.22) (2026-08-08)
+
+
+### Features
+
+* **pins:** a pinned view over folders and individual media ([#69](https://github.com/laurigates/comfyui-image-browser/issues/69)) ([51dbf86](https://github.com/laurigates/comfyui-image-browser/commit/51dbf866f309670cb917ae1c902973a10dc827b2))
+
 ## [0.1.21](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.20...comfyui-image-browser-v0.1.21) (2026-08-06)
 
 
