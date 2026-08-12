@@ -472,6 +472,278 @@ class TestListKindFilter:
         assert frontend == {"all"} | set(ib.KIND_FILTERS)
 
 
+class TestSafeViewMatcher:
+    """The token matcher — a direct port of the kit's `tokenize`/`parseKeywords`.
+
+    The two sides MUST agree: hiding happens here, blurring happens in the
+    frontend, and a file one considers sensitive and the other does not renders
+    blurred in one grid and plain in another. `comfyui-gallery-loader` ports the
+    identical pair, so a drift here is a three-way disagreement.
+    """
+
+    def test_matches_a_whole_token_in_the_name(self):
+        assert ib.is_safe_match({"nsfw"}, "", "", "my_nsfw_pic.png")
+
+    def test_matches_a_whole_token_in_a_folder_segment(self):
+        assert ib.is_safe_match({"nsfw"}, "output/nsfw/2026-08-04", "", "pic.png")
+
+    def test_matches_any_of_the_parts_it_is_given(self):
+        """The predicate itself is part-agnostic; which parts the /list handler
+        hands it (name + root + folder segments) is pinned end-to-end by
+        TestListSafeHide::test_matches_the_root_segment."""
+        assert ib.is_safe_match({"temp"}, "temp/", "", "pic.png")
+
+    def test_case_is_ignored(self):
+        assert ib.is_safe_match({"nsfw"}, "output/NSFW", "", "PIC.PNG")
+
+    # --- The two controls. A substring implementation passes every test above
+    # --- and fails only these, which is exactly why they are here.
+
+    def test_a_short_keyword_does_not_match_a_longer_word(self):
+        """CONTROL: `ass` must not match `assets/`.
+
+        The false-positive class this guards is invisible to the user — a
+        wrongly-hidden file and a deliberately-hidden one look identical
+        (absent), so nothing would ever report it.
+        """
+        assert not ib.is_safe_match({"ass"}, "output/assets", "", "classic.png")
+
+    def test_a_keyword_does_not_match_a_word_that_merely_starts_with_it(self):
+        """CONTROL: `nsfw` must not match `nsfwish.png`."""
+        assert not ib.is_safe_match({"nsfw"}, "output/holiday", "", "nsfwish.png")
+
+    def test_no_keywords_matches_nothing(self):
+        assert not ib.is_safe_match(set(), "output/nsfw", "", "nsfw.png")
+
+    def test_tokenize_splits_on_every_non_alphanumeric(self):
+        assert ib.safe_tokenize("output/nsfw/2026-08-04") == {"output", "nsfw", "2026", "08", "04"}
+
+    def test_parse_keywords_accepts_commas_and_whitespace_and_dedupes(self):
+        assert ib.parse_safe_keywords("nsfw, private  nsfw") == {"nsfw", "private"}
+
+    def test_parse_keywords_strips_punctuation_from_each_keyword(self):
+        """A keyword carrying punctuation could never equal a token, so it is
+        normalized the same way the haystack is. Fails if the strip is dropped —
+        `nsfw!` would then silently match nothing at all."""
+        assert ib.parse_safe_keywords("#nsfw!") == {"nsfw"}
+
+    def test_parse_keywords_of_an_empty_value_is_empty(self):
+        assert ib.parse_safe_keywords("") == set()
+
+
+class TestListSafeHide:
+    """`safe_kw` / `safe_hide` — Safe View's server-side hide.
+
+    DISCRETION, NOT ACCESS CONTROL: this is a rendering preference the browser
+    asks for, and every other endpoint still serves the same files to the same
+    caller. The tests below pin behaviour, not a security boundary.
+    """
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def _names(self, resp):
+        return {f["name"] for f in resp._body["files"]}
+
+    def _mixed(self, base):
+        (base / "holiday.png").write_bytes(b"x")
+        (base / "my_nsfw_pic.png").write_bytes(b"x")
+
+    def test_hides_a_matching_file(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert self._names(resp) == {"holiday.png"}
+
+    def test_absent_params_hide_nothing(self, tmp_path, monkeypatch):
+        """The default request must behave exactly as it did before Safe View.
+
+        Asserts the DIRS too: the folder gate calls the matcher unconditionally
+        (an empty keyword set is the guard), so a matcher that answered True on
+        an empty set would empty the folder list while leaving the files alone —
+        a half-broken listing no file-only assertion can see.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        (tmp_path / "anything").mkdir()
+        resp = self._call({"type": "output"})
+        assert self._names(resp) == {"holiday.png", "my_nsfw_pic.png"}
+        assert {d["name"] for d in resp._body["dirs"]} == {"anything"}
+
+    def test_empty_keywords_hide_nothing_even_with_the_flag_on(self, tmp_path, monkeypatch):
+        """Fails if `safe_hide` alone is ever allowed to filter. There is no
+        implicit default keyword on this side — the frontend owns the default
+        and sends it explicitly, so a request that forgot the list must not
+        silently hide a user's files."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "", "safe_hide": "1"})
+        assert self._names(resp) == {"holiday.png", "my_nsfw_pic.png"}
+
+    def test_keywords_without_the_flag_hide_nothing(self, tmp_path, monkeypatch):
+        """Blur-only is the default mode: the keywords are sent for matching in
+        the browser, and hiding is the separate opt-in."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "nsfw"})
+        assert self._names(resp) == {"holiday.png", "my_nsfw_pic.png"}
+
+    def test_unrecognised_flag_value_hides_nothing(self, tmp_path, monkeypatch):
+        """Answerable, so it answers — same leniency as `kind` and `recursive`."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "maybe"})
+        assert self._names(resp) == {"holiday.png", "my_nsfw_pic.png"}
+
+    def test_a_short_keyword_does_not_hide_a_longer_word(self, tmp_path, monkeypatch):
+        """CONTROL, end to end: `ass` must not hide `assets/classic.png`.
+
+        The matcher's own control test covers the predicate; this one proves the
+        endpoint calls it with whole-token semantics rather than doing its own
+        `in` check on the way past.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "classic.png").write_bytes(b"x")
+        resp = self._call(
+            {"type": "output", "subfolder": "assets", "safe_kw": "ass", "safe_hide": "1"}
+        )
+        assert self._names(resp) == {"classic.png"}
+
+    def test_matches_the_requested_subfolder_not_just_the_name(self, tmp_path, monkeypatch):
+        """A blandly-named file inside a matching folder is hidden."""
+        self._sandbox(tmp_path, monkeypatch)
+        sub = tmp_path / "nsfw"
+        sub.mkdir()
+        (sub / "plain.png").write_bytes(b"x")
+        resp = self._call(
+            {"type": "output", "subfolder": "nsfw", "safe_kw": "nsfw", "safe_hide": "1"}
+        )
+        assert self._names(resp) == set()
+
+    def test_matches_a_nested_subpath_in_the_recursive_walk(self, tmp_path, monkeypatch):
+        """Flat view hides too. Fails if the filter is applied only in the
+        non-recursive branch — the same shape of miss `kind` guards against."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "top.png").write_bytes(b"x")
+        deep = tmp_path / "nsfw" / "2026-08-04"
+        deep.mkdir(parents=True)
+        (deep / "plain.png").write_bytes(b"x")
+        resp = self._call(
+            {"type": "output", "recursive": "1", "safe_kw": "nsfw", "safe_hide": "1"}
+        )
+        assert self._names(resp) == {"top.png"}
+
+    def test_hides_matching_directory_cards(self, tmp_path, monkeypatch):
+        """A matching folder goes too — otherwise the listing keeps a visible
+        (and now empty) doorway labelled with the very word the user asked not
+        to see. Name-only, which is the kit's documented folder rule."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "nsfw").mkdir()
+        (tmp_path / "holiday").mkdir()
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert {d["name"] for d in resp._body["dirs"]} == {"holiday"}
+
+    def test_applies_on_the_path_tab(self, tmp_path, monkeypatch):
+        """browse…/type=path filters like any other tab — and this is the one
+        case where the logical path IS the OS path, so both sides see the same
+        segments."""
+        self._mixed(tmp_path)
+        resp = self._call(
+            {"type": "path", "path": str(tmp_path), "safe_kw": "nsfw", "safe_hide": "1"}
+        )
+        assert self._names(resp) == {"holiday.png"}
+
+    def test_matches_the_root_segment(self, tmp_path, monkeypatch):
+        """The root is IN the haystack, end to end.
+
+        Pins the caller, not just the predicate: `hide_prefix` is built as
+        `f"{type_name}/{subfolder}"`, and the obvious simplification to a bare
+        `subfolder` passes every other test here — the frontend's `fileSub()`
+        returns exactly that bare subfolder, which is what makes this the drift
+        most likely to happen on both sides at once.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "output", "safe_hide": "1"})
+        assert self._names(resp) == set()
+
+    def test_the_os_path_is_not_part_of_the_haystack_for_a_sandboxed_root(
+        self, tmp_path, monkeypatch
+    ):
+        """THE LEAK THIS GUARDS: matching the RESOLVED path would put every
+        segment of `/home/<user>/ComfyUI/output` into the haystack, so a keyword
+        naming any of them would hide the entire library — while the frontend,
+        which never sees those segments, kept showing the files unblurred.
+
+        The sandbox root is given a name of our own choosing so the keyword is a
+        real TOKEN of the on-disk path. An earlier version of this test used
+        `os.path.basename(tmp_path)`, which pytest names `test_..._0` — the
+        keyword parser strips its underscores, so it could never equal any token
+        and the test passed against the mutation. `just mutation-check` is what
+        caught that; do not weaken the keyword back to a generated name.
+        """
+        root = tmp_path / "secretdirname"
+        root.mkdir()
+        self._sandbox(root, monkeypatch)
+        self._mixed(root)
+        resp = self._call({"type": "output", "safe_kw": "secretdirname", "safe_hide": "1"})
+        assert self._names(resp) == {"holiday.png", "my_nsfw_pic.png"}
+
+    def test_hiding_is_applied_above_the_newest_n_cap(self, tmp_path, monkeypatch):
+        """THE WHOLE REASON HIDING LIVES ON THE SERVER.
+
+        A folder of mostly-sensitive files must still return a FULL PAGE of the
+        rest. Here the 2 newest files are both sensitive and the 2 oldest are
+        not, with the cap at 2: filtering above the cap returns both harmless
+        files, while filtering the already-capped slice would return NOTHING —
+        which is precisely what a client-side filter does, and why this is not a
+        frontend feature.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "DIR_LIST_CAP", 2)
+        for i, name in enumerate(["old_a.png", "old_b.png", "nsfw_c.png", "nsfw_d.png"]):
+            f = tmp_path / name
+            f.write_bytes(b"x")
+            os.utime(f, (1000 + i, 1000 + i))
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert self._names(resp) == {"old_a.png", "old_b.png"}
+        # Nothing the caller was allowed to see was dropped, so not truncated.
+        assert resp._body["truncated"] is False
+
+    def test_hiding_is_above_the_cap_in_the_recursive_walk_too(self, tmp_path, monkeypatch):
+        """Same guarantee for flat view, which uses the other cap."""
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "FLAT_LIST_CAP", 2)
+        for i, name in enumerate(["old_a.png", "old_b.png", "nsfw_c.png", "nsfw_d.png"]):
+            f = tmp_path / name
+            f.write_bytes(b"x")
+            os.utime(f, (1000 + i, 1000 + i))
+        resp = self._call(
+            {"type": "output", "recursive": "1", "safe_kw": "nsfw", "safe_hide": "1"}
+        )
+        assert self._names(resp) == {"old_a.png", "old_b.png"}
+
+    def test_composes_with_the_kind_filter(self, tmp_path, monkeypatch):
+        """Both narrowings apply; neither replaces the other."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "holiday.mp4").write_bytes(b"x")
+        (tmp_path / "holiday.png").write_bytes(b"x")
+        (tmp_path / "nsfw.mp4").write_bytes(b"x")
+        resp = self._call(
+            {"type": "output", "kind": "videos", "safe_kw": "nsfw", "safe_hide": "1"}
+        )
+        assert self._names(resp) == {"holiday.mp4"}
+
+
 class TestRmdirEndpoint:
     """Drive the real /rmdir handler against a tmp dir (folder_paths stubbed).
 

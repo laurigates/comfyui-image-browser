@@ -41,9 +41,15 @@ import type { RatingAddress } from "@laurigates/comfy-modal-kit";
 import {
   applyStars,
   ensureStyleOnce,
+  isSensitive,
+  makeRevealButton,
   nextRating,
   notify,
+  onSafeViewChange,
   postRating,
+  readSafeViewConfig,
+  SAFE_VIEW_BLUR_CLASS,
+  setBlurred,
   starsHTML,
 } from "@laurigates/comfy-modal-kit";
 import { deleteFile, EXT_NAME, RATING_URL } from "./api.js";
@@ -76,6 +82,19 @@ const deleted = new Set<string>();
 
 /** In-flight read, so a fast arrow-through does not paint a stale response. */
 let readToken = 0;
+
+/** Class on our per-item reveal control, so a pass can find and drop its own. */
+const REVEAL_CLASS = "ibl-reveal";
+
+/**
+ * Addresses revealed in the lightbox this session.
+ *
+ * Session-scoped like `deleted` above, and deliberately NOT shared with the
+ * modal's reveal set: revealing a card in the Image Browser is a statement
+ * about that grid, and carrying it into a full-screen viewer the user may open
+ * later — in front of someone else — is not what they asked for.
+ */
+const lightboxRevealed = new Set<string>();
 
 /**
  * Pull the address of the item currently on screen out of the lightbox.
@@ -327,6 +346,7 @@ export function installLightboxActions(): () => void {
     const dialog = document.querySelector(LIGHTBOX_SELECTOR) as HTMLElement | null;
     if (!dialog) return;
     const addr = activeAddress(dialog);
+    applySafeView(dialog, addr);
     const existing = dialog.querySelector(`.${BAR_CLASS}`) as HTMLElement | null;
     if (!addr) {
       // Not an addressable file (cloud asset, blob: placeholder). Show nothing
@@ -401,6 +421,47 @@ export function installLightboxActions(): () => void {
       });
   }
 
+  /**
+   * Blur the viewed media when Safe View matches it, with a per-item reveal.
+   *
+   * CLEARED AND RE-DERIVED ON EVERY PASS, for the reason the whole module is
+   * built around: ONE dialog element outlives many items, and navigating swaps
+   * the media `src` in place. A blur left bound to the element would follow the
+   * user onto the next, harmless image — the same class of bug as a stale star
+   * row, and more alarming, because it looks like the viewer itself broke.
+   *
+   * The reveal is a per-ITEM control, not a toggle of the feature — nothing
+   * here advertises that Safe View exists, and there is no way to switch it off
+   * from inside ComfyUI's own chrome. It is nonetheless required: blurring a
+   * viewer the user deliberately opened, with no way through, is a dead end
+   * that reads as a broken frontend rather than as a filter. It hangs off the
+   * DIALOG rather than off our bar so it is independent of the bar's own
+   * rebuild-on-navigation, and because the bar is not painted at all for an
+   * item this pack cannot address.
+   */
+  function applySafeView(dialog: HTMLElement, addr: RatingAddress | null): void {
+    for (const el of dialog.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);
+    for (const el of dialog.querySelectorAll(`.${REVEAL_CLASS}`)) el.remove();
+    if (!addr) return;
+    const key = addressKey(addr);
+    if (lightboxRevealed.has(key)) return;
+    const cfg = readSafeViewConfig();
+    // Same logical address the grid and the backend match on, root included.
+    if (!isSensitive({ name: addr.name, path: `${addr.type}/${addr.subfolder}` }, cfg)) return;
+    for (const el of dialog.querySelectorAll("img, video")) setBlurred(el, true);
+    const btn = makeRevealButton({
+      onReveal: () => {
+        lightboxRevealed.add(key);
+        // Repaint straight away rather than waiting for the settle: this is a
+        // direct response to a tap, and SETTLE_MS of nothing happening reads
+        // as a dead button.
+        applySafeView(dialog, addr);
+      },
+    });
+    btn.classList.add(REVEAL_CLASS);
+    dialog.appendChild(btn);
+  }
+
   function schedule(): void {
     if (disposed) return;
     if (timer !== null) clearTimeout(timer);
@@ -423,13 +484,22 @@ export function installLightboxActions(): () => void {
     attributes: true,
     attributeFilter: ["src"],
   });
+  // Flipping the setting mutates no DOM, so without this the open viewer keeps
+  // the old state until the next navigation — see the sidebar's equivalent.
+  const disposeSafeView = onSafeViewChange(schedule);
   schedule();
 
   return () => {
     disposed = true;
     if (timer !== null) clearTimeout(timer);
     observer.disconnect();
+    disposeSafeView();
     document.removeEventListener("click", onClick, true);
-    for (const el of document.querySelectorAll(`.${BAR_CLASS}, .ibl-ov`)) el.remove();
+    for (const el of document.querySelectorAll(`.${BAR_CLASS}, .ibl-ov, .${REVEAL_CLASS}`)) {
+      el.remove();
+    }
+    // Leave the stock viewer exactly as found — a left-behind blur has no
+    // control anywhere to clear it once this injector is off.
+    for (const el of document.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);
   };
 }

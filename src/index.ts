@@ -21,6 +21,8 @@ import {
   type ModalShellController,
   makeHubEntry,
   registerHubEntry,
+  registerSafeViewHubToggle,
+  safeViewSettings,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { openImageBrowser } from "./browser.js";
@@ -61,6 +63,20 @@ const entry = makeHubEntry({
 app.registerExtension({
   name: "comfy.image-browser",
   settings: [
+    // Safe View's five settings, SPREAD from the kit rather than written out
+    // here. Both gallery packs register the SAME ids — that is the sharing
+    // mechanism: addSetting skips a duplicate id with a console.warn
+    // (settingStore.ts:281), so one row appears in the dialog, one value is
+    // stored, and ComfyUI persists it server-side, which makes the preference
+    // cross-pack and cross-device for free. Two hand-written copies would
+    // drift, and a drifted defaultValue or tooltip is invisible: whichever pack
+    // wins the import race decides, and that race has no stable winner.
+    //
+    // The cast is the same one the launcher fields already need — the kit
+    // deliberately does not depend on @comfyorg/comfyui-frontend-types, so it
+    // declares the setting shape structurally.
+    ...(safeViewSettings() as unknown as Parameters<typeof app.registerExtension>[0]["settings"] &
+      object[]),
     {
       // The id is FROZEN — persistence is keyed on it end-to-end
       // (settingStore.ts:78/142/157/199) and `category` is read only by
@@ -130,5 +146,13 @@ app.registerExtension({
     // registering at module scope would list this pack in the chooser even when
     // the user has disabled it.
     registerHubEntry(entry.hubEntry);
+    // Safe View's chooser row, registered here for the SAME reason — a module
+    // -scope call would list it even when this pack is disabled. Idempotent by
+    // id, so comfyui-gallery-loader calling it too is harmless; having the kit
+    // build the row is what stops two rows appearing with drifting labels when
+    // both packs are installed. It registers as a TOGGLE, not a HubEntry:
+    // an entry would make getHubEntries().length === 2 for a single-pack user
+    // and cost them the one-tap short-circuit on every launch.
+    registerSafeViewHubToggle();
   },
 });

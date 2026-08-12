@@ -144,6 +144,16 @@ interface ListParams {
   // server spends that cap on the kind asked for (the newest N videos), while
   // filtering the response here would filter an already-truncated listing.
   kind?: TypeFilter;
+  // Safe View's keyword list, already normalized by the kit's parseKeywords.
+  // Sent as a comma-separated string; the backend re-parses it with the same
+  // rules, so a stray separator or an odd case cannot make the two disagree.
+  safeKeywords?: readonly string[];
+  // Drop matching entries server-side instead of blurring them here. Filtered
+  // above the same newest-N cap, and for exactly the reason `kind` is: a folder
+  // of mostly-sensitive files must still return a full page of the rest, where
+  // dropping them from an already-truncated response would return a near-empty
+  // grid. This is the whole reason hiding is a backend feature at all.
+  safeHide?: boolean;
 }
 
 let BASE_PATHS: BasePaths | null = null;
@@ -180,6 +190,14 @@ export async function fetchListing(p: ListParams): Promise<ListResponse> {
   // from the path request above. Omitted for "all" so the default request URL
   // stays byte-identical to what it was before the filter existed.
   if (p.kind && p.kind !== "all") params.set("kind", p.kind);
+  // Both conditions, deliberately: the backend also refuses to filter on an
+  // empty keyword list, so a caller that sent `safe_hide=1` alone would get an
+  // unfiltered listing while believing it had asked for a filtered one. Sending
+  // nothing in that case makes the request honest about what it wants.
+  if (p.safeHide && p.safeKeywords && p.safeKeywords.length > 0) {
+    params.set("safe_kw", p.safeKeywords.join(","));
+    params.set("safe_hide", "1");
+  }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const data = (await r.json()) as ListResponse;

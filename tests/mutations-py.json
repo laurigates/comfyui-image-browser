@@ -1,0 +1,72 @@
+{
+  "command": ["uv", "run", "pytest", "-q", "tests/test_helpers.py"],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "image_browser.py",
+      "before": "# THIS IS DISCRETION, NOT ACCESS CONTROL. `safe_hide` is a rendering preference",
+      "after": "# THIS IS DISCRETION, NOT ACCESS CONTROL. safe_hide is a rendering preference"
+    },
+    {
+      "label": "token matching becomes SUBSTRING matching (`ass` would hide assets/, `nsfw` would hide nsfwish.png)",
+      "file": "image_browser.py",
+      "before": "    return any(part and not keywords.isdisjoint(safe_tokenize(part)) for part in parts)",
+      "after": "    return any(part and any(k in part.lower() for k in keywords) for part in parts)"
+    },
+    {
+      "label": "hiding is applied BELOW the newest-N cap (a mostly-sensitive folder returns a near-empty page)",
+      "file": "image_browser.py",
+      "before": "    if hide_keywords:\n        found = [",
+      "after": "    if hide_keywords:\n        found = found[:cap]\n        found = ["
+    },
+    {
+      "label": "the RESOLVED OS path becomes the haystack (a keyword naming any parent dir hides the library)",
+      "file": "image_browser.py",
+      "before": "    hide_prefix = base if type_name == \"path\" else f\"{type_name}/{subfolder}\"",
+      "after": "    hide_prefix = base"
+    },
+    {
+      "label": "the ROOT segment is dropped from the prefix (a keyword naming a root matches nothing)",
+      "file": "image_browser.py",
+      "before": "    hide_prefix = base if type_name == \"path\" else f\"{type_name}/{subfolder}\"",
+      "after": "    hide_prefix = base if type_name == \"path\" else subfolder"
+    },
+    {
+      "label": "matching directory cards are kept (a visible, empty doorway named with the hidden word)",
+      "file": "image_browser.py",
+      "before": "                            if is_safe_match(hide_keywords, entry.name):\n                                continue",
+      "after": "                            if False:\n                                continue"
+    },
+    {
+      "label": "an empty keyword list matches EVERYTHING (a request that forgot the list hides the library)",
+      "file": "image_browser.py",
+      "before": "    if not keywords:\n        return False",
+      "after": "    if not keywords:\n        return True"
+    },
+    {
+      "label": "safe_hide alone is honoured, ignoring the keyword list",
+      "file": "image_browser.py",
+      "before": "        hide_keywords = parse_safe_keywords(q.get(\"safe_kw\", \"\"))",
+      "after": "        hide_keywords = parse_safe_keywords(q.get(\"safe_kw\", \"\")) or {\"nsfw\"}"
+    },
+    {
+      "label": "keyword punctuation is no longer stripped (`#nsfw!` silently matches nothing)",
+      "file": "image_browser.py",
+      "before": "        kw = _SAFE_KEYWORD_STRIP.sub(\"\", piece.lower())",
+      "after": "        kw = piece.lower()"
+    },
+    {
+      "label": "the flag's truthiness widens to any value (an unrecognised safe_hide starts filtering)",
+      "file": "image_browser.py",
+      "before": "    if q.get(\"safe_hide\", \"\") in (\"1\", \"true\", \"yes\"):",
+      "after": "    if q.get(\"safe_hide\", \"\"):"
+    },
+    {
+      "label": "the filter never reaches the recursive walk (flat view stops hiding)",
+      "file": "image_browser.py",
+      "before": "            base, exts, image_subset, FLAT_LIST_CAP, hide_keywords, hide_prefix",
+      "after": "            base, exts, image_subset, FLAT_LIST_CAP, None, hide_prefix"
+    }
+  ]
+}

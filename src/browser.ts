@@ -6,7 +6,11 @@
 // per-widget modal — and it MANAGES files (delete / rename / move) instead of
 // committing a value to a node widget.
 
-import type { ModalShellController, RatingAddress } from "@laurigates/comfy-modal-kit";
+import type {
+  ModalShellController,
+  RatingAddress,
+  SafeViewConfig,
+} from "@laurigates/comfy-modal-kit";
 import {
   applyStars,
   confirmInShell,
@@ -16,15 +20,25 @@ import {
   fuzzyScore,
   installBackGuard,
   installLazyMedia,
+  isSensitive,
+  makeRevealButton,
+  makeRevealSet,
   nextRating,
   notify,
+  onSafeViewChange,
   openModalShell,
   openShellOverlay,
   postRating,
   promptInShell,
   ratingOf,
+  readSafeViewConfig,
+  SAFE_VIEW_GLYPH_OFF,
+  SAFE_VIEW_GLYPH_ON,
+  setBlurred,
+  setSpoilered,
   sortFiles,
   starsHTML,
+  toggleSafeView,
 } from "@laurigates/comfy-modal-kit";
 // Runtime import, left unbundled by `bun build --external '/scripts/*'` and
 // resolved against ComfyUI's served module. Used only by loadWorkflow(), which
@@ -358,7 +372,7 @@ export function openImageBrowser(): ModalShellController {
     width: "100vw",
     height: "100vh",
     footerLeftHTML:
-      "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>w</kbd> workflow · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+      "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>w</kbd> workflow · <kbd>b</kbd> safe view · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     // Fires on EVERY teardown path (Esc, × button, backdrop, coordinator
     // dismiss) — the controller.close wrapper does not, so keyboard cleanup
@@ -381,6 +395,14 @@ export function openImageBrowser(): ModalShellController {
       window.removeEventListener("keydown", onScrollKey, true);
       disposeBackGuard?.();
       disposeBackGuard = null;
+      // Same rule as the observer and the restore loop: nothing scheduled or
+      // subscribed may outlive the modal. A kept listener would re-render a
+      // detached grid on every future settings change, for the rest of the page's
+      // life — one leak per open.
+      disposeSafeView();
+      // Reveals are per-session by design: reopening the browser must not still
+      // be showing what the user unblurred an hour ago.
+      revealed.clear();
     },
   });
   modal.dialog.classList.add("ib-dialog");
@@ -469,6 +491,16 @@ export function openImageBrowser(): ModalShellController {
   pruneEl.textContent = "🧹 Prune missing";
   pruneEl.style.display = "none";
 
+  // Safe View's toolbar toggle. Shown on EVERY tab, including browse…/path:
+  // unlike ≣/📌/📁+ this is not a sandboxed-root affordance but a family-wide
+  // display preference, and the backend applies the hide on type=path too.
+  // The glyph is the STATE, not the action — 🙈 while matches are being
+  // hidden, 👁 while nothing is filtered — which is the same convention the
+  // hub toggle row uses, so the two never read as contradicting each other.
+  const safeToggleEl = document.createElement("button");
+  safeToggleEl.type = "button";
+  safeToggleEl.className = "ib-control ib-icon ib-safe-toggle";
+
   // Media-type filter — a segmented All / 🖼 Images / 🎬 Videos control on its
   // own full-width toolbar row (.ib-filter is the row, .ib-filter-group the
   // pill; flex-basis:100% on the pill itself would stretch its border across
@@ -508,6 +540,7 @@ export function openImageBrowser(): ModalShellController {
     pinToggleEl,
     newFolderEl,
     pruneEl,
+    safeToggleEl,
     sortEl,
     refreshEl,
     filterEl,
@@ -715,6 +748,77 @@ export function openImageBrowser(): ModalShellController {
   function setCount(visible: number, total: number): void {
     if (countEl) countEl.textContent = `${visible} / ${total}`;
   }
+
+  // ---- Safe View --------------------------------------------------
+  // The family's sensitive-content filter. Everything shared — the settings,
+  // the token matcher, the blur/spoiler CSS and the reveal button — lives in
+  // comfy-modal-kit so this pack and comfyui-gallery-loader cannot disagree
+  // about which files are sensitive. This block is only the wiring.
+  //
+  // DISCRETION, NOT ACCESS CONTROL. The blur is a CSS class and the blurred
+  // bytes are still fetched; it defeats a shoulder, not an adversary.
+
+  // Addresses the user has explicitly revealed. Held for the MODAL SESSION so
+  // an in-place re-render (a delete, a rating, a pin) does not re-blur the card
+  // being worked on, and cleared on close and on any change of location — see
+  // the reset in loadAndRender.
+  const revealed = makeRevealSet();
+  let revealLocation: string | null = null;
+
+  /**
+   * The `path` haystack for one card — the file's LOGICAL folder address.
+   *
+   * The root segment is included deliberately: `fileSub()` returns the bare
+   * subfolder, so handing it straight to `isSensitive` would drop `output` /
+   * `input` / `temp` from every haystack and a keyword naming a root would
+   * silently match nothing. The backend builds the same string
+   * (`f"{type_name}/{subfolder}"`), and the two MUST agree — a file one side
+   * hides and the other blurs is a file that renders differently in two packs
+   * looking at the same disk.
+   */
+  function safePathOf(f: ListingFile): string {
+    // In path mode the absolute directory IS the logical address, and it is
+    // what the backend matches against too.
+    if (state.type === "path") return state.absPath;
+    return `${fileType(f)}/${fileSub(f)}`;
+  }
+
+  /** Whether this card should be blurred right now — match AND not revealed. */
+  function isCardHidden(f: ListingFile, cfg: SafeViewConfig): boolean {
+    if (!isSensitive({ name: f.name, path: safePathOf(f) }, cfg)) return false;
+    return !revealed.has(fileType(f), fileSub(f), f.name);
+  }
+
+  /** Paint the toolbar toggle from the live setting, not from a local flag. */
+  function renderSafeToggle(cfg: SafeViewConfig): void {
+    // "Active" needs BOTH switched on and a non-empty keyword list — with no
+    // keywords the filter is a no-op, and showing 🙈 would claim a protection
+    // that is not in force.
+    const active = cfg.enabled && cfg.keywords.length > 0;
+    safeToggleEl.classList.toggle("is-active", active);
+    safeToggleEl.textContent = active ? SAFE_VIEW_GLYPH_ON : SAFE_VIEW_GLYPH_OFF;
+    safeToggleEl.title = active
+      ? "Safe View is on — matching thumbnails are blurred (b)"
+      : "Safe View is off — nothing is filtered (b)";
+    safeToggleEl.setAttribute("aria-pressed", String(active));
+  }
+
+  safeToggleEl.addEventListener("click", () => toggleSafeView());
+
+  // Repaint when the preference changes ANYWHERE — the other gallery pack, the
+  // settings dialog, or the Touch Tools chooser's toggle row. Only one pack's
+  // settings registration actually takes effect (a duplicate id is skipped),
+  // and which one wins has no stable winner, so subscribing to the kit's bus is
+  // the only way this modal reliably hears its own toggle.
+  //
+  // A full reload rather than a re-render: with hiding on, the set of files is
+  // decided by the SERVER, so a re-render would repaint a listing that no
+  // longer reflects the setting. Reloading unconditionally costs one listing
+  // request on an explicit user action and cannot be wrong; branching on the
+  // old value could be.
+  const disposeSafeView = onSafeViewChange(() => {
+    void loadAndRender({ preserveScroll: true });
+  });
 
   // ---- Vim-style keyboard navigation state ----------------------
   // Selection persists across tabs/dirs; key `${type}:${subfolder}:${name}`.
@@ -1209,6 +1313,18 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function openFull(f: ListingFile): void {
+    // Opening a file full-size IS the decision to look at it, so it reveals the
+    // card behind it. Without this the user opens a blurred image in a new tab
+    // — unblurred, since the filter is a class on OUR thumbnail and not on the
+    // file — and comes back to a grid still pretending it is hidden, with no
+    // hint that the 👁 is what stops that repeating.
+    if (revealed.has(fileType(f), fileSub(f), f.name)) {
+      // Already revealed — nothing to repaint, and re-rendering here would
+      // discard the focus/scroll state for no visible change.
+    } else if (isCardHidden(f, readSafeViewConfig())) {
+      revealed.reveal(fileType(f), fileSub(f), f.name);
+      renderGrid();
+    }
     const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
@@ -1780,6 +1896,16 @@ export function openImageBrowser(): ModalShellController {
     visualMode = false;
     modal.dialog.classList.remove("is-visual");
     clearPending();
+    // Reveals are scoped to ONE location. Keyed off locationKey() rather than
+    // "any loadAndRender" on purpose: a refresh, a paste and a settings repaint
+    // all re-enter here for the SAME folder and must keep what the user
+    // revealed, while a tab switch, a folder descent or a crumb must not carry
+    // a reveal onto a different listing.
+    const here = locationKey();
+    if (revealLocation !== here) {
+      revealed.clear();
+      revealLocation = here;
+    }
     renderTabs();
     renderCrumbs();
     modal.setBusy(true);
@@ -1788,6 +1914,10 @@ export function openImageBrowser(): ModalShellController {
     // cleared below once the grid has painted, so only an attempt that never
     // got there (a tab the render killed) leaves it set.
     markFlatPending(isFlat());
+    // ONE read per load, handed to every match below — the kit's own doc says
+    // to call it once per render pass and not once per card.
+    const safeCfg = readSafeViewConfig();
+    renderSafeToggle(safeCfg);
     try {
       if (isPinnedView()) {
         // The pinned view is not a directory: its grid comes from /pins, and
@@ -1803,6 +1933,18 @@ export function openImageBrowser(): ModalShellController {
         // and is always returned whole), so narrowing the response cannot
         // under-report the way filtering an already-truncated listing would.
         state.files = narrowByKind(pinsToFiles(res.pins), state.typeFilter);
+        // Safe View's hide, applied CLIENT-side here and only here — the same
+        // exemption narrowByKind takes, for the same reason: /pins has no cap
+        // to spend (the store is capped at 200 and always returned whole), so
+        // dropping entries from the response cannot under-report the way
+        // filtering a truncated /list would. Without this the pinned tab would
+        // be a hole in the filter — pin a sensitive file once and it is listed
+        // in full every time hiding is on.
+        if (safeCfg.hide) {
+          state.files = state.files.filter(
+            (f) => !isSensitive({ name: f.name, path: safePathOf(f) }, safeCfg),
+          );
+        }
         modal.setStatus(res.pins.length ? "" : "Nothing pinned yet.");
       } else {
         const data = await fetchListing({
@@ -1811,6 +1953,11 @@ export function openImageBrowser(): ModalShellController {
           path: state.absPath,
           recursive: isFlat(),
           kind: state.typeFilter,
+          // Sent only when hiding is actually on AND there is something to
+          // match, so the default request URL stays byte-identical to what it
+          // was before Safe View existed — the same discipline `kind` follows.
+          safeHide: safeCfg.hide,
+          safeKeywords: safeCfg.keywords,
         });
         state.dirs = data.dirs || [];
         state.files = data.files || [];
@@ -1894,6 +2041,9 @@ export function openImageBrowser(): ModalShellController {
     // for callers that already know where the view belongs (a navigation's
     // remembered offset, or 0 for a new search/sort) — see loadAndRender.
     const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
+    // ONE read for the whole pass — never one per card (the kit's contract).
+    const safeCfg = readSafeViewConfig();
+    renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
     // LOCATION-level write flag — it governs the ".." / folder cards, which
     // belong to the directory being shown. Per-CARD controls must NOT use it:
@@ -1931,6 +2081,21 @@ export function openImageBrowser(): ModalShellController {
           : "";
         c.innerHTML = `<div class="ib-thumb ib-thumb-icon">📁</div><div class="ib-name" title="${escHTML(d.name)}">${escHTML(d.name)}</div>${dirBtns}`;
         gridEl.appendChild(c);
+        // A FOLDER IS MATCHED BY NAME ONLY — it carries no metadata to read.
+        // It gets no reveal button: tapping the card still descends into it,
+        // which is the reveal, and the files inside are judged on their own
+        // (now-matching) path. The consequence, documented in the README, is
+        // that a blandly-named folder full of sensitive files is caught in flat
+        // view — which lists the files — and not in folder view.
+        if (isSensitive({ name: d.name }, safeCfg)) {
+          c.classList.add("is-safe-hidden");
+          const icon = c.querySelector(".ib-thumb") as HTMLElement | null;
+          if (icon) setBlurred(icon, true);
+          if (safeCfg.blurNames) {
+            const nameEl = c.querySelector(".ib-name") as HTMLElement | null;
+            if (nameEl) setSpoilered(nameEl, true);
+          }
+        }
       }
     }
 
@@ -1962,6 +2127,14 @@ export function openImageBrowser(): ModalShellController {
       c.className = "ib-card is-file";
       // Per-card write gate — the card's OWN root, not the location's.
       const canWriteThis = canWriteFile(f);
+      // Safe View's verdict for this card, decided BEFORE the markup is built:
+      // the checkbox's accessible name carries the filename, and an
+      // accessible name is not something a CSS spoiler can block. Computing it
+      // here is what lets that one string be swapped rather than patched.
+      const hidden = isCardHidden(f, safeCfg);
+      // Names are only blocked when the user asked for it; the thumbnail blur
+      // is not optional, since the image is the thing being hidden.
+      const spoilNames = hidden && safeCfg.blurNames;
       // A pin whose target is gone. Dimmed and stripped back to its unpin
       // affordance: every other control would address a file that isn't there.
       const missing = f.pinExists === false;
@@ -2031,8 +2204,15 @@ export function openImageBrowser(): ModalShellController {
       // The selection checkbox is the touch affordance for multi-select: it
       // has touch-action:none, so a drag starting on it sweeps a range
       // instead of scrolling. Only where writes are allowed.
+      // The accessible name is the THIRD channel the filename escapes through,
+      // after the visible text and the `title` tooltip — and the only one CSS
+      // cannot touch. A spoiler that paints a block while a screen reader (or
+      // anything else surfacing accessible names) still announces
+      // "Select holiday_nsfw_01.png" has hidden nothing.
       const checkBtn = canWriteThis
-        ? `<button type="button" class="ib-check" data-check aria-label="Select ${escHTML(f.name)}">✓</button>`
+        ? `<button type="button" class="ib-check" data-check aria-label="${
+            spoilNames ? "Select hidden item" : `Select ${escHTML(f.name)}`
+          }">✓</button>`
         : "";
       // Flat view: show the file's folder above the thumbnail. It's a button —
       // tapping it drops back to folder view at that directory. Top-level files
@@ -2071,6 +2251,7 @@ export function openImageBrowser(): ModalShellController {
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
+      if (hidden) applySafeView(c, f, spoilNames);
       visible++;
     }
 
@@ -2093,6 +2274,44 @@ export function openImageBrowser(): ModalShellController {
     // before that. In flat view that is thousands of wrong /thumb requests.
     restoreScroll(targetScrollTop);
     installLazyThumbs(gridEl);
+  }
+
+  /**
+   * Blur, spoiler and add the reveal control to one already-appended card.
+   *
+   * Applied to the LIVE NODE rather than woven into the markup string, because
+   * the blur and the spoiler arrive through the kit's injected class rules —
+   * the same rules `comfyui-gallery-loader` uses — and `setSpoilered` also
+   * strips the `title` attribute, which no amount of CSS can hide. That
+   * stripping is the point: a native tooltip renders the filename in full on
+   * hover regardless of the block painted over the text.
+   *
+   * The reveal button is appended to the CARD, not to the thumbnail: the blur
+   * is on the thumbnail, so a button inside it would be blurred too.
+   */
+  function applySafeView(card: HTMLElement, f: ListingFile, spoilNames: boolean): void {
+    card.classList.add("is-safe-hidden");
+    const thumb = card.querySelector(".ib-thumb") as HTMLElement | null;
+    if (thumb) setBlurred(thumb, true);
+    if (spoilNames) {
+      // Both label channels: the filename, and the subpath/pinned-address row —
+      // which in the pinned and flat views is usually the thing that MATCHED,
+      // so leaving it readable would announce exactly what was hidden.
+      for (const sel of [".ib-name", ".ib-subpath"]) {
+        const el = card.querySelector(sel) as HTMLElement | null;
+        if (el) setSpoilered(el, true);
+      }
+    }
+    card.appendChild(
+      makeRevealButton({
+        onReveal: () => {
+          revealed.reveal(fileType(f), fileSub(f), f.name);
+          // No scrollTo: renderGrid captures the live offset, so revealing a
+          // card deep in a listing repaints in place.
+          renderGrid();
+        },
+      }),
+    );
   }
 
   // The root MUST be the scrolling ancestor (`.cmp-body` / scrollHost), NEVER
@@ -2710,6 +2929,7 @@ export function openImageBrowser(): ModalShellController {
             <dt>Enter / o</dt><dd>open preview</dd>
             <dt>i</dt><dd>metadata</dd>
             <dt>w</dt><dd>load workflow</dd>
+            <dt>b</dt><dd>safe view on/off</dd>
             <dt>/</dt><dd>focus search</dd>
             <dt>?</dt><dd>this help</dd>
             <dt>Esc</dt><dd>close (priority)</dd>
@@ -2881,6 +3101,15 @@ export function openImageBrowser(): ModalShellController {
         e.preventDefault();
         e.stopPropagation();
         if (f && META_EXTS.has((f.ext || "").toLowerCase())) void openMetadata(f);
+        break;
+      case "b":
+        // Safe View, global. Ungated by tab or by card — it is a family-wide
+        // display preference, not an affordance of the current location. The
+        // repaint comes from the kit's change bus (the settings write fires
+        // onChange), not from here, so this stays a one-liner.
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSafeView();
         break;
       case "r":
         // Per-card, like the ✎ button: the focused card's own root decides.
@@ -3337,6 +3566,19 @@ const BROWSER_CSS = `
 /* Keep the selection checkbox over the thumbnail corner, below the subpath row. */
 .ib-card.is-flat .ib-check { top: 30px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* Safe View's toolbar toggle. Deliberately NOT the blue "a mode is on" tint the
+   flat/select toggles use — this one says "content is being withheld", and
+   reading it at a glance is the whole point of having it in the toolbar rather
+   than only in the settings dialog. */
+.ib-safe-toggle.is-active { background: #2f3a2f; color: #8fd38f; border-color: #3f5a3f; }
+/* The reveal 👁 is a child of the CARD, not of the blurred thumbnail — the blur
+   is a filter on .ib-thumb and would otherwise blur its own escape hatch. It
+   shares the checkbox's corner, so it sits on the opposite side; both drop
+   below the subpath row on flat/pinned cards for the same reason. */
+.ib-card .cmk-sv-reveal { left: auto; right: 4px; }
+.ib-card.is-flat .cmk-sv-reveal { top: 30px; }
+/* A hidden card must not read as a hover target for its own name. */
+.ib-card.is-safe-hidden .ib-name, .ib-card.is-safe-hidden .ib-subpath { cursor: default; }
 /* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
    order:11 keeps them last when the toolbar wraps on phones, below both the
    crumbs row (order:9) and the media-type filter row (order:10). */
