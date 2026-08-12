@@ -95,6 +95,12 @@ export interface ListingFile {
   width?: number;
   height?: number;
   rating?: number;
+  // The file's `dc:subject` keywords, read out of the same XMP packet as the
+  // rating. Safe View's third haystack, and the one the user can set from
+  // inside ComfyUI (the 🙈 control). Absent on a row from a backend that
+  // predates the tier — which is why every reader defaults it to [] rather
+  // than treating absence as "no keywords, definitively".
+  tags?: readonly string[];
   // Present only in a recursive ("flat") listing: the file's directory relative
   // to the requested subfolder (forward-slashed, "" for a top-level file). The
   // grid labels the card with it and joins it onto the request subfolder to
@@ -692,6 +698,13 @@ export interface PinEntry extends PinItem {
   width?: number;
   height?: number;
   rating?: number;
+  // Emitted for a resolvable file pin, because /pins builds its row through the
+  // same `_scan_file_entry` /list uses. The pinned view is a documented
+  // non-participant in the PROMPT tier (its rows carry no verdict), but the tag
+  // tier is not a separate read — the keywords come out of the packet the
+  // rating was already read from — so a pinned card blurs on them like any
+  // other, and 🙈 shows its true pressed state there.
+  tags?: readonly string[];
 }
 
 // Not exported: callers consume it through fetchPins/postPinDelta's inferred
@@ -775,6 +788,11 @@ export function pinsToFiles(entries: PinEntry[]): ListingFile[] {
       width: e.width,
       height: e.height,
       rating: e.exists ? (e.rating ?? 0) : 0,
+      // Unlike the numeric stats above, an absent value is left ABSENT rather
+      // than normalized to []: nothing sorts on it, and "the backend sent no
+      // keywords" is a fact the Safe View target should carry through
+      // unchanged. A missing pin has no packet to read, so it has none.
+      ...(e.exists && e.tags ? { tags: e.tags } : {}),
       pinType: e.type,
       pinSub: e.subfolder,
       pinKind: "file",

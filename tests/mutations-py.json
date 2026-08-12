@@ -181,6 +181,60 @@
       "file": "safeview_store.py",
       "before": "        if create and parent:",
       "after": "        if parent:"
+    },
+    {
+      "label": "the listing stops reading dc:subject (every row ships tags:[] and the tier can never match)",
+      "file": "image_browser.py",
+      "before": "        \"tags\": tags,\n    }",
+      "after": "        \"tags\": [],\n    }"
+    },
+    {
+      "label": "the tag tier never filters (a file marked sensitive still ships while Safe View is hiding)",
+      "file": "image_browser.py",
+      "before": "        if hide_keywords and is_safe_match(hide_keywords, *fd[\"tags\"]):",
+      "after": "        if False and is_safe_match(hide_keywords, *fd[\"tags\"]):"
+    },
+    {
+      "label": "a tag is compared WHOLE instead of tokenized (`nsfw art` stops matching `nsfw`, disagreeing with the kit and with gallery-loader)",
+      "file": "image_browser.py",
+      "before": "        if hide_keywords and is_safe_match(hide_keywords, *fd[\"tags\"]):",
+      "after": "        if hide_keywords and any(t.lower() in hide_keywords for t in fd[\"tags\"]):"
+    },
+    {
+      "label": "the probe loop stops topping up (a page whose newest rows are tagged comes back empty)",
+      "file": "image_browser.py",
+      "before": "    for _mtime, subpath, name, ext, path, st in found:\n        if len(files) >= cap or probed >= budget:",
+      "after": "    for _mtime, subpath, name, ext, path, st in found[:cap]:\n        if len(files) >= cap or probed >= budget:"
+    },
+    {
+      "label": "the probe budget is unbounded (a fully-tagged tree opens every file in it instead of answering short + truncated)",
+      "file": "image_browser.py",
+      "before": "    budget = cap * PROBE_BUDGET_FACTOR if hide_keywords else cap",
+      "after": "    budget = len(found)"
+    },
+    {
+      "label": "/tag ECHOES the request instead of reading the file back (paints a mark the file does not carry)",
+      "file": "image_browser.py",
+      "before": "            \"tags\": xmp_meta.read_tags(target, head_only=False),",
+      "after": "            \"tags\": [tag] if present else [],"
+    },
+    {
+      "label": "/tag accepts a non-boolean `present` (a truthy \"false\" would ADD the keyword a tap meant to remove)",
+      "file": "image_browser.py",
+      "before": "    if not isinstance(present, bool):",
+      "after": "    if present is None:"
+    },
+    {
+      "label": "/tag drops its sandbox gate to the listing resolver (type=path becomes a WRITE target, against ADR-0002)",
+      "file": "image_browser.py",
+      "before": "    target, err = _resolve_sandboxed_file(\n        body.get(\"type\", \"\"), body.get(\"subfolder\") or \"\", body.get(\"name\", \"\")\n    )\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert target is not None\n    if not os.path.isfile(target):\n        return web.json_response({\"ok\": False, \"error\": \"file not found\"}, status=404)\n\n    ok, backend = xmp_meta.write_tags(",
+      "after": "    base, err = _resolve_listing_base(\n        body.get(\"type\", \"\"), body.get(\"subfolder\") or \"\", body.get(\"path\", \"\")\n    )\n    target = os.path.join(base or \"\", body.get(\"name\", \"\"))\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert target is not None\n    if not os.path.isfile(target):\n        return web.json_response({\"ok\": False, \"error\": \"file not found\"}, status=404)\n\n    ok, backend = xmp_meta.write_tags("
+    },
+    {
+      "label": "a keyword write also rebuilds the rating (a \ud83d\ude48 tap would silently clear the file's stars)",
+      "file": "image_browser.py",
+      "before": "    ok, backend = xmp_meta.write_tags(\n        target, add=[tag] if present else [], remove=[] if present else [tag]\n    )",
+      "after": "    xmp_meta.write_rating(target, 0)\n    ok, backend = xmp_meta.write_tags(\n        target, add=[tag] if present else [], remove=[] if present else [tag]\n    )"
     }
   ]
 }

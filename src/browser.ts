@@ -85,6 +85,13 @@ import {
   VIDEO_EXTS,
   videoSrcURL,
 } from "./api.js";
+import {
+  hasSensitiveTag,
+  markSensitiveHTML,
+  postTag,
+  sensitiveKeyword,
+  TAG_URL,
+} from "./safe-tag.js";
 
 const STYLE_ID = "ib-style";
 const SORT_STORAGE_KEY = "comfyui-image-browser:sort";
@@ -823,7 +830,18 @@ export function openImageBrowser(): ModalShellController {
    * pinned card and every file the backend has no reader for.
    */
   function safeTargetOf(f: ListingFile): SafeViewTarget {
-    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };
+    // `tags` is the file's `dc:subject` keywords, and the kit TOKENIZES each
+    // one rather than comparing it whole — `nsfw art` matches `nsfw`, `assets`
+    // still does not match `ass`. The backend applies the same rule through
+    // `is_safe_match`, so a file it hides is a file this blurs. Absent on a row
+    // from an older backend, which the kit reads as "no tags" rather than as a
+    // match.
+    return {
+      name: f.name,
+      path: safePathOf(f),
+      tags: f.tags,
+      promptMatch: f.prompt_match,
+    };
   }
 
   /** Whether this card should be blurred right now — match AND not revealed. */
@@ -1265,6 +1283,7 @@ export function openImageBrowser(): ModalShellController {
       else if (action === "rename") onRename(f);
       else if (action === "move") onMove(f);
       else if (action === "pin") void toggleFilePin(f);
+      else if (action === "marksensitive") void toggleSensitiveTag(f, actionBtn);
       return;
     }
     // In select mode a card tap toggles selection instead of opening.
@@ -1403,6 +1422,50 @@ export function openImageBrowser(): ModalShellController {
         applyStars(row, prev);
         f.rating = prev;
       });
+  }
+
+  /**
+   * Add or remove the Safe View keyword on one file's `dc:subject`.
+   *
+   * Takes the file OBJECT for the same reason `setStarRating` does — a name
+   * lookup addresses the wrong file in flat view — and re-renders on success
+   * rather than patching the button: marking a file is exactly the event that
+   * should make it blur, and the reveal set has not been touched, so it does.
+   *
+   * THE REPAINT USES WHAT THE SERVER STORED, never the optimistic local guess.
+   * `postTag` resolves to the keywords read back off the file after the write,
+   * and the two differ whenever the file already carried the keyword under a
+   * different casing or the write landed in the sidecar. Assigning `next` here
+   * would paint a mark the file does not carry — and the next `/list` would
+   * silently correct it, which is the worst version of the bug because it looks
+   * like it worked.
+   *
+   * The button is disabled for the duration. It flips server-side state, so a
+   * double tap is a second write racing the first and the loser decides what
+   * the file ends up carrying.
+   */
+  async function toggleSensitiveTag(f: ListingFile, btn: HTMLElement): Promise<void> {
+    const keyword = sensitiveKeyword(readSafeViewConfig());
+    if (!keyword) return; // no configured keyword — the button should not exist
+    // Defensive, exactly like the star handler's: the control only renders for
+    // a card whose OWN root is sandboxed, and this keeps a stale DOM from
+    // posting a write the backend would reject anyway.
+    if (!canWriteFile(f)) return;
+    const next = !hasSensitiveTag(f, keyword);
+    const button = btn as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      f.tags = await postTag(
+        TAG_URL,
+        { type: fileType(f), subfolder: fileSub(f), name: f.name },
+        keyword,
+        next,
+      );
+      renderGrid();
+    } catch (e) {
+      reportError(next ? "Not marked" : "Not unmarked", e);
+      button.disabled = false;
+    }
   }
 
   function openFull(f: ListingFile): void {
@@ -2151,6 +2214,11 @@ export function openImageBrowser(): ModalShellController {
     const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
     // ONE read for the whole pass — never one per card (the kit's contract).
     const safeCfg = readSafeViewConfig();
+    // The keyword 🙈 writes, resolved ONCE per pass for the same reason. `null`
+    // when the user has configured no keywords at all — the control is then not
+    // rendered, because there is nothing it could write that the filter would
+    // honour (see sensitiveKeyword).
+    const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
     // LOCATION-level write flag — it governs the ".." / folder cards, which
@@ -2302,6 +2370,16 @@ export function openImageBrowser(): ModalShellController {
       const pinBtn = canWriteThis
         ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">📌</button>`
         : "";
+      // 🙈 writes the user's first Safe View keyword into the file's dc:subject.
+      // A WRITE, so it rides the per-card canWrite mirror exactly like ✎/⇄/🗑
+      // and never appears on the browse…/path tab — /image_browser/tag rejects
+      // type=path, and a control that 400s is worse than no control. Offered
+      // only when there IS a keyword to write, and never on a missing pin
+      // (the write would address a file that is not there).
+      const markBtn =
+        canWriteThis && !missing && safeKeyword
+          ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword))
+          : "";
       // Rating writes are sandboxed like the other mutations, so path mode
       // gets a read-only star display (when rated) instead of dead buttons.
       const starsRow = canWriteThis
@@ -2356,6 +2434,7 @@ export function openImageBrowser(): ModalShellController {
           ${metaBtn}
           ${wfBtn}
           ${pinBtn}
+          ${markBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -3714,6 +3793,14 @@ const BROWSER_CSS = `
 /* Per-card 📌 — filled while the file is pinned, matching the toolbar toggle's
    active look so "pinned" reads the same in both places. */
 .ib-act-pin.is-pinned { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* Per-card 🙈 — filled while the file carries the keyword, same "this state is
+   on" language as 📌 above, in the warning hue the Safe View toggle uses.
+   It lives in .ib-actions, a SIBLING of .ib-thumb, so the blur applied to a
+   matched thumbnail never reaches it — marking a file must not blur the control
+   that unmarks it. A class rule with no min()/calc(), so getComputedStyle can
+   read it in jsdom. */
+.ib-act-mark.is-marked { background: #4a2530; color: #ff9eb0; border-color: #7a4a58; }
+.ib-act-mark:disabled { cursor: progress; opacity: 0.5; }
 /* A pin whose target is gone. Dimmed rather than hidden: "the file moved" and
    "you never pinned it" are different facts, so the card stays — with only its
    unpin affordance — until it is pruned. */
