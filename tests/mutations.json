@@ -1,0 +1,114 @@
+{
+  "command": ["bun", "run", "test", "--", "tests/js/safe-view.test.js"],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "  // ---- Safe View --------------------------------------------------",
+      "after": "  // ---- Safe View (the family's filter) -----------------------------"
+    },
+    {
+      "label": "the blur/spoiler is never applied to a matching card (thumbnails render in the clear)",
+      "file": "src/browser.ts",
+      "before": "      if (hidden) applySafeView(c, f, spoilNames);",
+      "after": "      if (false) applySafeView(c, f, spoilNames);"
+    },
+    {
+      "label": "the ROOT segment is dropped from the path haystack (a keyword naming a root matches nothing)",
+      "file": "src/browser.ts",
+      "before": "    return `${fileType(f)}/${fileSub(f)}`;",
+      "after": "    return fileSub(f);"
+    },
+    {
+      "label": "the name label is left un-spoilered (its title tooltip then leaks the filename in full)",
+      "file": "src/browser.ts",
+      "before": "      for (const sel of [\".ib-name\", \".ib-subpath\"]) {",
+      "after": "      for (const sel of [\".ib-subpath\"]) {"
+    },
+    {
+      "label": "the checkbox keeps the filename in its accessible name (the channel CSS cannot touch)",
+      "file": "src/browser.ts",
+      "before": "            spoilNames ? \"Select hidden item\" : `Select ${escHTML(f.name)}`",
+      "after": "            `Select ${escHTML(f.name)}`"
+    },
+    {
+      "label": "reveals are never cleared, so one survives a walk to another folder and back",
+      "file": "src/browser.ts",
+      "before": "    if (revealLocation !== here) {",
+      "after": "    if (false) {"
+    },
+    {
+      "label": "reveals are cleared on EVERY load, so a refresh re-blurs the card being worked on",
+      "file": "src/browser.ts",
+      "before": "    if (revealLocation !== here) {",
+      "after": "    if (true) {"
+    },
+    {
+      "label": "folder cards are never filtered (a matching folder name renders in the clear)",
+      "file": "src/browser.ts",
+      "before": "        if (isSensitive({ name: d.name }, safeCfg)) {",
+      "after": "        if (false) {"
+    },
+    {
+      "label": "the modal stops repainting on a settings change (its own toggle appears inert)",
+      "file": "src/browser.ts",
+      "before": "    void loadAndRender({ preserveScroll: true });",
+      "after": "    void 0;"
+    },
+    {
+      "label": "the toolbar toggle claims 🙈 with an empty keyword list (advertises a filter that is off)",
+      "file": "src/browser.ts",
+      "before": "    const active = cfg.enabled && cfg.keywords.length > 0;",
+      "after": "    const active = cfg.enabled;"
+    },
+    {
+      "label": "`b` no longer toggles Safe View",
+      "file": "src/browser.ts",
+      "before": "        toggleSafeView();\n        break;",
+      "after": "        break;"
+    },
+    {
+      "label": "the reveal control is appended INSIDE the blurred thumbnail (blurred along with the image)",
+      "file": "src/browser.ts",
+      "before": "    card.appendChild(\n      makeRevealButton({",
+      "after": "    (thumb ?? card).appendChild(\n      makeRevealButton({"
+    },
+    {
+      "label": "safe_hide is sent without keywords (a request that asks for a filter it will not get)",
+      "file": "src/api.ts",
+      "before": "  if (p.safeHide && p.safeKeywords && p.safeKeywords.length > 0) {",
+      "after": "  if (p.safeHide) {"
+    },
+    {
+      "label": "the params are sent unconditionally (the default listing URL stops being byte-identical)",
+      "file": "src/api.ts",
+      "before": "  if (p.safeHide && p.safeKeywords && p.safeKeywords.length > 0) {",
+      "after": "  if (true) {"
+    },
+    {
+      "label": "sidebar: the blur is not cleared before re-deriving (it smears onto every recycled card)",
+      "file": "src/sidebar-stars.ts",
+      "before": "  for (const el of card.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);",
+      "after": "  void card;"
+    },
+    {
+      "label": "sidebar: the injector leaves its blur behind when switched off (no control can clear it)",
+      "file": "src/sidebar-stars.ts",
+      "before": "    for (const el of document.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);",
+      "after": "    void 0;"
+    },
+    {
+      "label": "lightbox: the blur is not cleared on navigation (it follows the user onto the next image)",
+      "file": "src/lightbox-actions.ts",
+      "before": "    for (const el of dialog.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);",
+      "after": "    void 0;"
+    },
+    {
+      "label": "lightbox: no reveal control, so a blurred viewer is a dead end",
+      "file": "src/lightbox-actions.ts",
+      "before": "    dialog.appendChild(btn);",
+      "after": "    void btn;"
+    }
+  ]
+}

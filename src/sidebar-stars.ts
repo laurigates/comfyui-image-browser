@@ -34,13 +34,20 @@
 //    app chrome in a broken state. Each pass is wrapped; a failed pass is a
 //    console warning and no stars.
 
-import type { RatingAddress } from "@laurigates/comfy-modal-kit";
+import type { RatingAddress, SafeViewConfig } from "@laurigates/comfy-modal-kit";
 import {
   applyStars,
   ensureStyleOnce,
+  isSensitive,
   nextRating,
   notify,
+  onSafeViewChange,
   postRating,
+  readSafeViewConfig,
+  SAFE_VIEW_BLUR_CLASS,
+  SAFE_VIEW_SPOILER_CLASS,
+  setBlurred,
+  setSpoilered,
   starsHTML,
 } from "@laurigates/comfy-modal-kit";
 import { EXT_NAME, RATING_URL } from "./api.js";
@@ -80,6 +87,52 @@ const CARD_SELECTOR = "[data-selected]";
 
 function cardRootOf(img: Element): HTMLElement | null {
   return img.closest(CARD_SELECTOR) as HTMLElement | null;
+}
+
+/** Marks a card Safe View is currently hiding, for the CSS below and for tests. */
+const SAFE_CARD_CLASS = "ibs-safe-hidden";
+
+/**
+ * Apply (or clear) Safe View on one stock card.
+ *
+ * NO TOGGLE IS INJECTED HERE, by design: nothing in ComfyUI's own chrome should
+ * advertise that this filter exists. It follows the global setting silently;
+ * the controls live in our modal, the settings dialog and the Touch Tools
+ * chooser.
+ *
+ * CLEARED UNCONDITIONALLY BEFORE IT IS RE-APPLIED. The grid is virtualized —
+ * card nodes are recycled for different files — so a card that carried the blur
+ * for a sensitive file and is handed a harmless one must lose it, or the filter
+ * becomes a permanent smear on whatever scrolled through that slot. Clearing by
+ * CLASS rather than by re-deriving the previous file's name is what makes that
+ * independent of what the node used to show: the same reason nothing else in
+ * this module binds state to a node.
+ *
+ * The spoiler is applied to the elements whose text IS the filename, found by
+ * CONTENT rather than by a stock class name. That is deliberate — the stock
+ * card's internal classes are exactly the kind of thing that moves between
+ * frontend versions, whereas "the element that renders this file's name" is
+ * defined by the data we already hold. A miss renders nothing, and the
+ * thumbnail blur (the part that matters) is unaffected.
+ */
+function applyCardSafeView(card: HTMLElement, addr: RatingAddress, cfg: SafeViewConfig): void {
+  for (const el of card.querySelectorAll(`.${SAFE_VIEW_SPOILER_CLASS}`)) setSpoilered(el, false);
+  for (const el of card.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);
+  card.classList.remove(SAFE_CARD_CLASS);
+
+  // The path haystack is the file's LOGICAL address, root included — the same
+  // string browser.ts builds and the same one the backend matches, so a file is
+  // never hidden in one surface and plain in another.
+  if (!isSensitive({ name: addr.name, path: `${addr.type}/${addr.subfolder}` }, cfg)) return;
+
+  card.classList.add(SAFE_CARD_CLASS);
+  for (const el of card.querySelectorAll("img, video")) setBlurred(el, true);
+  if (!cfg.blurNames) return;
+  for (const el of card.querySelectorAll("*")) {
+    // Deepest match only: an ancestor whose whole text happens to be the
+    // filename would otherwise be blocked out too, taking the stars row with it.
+    if (el.textContent?.trim() === addr.name && !el.querySelector("*")) setSpoilered(el, true);
+  }
 }
 
 export function installSidebarStars(): () => void {
@@ -154,6 +207,10 @@ export function installSidebarStars(): () => void {
 
   function paint(): void {
     const pending: RatingAddress[] = [];
+    // ONE read per pass, handed to every card — the kit's contract, and it
+    // matters more here than in the modal: this pass runs on every scroll
+    // frame's settle over every card on screen.
+    const safeCfg = readSafeViewConfig();
     // Scoped to media-asset CARDS rather than every <img> on the page.
     // /api/view is also how a PreviewImage node renders its output on the
     // canvas and how the lightbox shows a full-size image, so an unscoped
@@ -169,6 +226,10 @@ export function installSidebarStars(): () => void {
       if (!addr) continue;
       const card = cardRootOf(img);
       if (!card) continue;
+      // Before the star bookkeeping, and unconditionally — a card that is NOT
+      // sensitive still has to be cleared, because the virtualizer may have
+      // just handed this node a different file (see applyCardSafeView).
+      applyCardSafeView(card, addr, safeCfg);
       const key = addressKey(addr);
       const known = ratingCache.get(key);
 
@@ -247,14 +308,31 @@ export function installSidebarStars(): () => void {
     attributes: true,
     attributeFilter: ["src"],
   });
+  // A Safe View change repaints nothing here on its own: this module only acts
+  // when the DOM mutates, and flipping a setting mutates nothing. Without this
+  // the sidebar would keep the old blur until the next scroll — i.e. switching
+  // the filter ON would appear not to work on whatever is already on screen,
+  // which is the worst possible moment for it to look broken.
+  const disposeSafeView = onSafeViewChange(schedule);
   schedule();
 
   return () => {
     disposed = true;
     if (timer !== null) clearTimeout(timer);
     observer.disconnect();
+    disposeSafeView();
     document.removeEventListener("click", onClick, true);
     for (const row of document.querySelectorAll(`.${ROW_CLASS}`)) row.remove();
     for (const card of document.querySelectorAll(`[${DONE_ATTR}]`)) card.removeAttribute(DONE_ATTR);
+    // Switching the injector off must leave the stock cards exactly as found —
+    // a left-behind blur would look like a broken frontend, with no control
+    // anywhere to clear it.
+    for (const el of document.querySelectorAll(`.${SAFE_VIEW_SPOILER_CLASS}`)) {
+      setSpoilered(el, false);
+    }
+    for (const el of document.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`)) setBlurred(el, false);
+    for (const el of document.querySelectorAll(`.${SAFE_CARD_CLASS}`)) {
+      el.classList.remove(SAFE_CARD_CLASS);
+    }
   };
 }

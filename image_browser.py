@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 import shutil
 from email.utils import formatdate
 from typing import Any
@@ -128,6 +129,76 @@ def _has_metadata_reader(name: str) -> bool:
 # otherwise be a silent no-filter that no test could see. An unrecognised key
 # narrows nothing, matching how `recursive` treats a value it can't parse.
 KIND_FILTERS: dict[str, set[str]] = {"images": IMG_EXTS, "videos": VIDEO_EXTS}
+
+
+# ---------------------------------------------------------------------------
+# Safe View — server-side hiding of keyword-matched entries
+# ---------------------------------------------------------------------------
+#
+# THIS IS DISCRETION, NOT ACCESS CONTROL. `safe_hide` is a rendering preference
+# the browser asks for; every other endpoint still serves the same files to the
+# same caller, and nothing here authenticates anyone. It keeps a folder of
+# sensitive renders off the screen while someone is looking over your shoulder.
+# Do not grow it into a permission boundary — the perimeter that actually
+# matters is the extension whitelist plus `_resolve_sandboxed_file`, and mixing
+# a cosmetic filter into it would make both harder to reason about.
+#
+# The matcher is a DIRECT PORT of the frontend kit's `tokenize` / `parseKeywords`
+# (comfy-modal-kit/src/safe-view.ts). The two sides must agree exactly: hiding
+# happens here, blurring happens there, and a file that one considers sensitive
+# and the other does not is a file that appears blurred in one grid and plain in
+# the other. The two control cases below are what pin the agreement — a
+# substring implementation passes every positive test and fails only these.
+_SAFE_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+_SAFE_KEYWORD_SPLIT = re.compile(r"[\s,]+")
+_SAFE_KEYWORD_STRIP = re.compile(r"[^a-z0-9]")
+
+
+def safe_tokenize(value: str) -> set[str]:
+    """Split a haystack into lowercase alphanumeric tokens (port of `tokenize`).
+
+    WHOLE TOKENS, never substrings. ``output/nsfw/2026-08-04`` and
+    ``my_nsfw_pic.png`` both yield an ``nsfw`` token, while ``assets`` yields
+    only ``assets`` — so the keyword ``ass`` does not match it, and ``nsfw``
+    does not match ``nsfwish.png``. Substring matching silently hides unrelated
+    work, and the user cannot tell a deliberate match from an accidental one
+    because both look identical: a file that simply is not there.
+    """
+    return {t for t in _SAFE_TOKEN_SPLIT.split(value.lower()) if t}
+
+
+def parse_safe_keywords(raw: str) -> set[str]:
+    """Parse the `safe_kw` query value into keyword tokens (port of `parseKeywords`).
+
+    Accepts commas and/or whitespace as separators and strips every
+    non-alphanumeric character from each keyword — a keyword carrying
+    punctuation could never equal a token from :func:`safe_tokenize`, so
+    normalizing it here is what keeps ``"nsfw,"`` working. Returns a set: the
+    frontend preserves order for display, but matching is an intersection.
+    """
+    if not raw:
+        return set()
+    out: set[str] = set()
+    for piece in _SAFE_KEYWORD_SPLIT.split(raw):
+        kw = _SAFE_KEYWORD_STRIP.sub("", piece.lower())
+        if kw:
+            out.add(kw)
+    return out
+
+
+def is_safe_match(keywords: set[str], *parts: str) -> bool:
+    """Whether any of `parts` contributes a token matching one of `keywords`.
+
+    ``parts`` are the pieces of the entry's LOGICAL address — its name, its
+    root (``output``), and every folder segment above it. Logical, never the
+    resolved OS path: ``/home/lauri/ComfyUI/output/nsfw`` would put ``home``,
+    ``lauri`` and ``comfyui`` into every haystack, so a keyword of ``comfyui``
+    would hide the entire library — and the frontend, which never sees those
+    segments, would disagree about which files matched.
+    """
+    if not keywords:
+        return False
+    return any(part and not keywords.isdisjoint(safe_tokenize(part)) for part in parts)
 
 
 def _parse_extensions(raw: str) -> set[str]:
@@ -314,6 +385,8 @@ def _probe_newest(
     walk_truncated: bool,
     *,
     with_subpath: bool,
+    hide_keywords: set[str] | None = None,
+    hide_prefix: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Sort newest-first, slice to ``cap``, then probe only the survivors.
 
@@ -324,8 +397,28 @@ def _probe_newest(
     ``with_subpath`` is False for a non-recursive listing, which must omit the
     key ENTIRELY rather than emit an empty string — the frontend distinguishes
     "flat listing, file at top level" from "folder listing" by its presence.
+
+    ``hide_keywords`` is Safe View's server-side hide. It is applied HERE, in
+    the one function that owns the cap, rather than at the two call sites — so
+    "filtered above the newest-N cap" is structurally guaranteed and a future
+    caller cannot get the order wrong. That order is the entire reason hiding
+    lives on the server: filtering an already-truncated response would answer a
+    folder of 6000 mostly-sensitive files with a near-empty grid, while
+    filtering first spends the cap on the files that survive and returns a full
+    page of them. ``truncated`` is likewise computed AFTER the filter, so it
+    reports whether the caller is missing anything it was allowed to see.
+
+    ``hide_prefix`` is the entries' shared LOGICAL parent — ``"output/holiday"``
+    for a sandboxed listing, the absolute directory for ``type=path``. Each
+    entry's own ``subpath`` and ``name`` are matched on top of it.
     """
     found.sort(key=lambda f: (-f[0], f[1], f[2]))
+    if hide_keywords:
+        found = [
+            entry
+            for entry in found
+            if not is_safe_match(hide_keywords, hide_prefix, entry[1], entry[2])
+        ]
     truncated = walk_truncated or len(found) > cap
     files: list[dict[str, Any]] = []
     for _mtime, subpath, name, ext, path, st in found[:cap]:
@@ -337,7 +430,12 @@ def _probe_newest(
 
 
 def _walk_files(
-    base: str, exts: set[str], image_subset: set[str], cap: int
+    base: str,
+    exts: set[str],
+    image_subset: set[str],
+    cap: int,
+    hide_keywords: set[str] | None = None,
+    hide_prefix: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Recursively collect the ``cap`` NEWEST files under ``base`` for the flat view.
 
@@ -407,7 +505,20 @@ def _walk_files(
             # bad dir.
             continue
 
-    return _probe_newest(found, image_subset, cap, walk_truncated, with_subpath=True)
+    # The hide filter runs in _probe_newest, i.e. AFTER this enumeration — so
+    # like `kind=`, a Safe View hide makes the walk traverse MORE, not less:
+    # FLAT_WALK_CAP counts entries the filter has not yet seen. That follows
+    # from filtering above the newest-N cap; don't "optimize" it by pruning the
+    # descent here, which would reintroduce truncation in directory order.
+    return _probe_newest(
+        found,
+        image_subset,
+        cap,
+        walk_truncated,
+        with_subpath=True,
+        hide_keywords=hide_keywords,
+        hide_prefix=hide_prefix,
+    )
 
 
 @PromptServer.instance.routes.get("/image_browser/list")
@@ -444,6 +555,17 @@ async def image_browser_list(request: web.Request) -> web.Response:
     # enormous, so the flag is ignored there.
     recursive = q.get("recursive", "") in ("1", "true", "yes") and type_name in SANDBOXED_TYPES
 
+    # Safe View's server-side hide. BOTH conditions are required: `safe_hide`
+    # asks for dropping rather than blurring, and an absent or empty `safe_kw`
+    # filters nothing at all (there is no implicit default keyword here — the
+    # frontend owns the default and sends it explicitly, so a request that
+    # forgot the list cannot silently hide a user's files). An unparseable
+    # `safe_hide` narrows nothing rather than 400ing, matching `recursive` and
+    # `kind` — the request is still answerable.
+    hide_keywords: set[str] = set()
+    if q.get("safe_hide", "") in ("1", "true", "yes"):
+        hide_keywords = parse_safe_keywords(q.get("safe_kw", ""))
+
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -467,9 +589,18 @@ async def image_browser_list(request: web.Request) -> web.Response:
     files: list[dict[str, Any]] = []
     truncated = False
 
+    # The entries' shared LOGICAL parent, and the exact string the frontend
+    # builds its own `path` haystack from — `${root}/${subfolder}` for a
+    # sandboxed root, the absolute directory for type=path (the one case where
+    # the logical path IS the OS path, so both sides see the same segments).
+    # Never the resolved OS path for a sandboxed root: see is_safe_match.
+    hide_prefix = base if type_name == "path" else f"{type_name}/{subfolder}"
+
     if recursive:
         # Flat view: no folder cards, files carry their relative subpath.
-        files, truncated = _walk_files(base, exts, image_subset, FLAT_LIST_CAP)
+        files, truncated = _walk_files(
+            base, exts, image_subset, FLAT_LIST_CAP, hide_keywords, hide_prefix
+        )
     else:
         found: list[_FoundEntry] = []
         try:
@@ -480,6 +611,17 @@ async def image_browser_list(request: web.Request) -> web.Response:
                             continue
                         if entry.is_dir(follow_symlinks=False):
                             if entry.name in ("clipspace", "__pycache__"):
+                                continue
+                            # A hidden folder is matched by NAME ONLY — the
+                            # kit's documented folder rule, because a folder
+                            # card carries no metadata to read. Dropping it
+                            # matters: leaving the card would keep a visible
+                            # (and now empty) doorway labelled with exactly the
+                            # word the user asked not to see. The consequence,
+                            # stated in the README, is that a blandly-named
+                            # folder full of sensitive files is caught in flat
+                            # view — which lists the files — not in folder view.
+                            if is_safe_match(hide_keywords, entry.name):
                                 continue
                             st = entry.stat(follow_symlinks=False)
                             dirs.append({"name": entry.name, "mtime": st.st_mtime})
@@ -499,7 +641,13 @@ async def image_browser_list(request: web.Request) -> web.Response:
         # so a huge single directory pays the expensive probes only for the
         # files that ship. Newest first.
         files, truncated = _probe_newest(
-            found, image_subset, DIR_LIST_CAP, False, with_subpath=False
+            found,
+            image_subset,
+            DIR_LIST_CAP,
+            False,
+            with_subpath=False,
+            hide_keywords=hide_keywords,
+            hide_prefix=hide_prefix,
         )
 
     dirs.sort(key=lambda d: d["name"].lower())

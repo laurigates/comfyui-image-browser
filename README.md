@@ -87,6 +87,70 @@ manage without leaving ComfyUI.
   past that an add is refused out loud rather than silently dropped. Any pins
   you had before this version are migrated automatically on first open.
 
+### Safe View — blur sensitive thumbnails
+
+You are browsing generation output as a grid of thumbnails, on a phone, and
+someone else is in the room. Safe View matches a keyword list against each
+file's name and the folders above it, and **blurs the matching thumbnails** and
+**blocks out their names**.
+
+**This is discretion, not access control.** The blur is CSS — one devtools
+override away from gone — and the blurred bytes are still downloaded and still
+sit in the browser cache. It defeats a shoulder, not an adversary. Do not use
+it to keep anything from someone who has your keyboard, your browser, or your
+disk.
+
+Turn it on and off with the **🙈 / 👁** button in the toolbar, the `b` key, or
+the **Safe View** row in the Touch Tools chooser. Configure it under
+**Settings → Touch Tools → Safe View**:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Safe View** | on | The master switch. With no keywords it does nothing at all, which is why it ships enabled. |
+| **Keywords** | `nsfw` | Comma- or space-separated. Case-insensitive. Empty means nothing is filtered. |
+| **Remove matches from the listing entirely** | off | Drops matches **server-side** instead of blurring them, so they never reach the browser. |
+| **Block out names too** | on | Also blanks the file name, its folder label and its tooltip. |
+| **Also match the generation prompt and model** | off | Not implemented yet — a later release. |
+
+Two behaviours worth knowing:
+
+- **Keywords match whole words, never fragments.** `nsfw` matches
+  `output/nsfw/pic.png` and `my_nsfw_pic.png`, but `ass` does **not** match
+  `assets/` and `nsfw` does **not** match `nsfwish.png`. Substring matching
+  would quietly blur unrelated work, and you would have no way to tell an
+  accident from a deliberate match — both look identical.
+- **Hiding is filtered above the listing limit.** A folder of 6000 mostly
+  sensitive files still returns a full page of the rest, rather than the
+  handful that survived a filter applied to an already-truncated listing.
+
+Tap the **👁** on a blurred card to reveal that one card. Reveals last for the
+session and are forgotten when you leave the folder or close the browser.
+Opening a file full-size counts as revealing it.
+
+The same filter applies to ComfyUI's own **Media Assets** sidebar cards and its
+full-screen asset viewer, following the same setting. Nothing is injected into
+ComfyUI's own chrome to advertise it — the controls are all in this pack.
+
+The settings are shared with
+[`comfyui-gallery-loader`](https://github.com/laurigates/comfyui-gallery-loader):
+both packs register the same preference, so configuring it once covers both,
+and because ComfyUI stores settings on the server it follows you between
+devices.
+
+#### What it does NOT cover
+
+Listed because you should know the shape of the gap before relying on it:
+
+- **Folders are matched by name only.** A blandly-named folder full of
+  sensitive files is not caught in folder view. It *is* caught in flat view
+  (**≣**), which lists the files themselves and matches their full paths.
+- **Delete, rename and move confirmations name the file in plain text**, as do
+  the toasts that report them.
+- **The ⓘ metadata card shows the full prompt**, unblurred.
+- **The move-destination picker lists folder names unblurred.**
+- **A fresh render appears full-size on the canvas** in a `PreviewImage` node,
+  untouched — nothing in this pack can reach it.
+
 ### Star ratings on ComfyUI's own Media Assets sidebar
 
 Ratings are stored in each image's **XMP** (or a sidecar), so they are a

@@ -62,7 +62,9 @@ function getKit() {
       modalChrome: [],
       pointerGuardInstalled: false,
       hubEntries: [],
-      hubLauncherInstalled: false
+      hubLauncherInstalled: false,
+      hubToggles: [],
+      safeViewListeners: []
     };
     g[KEY] = kit;
   }
@@ -74,6 +76,10 @@ function getKit() {
     kit.modalChrome = [];
   if (!kit.hubEntries)
     kit.hubEntries = [];
+  if (!kit.hubToggles)
+    kit.hubToggles = [];
+  if (!kit.safeViewListeners)
+    kit.safeViewListeners = [];
   return kit;
 }
 var SORT_OPTIONS = [
@@ -123,7 +129,22 @@ function registerHubEntry(entry) {
   }
 }
 function getHubEntries() {
-  return [...getKit().hubEntries].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  return [...getKit().hubEntries].sort(byPriority);
+}
+function byPriority(a, b) {
+  return (b.priority ?? 0) - (a.priority ?? 0);
+}
+function registerHubToggle(toggle) {
+  const list = getKit().hubToggles;
+  const i = list.findIndex((t) => t.id === toggle.id);
+  if (i >= 0) {
+    list.splice(i, 1, toggle);
+  } else {
+    list.push(toggle);
+  }
+}
+function getHubToggles() {
+  return [...getKit().hubToggles].sort(byPriority);
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -822,6 +843,20 @@ var HUB_CSS = `
     background: #2a2a32;
     margin: 8px 4px;
 }
+.cmk-hub-state {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #2a2a32;
+    color: #9a9aa4;
+}
+.cmk-hub-row[aria-checked="true"] .cmk-hub-state {
+    background: #24406b;
+    color: #9ec6ff;
+}
 .cmk-hub-empty {
     color: #9a9aa4;
     font-size: 13px;
@@ -940,6 +975,42 @@ function openTouchToolsHub() {
   for (const entry of entries) {
     const row = makeRow(entry.icon, entry.label, entry.description);
     row.addEventListener("click", () => runRow(entry.open));
+    list.append(row);
+  }
+  for (const toggle of getHubToggles()) {
+    const row = makeRow(toggle.icon, toggle.label, toggle.description);
+    row.setAttribute("role", "switch");
+    const state = document.createElement("span");
+    state.className = "cmk-hub-state";
+    row.append(state);
+    const paint = () => {
+      let on = false;
+      try {
+        on = toggle.get();
+      } catch (e) {
+        console.error(`[comfy-modal-kit] hub toggle "${toggle.id}" get failed`, e);
+      }
+      row.setAttribute("aria-checked", on ? "true" : "false");
+      state.textContent = on ? "On" : "Off";
+    };
+    paint();
+    row.addEventListener("click", () => {
+      try {
+        toggle.set(!toggle.get());
+      } catch (e) {
+        console.error(`[comfy-modal-kit] hub toggle "${toggle.id}" set failed`, e);
+        try {
+          notify({
+            severity: "error",
+            summary: `Could not change ${toggle.label}`,
+            detail: String(e)
+          });
+        } catch (n) {
+          console.warn("[comfy-modal-kit] notify failed", n);
+        }
+      }
+      paint();
+    });
     list.append(row);
   }
   if (entries.length === 0) {
@@ -1075,6 +1146,287 @@ function applyStars(row, rating) {
   for (const s of row.querySelectorAll("[data-val]")) {
     s.classList.toggle("is-on", Number(s.dataset.val) <= r);
   }
+}
+var SAFE_VIEW_SETTINGS = {
+  enabled: "TouchTools.SafeView.Enabled",
+  keywords: "TouchTools.SafeView.Keywords",
+  hide: "TouchTools.SafeView.Hide",
+  blurNames: "TouchTools.SafeView.BlurNames",
+  matchPrompt: "TouchTools.SafeView.MatchPrompt"
+};
+var SAFE_VIEW_DEFAULT_KEYWORDS = "nsfw";
+var SAFE_VIEW_GLYPH_ON = "\uD83D\uDE48";
+var SAFE_VIEW_GLYPH_OFF = "\uD83D\uDC41";
+function safeViewSettings() {
+  const fire = () => notifySafeViewChange();
+  return [
+    {
+      id: SAFE_VIEW_SETTINGS.enabled,
+      category: ["Touch Tools", "Safe View", "Enabled"],
+      sortOrder: 100,
+      name: "Safe View",
+      tooltip: "Blur thumbnails and block out names for files and folders matching your keywords, in the Image Browser, the image picker and ComfyUI's own asset sidebar and lightbox. This is discretion, not security: the blur is CSS and the file is still downloaded, so it defeats someone glancing over your shoulder, not someone with your keyboard.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.keywords,
+      category: ["Touch Tools", "Safe View", "Keywords"],
+      sortOrder: 90,
+      name: "Keywords",
+      tooltip: "Comma- or space-separated. Matched as WHOLE WORDS against the file name, every folder above it, and the file's XMP keyword tags — so 'nsfw' matches output/nsfw/pic.png and my_nsfw_pic.png, while 'ass' does not match assets/ or classic.png. Case-insensitive. Empty means nothing is filtered.",
+      type: "text",
+      defaultValue: SAFE_VIEW_DEFAULT_KEYWORDS,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.hide,
+      category: ["Touch Tools", "Safe View", "Hide"],
+      sortOrder: 80,
+      name: "Remove matches from the listing entirely",
+      tooltip: "Off (default): matches stay in the grid, blurred, with a reveal button. On: matches are dropped server-side, so they never reach the browser and the listing count changes. Hiding is filtered above the newest-N cap, so a folder of mostly-sensitive files still returns a full page of the rest.",
+      type: "boolean",
+      defaultValue: false,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.blurNames,
+      category: ["Touch Tools", "Safe View", "Names"],
+      sortOrder: 70,
+      name: "Block out names too",
+      tooltip: "Replaces the file name, its folder label and its tooltip with a solid block. Off leaves names readable under a blurred thumbnail — which usually defeats the point, since the folder name is often what matched.",
+      type: "boolean",
+      defaultValue: true,
+      onChange: fire
+    },
+    {
+      id: SAFE_VIEW_SETTINGS.matchPrompt,
+      category: ["Touch Tools", "Safe View", "Prompt"],
+      sortOrder: 60,
+      name: "Also match the generation prompt and model",
+      tooltip: "Off by default because it is expensive: every file's embedded metadata must be parsed and cached before its verdict is known, and a file with no verdict yet is blurred until the background scan reaches it. On a large library that means a mostly-blurred grid on first enable, clearing as the scan progresses.",
+      type: "boolean",
+      defaultValue: false,
+      onChange: fire
+    }
+  ];
+}
+function safeViewSettingHost() {
+  const host = globalThis;
+  return host.app?.extensionManager?.setting ?? null;
+}
+var SAFE_VIEW_DEFAULTS = Object.freeze({
+  enabled: true,
+  keywords: Object.freeze([SAFE_VIEW_DEFAULT_KEYWORDS]),
+  hide: false,
+  blurNames: true,
+  matchPrompt: false
+});
+function parseKeywords(raw) {
+  if (typeof raw !== "string")
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const piece of raw.split(/[\s,]+/)) {
+    const kw = piece.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!kw || seen.has(kw))
+      continue;
+    seen.add(kw);
+    out.push(kw);
+  }
+  return out;
+}
+function readSafeViewConfig(host = safeViewSettingHost()) {
+  if (!host)
+    return SAFE_VIEW_DEFAULTS;
+  const bool = (id, fallback) => {
+    const v = host.get(id);
+    return typeof v === "boolean" ? v : fallback;
+  };
+  const rawKeywords = host.get(SAFE_VIEW_SETTINGS.keywords);
+  return {
+    enabled: bool(SAFE_VIEW_SETTINGS.enabled, SAFE_VIEW_DEFAULTS.enabled),
+    keywords: rawKeywords === undefined ? SAFE_VIEW_DEFAULTS.keywords : parseKeywords(rawKeywords),
+    hide: bool(SAFE_VIEW_SETTINGS.hide, SAFE_VIEW_DEFAULTS.hide),
+    blurNames: bool(SAFE_VIEW_SETTINGS.blurNames, SAFE_VIEW_DEFAULTS.blurNames),
+    matchPrompt: bool(SAFE_VIEW_SETTINGS.matchPrompt, SAFE_VIEW_DEFAULTS.matchPrompt)
+  };
+}
+function isSafeViewActive(cfg = readSafeViewConfig()) {
+  return cfg.enabled && cfg.keywords.length > 0;
+}
+function tokenize(input) {
+  if (typeof input !== "string" || input === "")
+    return [];
+  return input.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== "");
+}
+function isSensitive(target, cfg) {
+  if (!cfg.enabled || cfg.keywords.length === 0)
+    return false;
+  const haystack = new Set;
+  for (const t of tokenize(target.name))
+    haystack.add(t);
+  for (const t of tokenize(target.path))
+    haystack.add(t);
+  for (const tag of target.tags ?? []) {
+    for (const t of tokenize(tag))
+      haystack.add(t);
+  }
+  for (const kw of cfg.keywords) {
+    if (haystack.has(kw))
+      return true;
+  }
+  if (cfg.matchPrompt) {
+    if (target.promptMatch === true)
+      return true;
+    if (target.promptMatch === "unscanned")
+      return true;
+  }
+  return false;
+}
+function makeRevealSet() {
+  const set = new Set;
+  const key = (type, subfolder, name) => `${type}:${subfolder}:${name}`;
+  return {
+    key,
+    has: (t, s, n) => set.has(key(t, s, n)),
+    reveal: (t, s, n) => {
+      set.add(key(t, s, n));
+    },
+    clear: () => set.clear(),
+    get size() {
+      return set.size;
+    }
+  };
+}
+var SAFE_VIEW_STYLE_ID = "cmk-safe-view-style";
+var SAFE_VIEW_BLUR_CLASS = "cmk-sv-blur";
+var SAFE_VIEW_SPOILER_CLASS = "cmk-sv-spoiler";
+var SPOILER_TITLE_ATTR = "data-cmk-sv-title";
+var SAFE_VIEW_CSS = `
+.${SAFE_VIEW_BLUR_CLASS} {
+    /* Scale past the edges: a blurred element otherwise fades toward its own
+       border and leaks a readable silhouette of the content at the rim. */
+    filter: blur(18px);
+    transform: scale(1.08);
+}
+.${SAFE_VIEW_SPOILER_CLASS} {
+    /* A SOLID BLOCK, never a text blur — blurred text stays readable at small
+       sizes, which is exactly the size a phone grid renders names at. */
+    background: #3a3a44;
+    color: transparent;
+    border-radius: 3px;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+}
+.cmk-sv-reveal {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    /* >=34px is the family's per-card control floor. */
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    background: rgba(20, 20, 26, 0.82);
+    color: #e8e8ea;
+    border: 1px solid #4a4a58;
+    border-radius: 8px;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.cmk-sv-reveal:hover {
+    background: rgba(40, 40, 52, 0.92);
+}
+`;
+function ensureSafeViewStyle() {
+  ensureStyleOnce(SAFE_VIEW_STYLE_ID, SAFE_VIEW_CSS);
+}
+function setBlurred(el, blurred) {
+  ensureSafeViewStyle();
+  el.classList.toggle(SAFE_VIEW_BLUR_CLASS, blurred);
+}
+function setSpoilered(el, spoilered) {
+  ensureSafeViewStyle();
+  el.classList.toggle(SAFE_VIEW_SPOILER_CLASS, spoilered);
+  if (spoilered) {
+    const title = el.getAttribute("title");
+    if (title !== null) {
+      el.setAttribute(SPOILER_TITLE_ATTR, title);
+      el.removeAttribute("title");
+    }
+  } else {
+    const parked = el.getAttribute(SPOILER_TITLE_ATTR);
+    if (parked !== null) {
+      el.setAttribute("title", parked);
+      el.removeAttribute(SPOILER_TITLE_ATTR);
+    }
+  }
+}
+function makeRevealButton(opts) {
+  ensureSafeViewStyle();
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cmk-sv-reveal";
+  btn.textContent = SAFE_VIEW_GLYPH_OFF;
+  btn.title = "Reveal";
+  btn.setAttribute("aria-label", opts.label ?? "Reveal hidden item");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    opts.onReveal();
+  });
+  return btn;
+}
+function onSafeViewChange(listener) {
+  const list = getKit().safeViewListeners;
+  list.push(listener);
+  return () => {
+    const i = list.indexOf(listener);
+    if (i >= 0)
+      list.splice(i, 1);
+  };
+}
+function notifySafeViewChange() {
+  for (const listener of [...getKit().safeViewListeners]) {
+    try {
+      listener();
+    } catch (e) {
+      console.error("[comfy-modal-kit] safe-view listener failed", e);
+    }
+  }
+}
+function toggleSafeView(host = safeViewSettingHost()) {
+  if (!host)
+    return;
+  const cfg = readSafeViewConfig(host);
+  if (cfg.keywords.length === 0) {
+    notify({
+      severity: "warn",
+      summary: "Safe View has no keywords",
+      detail: "Add keywords in Settings → Touch Tools → Safe View → Keywords."
+    });
+    return;
+  }
+  host.set(SAFE_VIEW_SETTINGS.enabled, !cfg.enabled);
+}
+function registerSafeViewHubToggle() {
+  registerHubToggle({
+    id: "safe-view.toggle",
+    label: "Safe View",
+    icon: "pi pi-eye-slash",
+    description: "Blur sensitive thumbnails and names",
+    priority: 100,
+    get: () => isSafeViewActive(),
+    set: () => toggleSafeView()
+  });
 }
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
@@ -1341,6 +1693,10 @@ async function fetchListing(p) {
   }
   if (p.kind && p.kind !== "all")
     params.set("kind", p.kind);
+  if (p.safeHide && p.safeKeywords && p.safeKeywords.length > 0) {
+    params.set("safe_kw", p.safeKeywords.join(","));
+    params.set("safe_hide", "1");
+  }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok)
     throw new Error(`HTTP ${r.status}`);
@@ -1756,7 +2112,7 @@ function openImageBrowser() {
     placeholder: "Filter by filename…",
     width: "100vw",
     height: "100vh",
-    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>w</kbd> workflow · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
+    footerLeftHTML: "<kbd>j/k</kbd> navigate · <kbd>i</kbd> metadata · <kbd>w</kbd> workflow · <kbd>b</kbd> safe view · <kbd>?</kbd> help · <kbd>Esc</kbd> close",
     footerRightHTML: '<span class="ib-count"></span>',
     onClose: () => {
       rememberScroll();
@@ -1768,6 +2124,8 @@ function openImageBrowser() {
       window.removeEventListener("keydown", onScrollKey, true);
       disposeBackGuard?.();
       disposeBackGuard = null;
+      disposeSafeView();
+      revealed.clear();
     }
   });
   modal.dialog.classList.add("ib-dialog");
@@ -1830,6 +2188,9 @@ function openImageBrowser() {
   pruneEl.title = "Remove pins whose file or folder no longer exists";
   pruneEl.textContent = "\uD83E\uDDF9 Prune missing";
   pruneEl.style.display = "none";
+  const safeToggleEl = document.createElement("button");
+  safeToggleEl.type = "button";
+  safeToggleEl.className = "ib-control ib-icon ib-safe-toggle";
   const filterEl = document.createElement("div");
   filterEl.className = "ib-filter";
   const filterGroupEl = document.createElement("div");
@@ -1850,7 +2211,7 @@ function openImageBrowser() {
   filterEl.appendChild(filterGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, sortEl, refreshEl, filterEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, sortEl, refreshEl, filterEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -1938,6 +2299,29 @@ function openImageBrowser() {
     if (countEl)
       countEl.textContent = `${visible} / ${total}`;
   }
+  const revealed = makeRevealSet();
+  let revealLocation = null;
+  function safePathOf(f) {
+    if (state.type === "path")
+      return state.absPath;
+    return `${fileType(f)}/${fileSub(f)}`;
+  }
+  function isCardHidden(f, cfg) {
+    if (!isSensitive({ name: f.name, path: safePathOf(f) }, cfg))
+      return false;
+    return !revealed.has(fileType(f), fileSub(f), f.name);
+  }
+  function renderSafeToggle(cfg) {
+    const active = cfg.enabled && cfg.keywords.length > 0;
+    safeToggleEl.classList.toggle("is-active", active);
+    safeToggleEl.textContent = active ? SAFE_VIEW_GLYPH_ON : SAFE_VIEW_GLYPH_OFF;
+    safeToggleEl.title = active ? "Safe View is on — matching thumbnails are blurred (b)" : "Safe View is off — nothing is filtered (b)";
+    safeToggleEl.setAttribute("aria-pressed", String(active));
+  }
+  safeToggleEl.addEventListener("click", () => toggleSafeView());
+  const disposeSafeView = onSafeViewChange(() => {
+    loadAndRender({ preserveScroll: true });
+  });
   const selected = new Map;
   let selectMode = false;
   let focusIndex = -1;
@@ -2326,6 +2710,10 @@ function openImageBrowser() {
     });
   }
   function openFull(f) {
+    if (revealed.has(fileType(f), fileSub(f), f.name)) {} else if (isCardHidden(f, readSafeViewConfig())) {
+      revealed.reveal(fileType(f), fileSub(f), f.name);
+      renderGrid();
+    }
     const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
@@ -2728,17 +3116,27 @@ function openImageBrowser() {
     visualMode = false;
     modal.dialog.classList.remove("is-visual");
     clearPending();
+    const here = locationKey();
+    if (revealLocation !== here) {
+      revealed.clear();
+      revealLocation = here;
+    }
     renderTabs();
     renderCrumbs();
     modal.setBusy(true);
     modal.setStatus("Loading…");
     markFlatPending(isFlat());
+    const safeCfg = readSafeViewConfig();
+    renderSafeToggle(safeCfg);
     try {
       if (isPinnedView()) {
         const res = await fetchPins();
         setPinCache(res.pins);
         state.dirs = [];
         state.files = narrowByKind(pinsToFiles(res.pins), state.typeFilter);
+        if (safeCfg.hide) {
+          state.files = state.files.filter((f) => !isSensitive({ name: f.name, path: safePathOf(f) }, safeCfg));
+        }
         modal.setStatus(res.pins.length ? "" : "Nothing pinned yet.");
       } else {
         const data = await fetchListing({
@@ -2746,7 +3144,9 @@ function openImageBrowser() {
           subfolder: state.subfolder,
           path: state.absPath,
           recursive: isFlat(),
-          kind: state.typeFilter
+          kind: state.typeFilter,
+          safeHide: safeCfg.hide,
+          safeKeywords: safeCfg.keywords
         });
         state.dirs = data.dirs || [];
         state.files = data.files || [];
@@ -2801,6 +3201,8 @@ function openImageBrowser() {
   function renderGrid(opts) {
     const q = state.query;
     const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
+    const safeCfg = readSafeViewConfig();
+    renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     const flat = isFlat();
@@ -2822,6 +3224,17 @@ function openImageBrowser() {
         const dirBtns = canWrite ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` + `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
         c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>${dirBtns}`;
         gridEl.appendChild(c);
+        if (isSensitive({ name: d.name }, safeCfg)) {
+          c.classList.add("is-safe-hidden");
+          const icon = c.querySelector(".ib-thumb");
+          if (icon)
+            setBlurred(icon, true);
+          if (safeCfg.blurNames) {
+            const nameEl = c.querySelector(".ib-name");
+            if (nameEl)
+              setSpoilered(nameEl, true);
+          }
+        }
       }
     }
     let files = state.files;
@@ -2853,6 +3266,8 @@ function openImageBrowser() {
       const c = document.createElement("div");
       c.className = "ib-card is-file";
       const canWriteThis = canWriteFile(f);
+      const hidden = isCardHidden(f, safeCfg);
+      const spoilNames = hidden && safeCfg.blurNames;
       const missing = f.pinExists === false;
       if (flat || pinnedView)
         c.classList.add("is-flat");
@@ -2883,7 +3298,7 @@ ${when}`;
       const isFilePinned = canWriteThis && isPinned(filePinItem(f));
       const pinBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
       const starsRow = canWriteThis ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
-      const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="Select ${escapeHTML(f.name)}">✓</button>` : "";
+      const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="${spoilNames ? "Select hidden item" : `Select ${escapeHTML(f.name)}`}">✓</button>` : "";
       const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${escapeHTML(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = missing ? `
         ${subLabel}
@@ -2905,6 +3320,8 @@ ${when}`;
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
+      if (hidden)
+        applySafeView(c, f, spoilNames);
       visible++;
     }
     if (!visible && !state.dirs.length && !showUp) {
@@ -2916,6 +3333,25 @@ ${when}`;
     setCount(visible, state.files.length);
     restoreScroll(targetScrollTop);
     installLazyThumbs(gridEl);
+  }
+  function applySafeView(card, f, spoilNames) {
+    card.classList.add("is-safe-hidden");
+    const thumb = card.querySelector(".ib-thumb");
+    if (thumb)
+      setBlurred(thumb, true);
+    if (spoilNames) {
+      for (const sel of [".ib-name", ".ib-subpath"]) {
+        const el = card.querySelector(sel);
+        if (el)
+          setSpoilered(el, true);
+      }
+    }
+    card.appendChild(makeRevealButton({
+      onReveal: () => {
+        revealed.reveal(fileType(f), fileSub(f), f.name);
+        renderGrid();
+      }
+    }));
   }
   let disposeLazyThumbs = null;
   function installLazyThumbs(rootEl) {
@@ -3444,6 +3880,7 @@ ${when}`;
             <dt>Enter / o</dt><dd>open preview</dd>
             <dt>i</dt><dd>metadata</dd>
             <dt>w</dt><dd>load workflow</dd>
+            <dt>b</dt><dd>safe view on/off</dd>
             <dt>/</dt><dd>focus search</dd>
             <dt>?</dt><dd>this help</dd>
             <dt>Esc</dt><dd>close (priority)</dd>
@@ -3605,6 +4042,11 @@ ${when}`;
         e.stopPropagation();
         if (f && META_EXTS.has((f.ext || "").toLowerCase()))
           openMetadata(f);
+        break;
+      case "b":
+        e.preventDefault();
+        e.stopPropagation();
+        toggleSafeView();
         break;
       case "r":
         if (f && canWriteFile(f)) {
@@ -3982,6 +4424,19 @@ var BROWSER_CSS = `
 /* Keep the selection checkbox over the thumbnail corner, below the subpath row. */
 .ib-card.is-flat .ib-check { top: 30px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* Safe View's toolbar toggle. Deliberately NOT the blue "a mode is on" tint the
+   flat/select toggles use — this one says "content is being withheld", and
+   reading it at a glance is the whole point of having it in the toolbar rather
+   than only in the settings dialog. */
+.ib-safe-toggle.is-active { background: #2f3a2f; color: #8fd38f; border-color: #3f5a3f; }
+/* The reveal \uD83D\uDC41 is a child of the CARD, not of the blurred thumbnail — the blur
+   is a filter on .ib-thumb and would otherwise blur its own escape hatch. It
+   shares the checkbox's corner, so it sits on the opposite side; both drop
+   below the subpath row on flat/pinned cards for the same reason. */
+.ib-card .cmk-sv-reveal { left: auto; right: 4px; }
+.ib-card.is-flat .cmk-sv-reveal { top: 30px; }
+/* A hidden card must not read as a hover target for its own name. */
+.ib-card.is-safe-hidden .ib-name, .ib-card.is-safe-hidden .ib-subpath { cursor: default; }
 /* Pinned-folder chips — a full-width toolbar row of one-tap destinations.
    order:11 keeps them last when the toolbar wraps on phones, below both the
    crumbs row (order:9) and the media-type filter row (order:10). */
@@ -4182,6 +4637,8 @@ var SETTLE_MS = 80;
 var LIGHTBOX_SELECTOR = '[role="dialog"][aria-modal="true"][data-mask]';
 var deleted = new Set;
 var readToken = 0;
+var REVEAL_CLASS = "ibl-reveal";
+var lightboxRevealed = new Set;
 function activeAddress(dialog) {
   for (const el of dialog.querySelectorAll("img, video, audio, source")) {
     const addr = parseAssetAddress(el.getAttribute("src"));
@@ -4357,6 +4814,7 @@ function installLightboxActions() {
     if (!dialog)
       return;
     const addr = activeAddress(dialog);
+    applySafeView(dialog, addr);
     const existing = dialog.querySelector(`.${BAR_CLASS}`);
     if (!addr) {
       existing?.remove();
@@ -4412,6 +4870,30 @@ function installLightboxActions() {
       console.warn(`[${EXT_NAME}] lightbox rating read failed`, err);
     });
   }
+  function applySafeView(dialog, addr) {
+    for (const el of dialog.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`))
+      setBlurred(el, false);
+    for (const el of dialog.querySelectorAll(`.${REVEAL_CLASS}`))
+      el.remove();
+    if (!addr)
+      return;
+    const key = addressKey(addr);
+    if (lightboxRevealed.has(key))
+      return;
+    const cfg = readSafeViewConfig();
+    if (!isSensitive({ name: addr.name, path: `${addr.type}/${addr.subfolder}` }, cfg))
+      return;
+    for (const el of dialog.querySelectorAll("img, video"))
+      setBlurred(el, true);
+    const btn = makeRevealButton({
+      onReveal: () => {
+        lightboxRevealed.add(key);
+        applySafeView(dialog, addr);
+      }
+    });
+    btn.classList.add(REVEAL_CLASS);
+    dialog.appendChild(btn);
+  }
   function schedule() {
     if (disposed)
       return;
@@ -4433,15 +4915,20 @@ function installLightboxActions() {
     attributes: true,
     attributeFilter: ["src"]
   });
+  const disposeSafeView = onSafeViewChange(schedule);
   schedule();
   return () => {
     disposed = true;
     if (timer !== null)
       clearTimeout(timer);
     observer.disconnect();
+    disposeSafeView();
     document.removeEventListener("click", onClick, true);
-    for (const el of document.querySelectorAll(`.${BAR_CLASS}, .ibl-ov`))
+    for (const el of document.querySelectorAll(`.${BAR_CLASS}, .ibl-ov, .${REVEAL_CLASS}`)) {
       el.remove();
+    }
+    for (const el of document.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`))
+      setBlurred(el, false);
   };
 }
 
@@ -4453,6 +4940,25 @@ var SETTLE_MS2 = 120;
 var CARD_SELECTOR = "[data-selected]";
 function cardRootOf(img) {
   return img.closest(CARD_SELECTOR);
+}
+var SAFE_CARD_CLASS = "ibs-safe-hidden";
+function applyCardSafeView(card, addr, cfg) {
+  for (const el of card.querySelectorAll(`.${SAFE_VIEW_SPOILER_CLASS}`))
+    setSpoilered(el, false);
+  for (const el of card.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`))
+    setBlurred(el, false);
+  card.classList.remove(SAFE_CARD_CLASS);
+  if (!isSensitive({ name: addr.name, path: `${addr.type}/${addr.subfolder}` }, cfg))
+    return;
+  card.classList.add(SAFE_CARD_CLASS);
+  for (const el of card.querySelectorAll("img, video"))
+    setBlurred(el, true);
+  if (!cfg.blurNames)
+    return;
+  for (const el of card.querySelectorAll("*")) {
+    if (el.textContent?.trim() === addr.name && !el.querySelector("*"))
+      setSpoilered(el, true);
+  }
 }
 function installSidebarStars() {
   clearRatingState();
@@ -4503,6 +5009,7 @@ function installSidebarStars() {
   document.addEventListener("click", onClick, true);
   function paint() {
     const pending = [];
+    const safeCfg = readSafeViewConfig();
     for (const img of document.querySelectorAll(`${CARD_SELECTOR} img`)) {
       const addr = parseAssetAddress(img.getAttribute("src"));
       if (!addr)
@@ -4510,6 +5017,7 @@ function installSidebarStars() {
       const card = cardRootOf(img);
       if (!card)
         continue;
+      applyCardSafeView(card, addr, safeCfg);
       const key = addressKey(addr);
       const known = ratingCache.get(key);
       let row = card.querySelector(`.${ROW_CLASS2}`);
@@ -4576,17 +5084,27 @@ function installSidebarStars() {
     attributes: true,
     attributeFilter: ["src"]
   });
+  const disposeSafeView = onSafeViewChange(schedule);
   schedule();
   return () => {
     disposed = true;
     if (timer !== null)
       clearTimeout(timer);
     observer.disconnect();
+    disposeSafeView();
     document.removeEventListener("click", onClick, true);
     for (const row of document.querySelectorAll(`.${ROW_CLASS2}`))
       row.remove();
     for (const card of document.querySelectorAll(`[${DONE_ATTR}]`))
       card.removeAttribute(DONE_ATTR);
+    for (const el of document.querySelectorAll(`.${SAFE_VIEW_SPOILER_CLASS}`)) {
+      setSpoilered(el, false);
+    }
+    for (const el of document.querySelectorAll(`.${SAFE_VIEW_BLUR_CLASS}`))
+      setBlurred(el, false);
+    for (const el of document.querySelectorAll(`.${SAFE_CARD_CLASS}`)) {
+      el.classList.remove(SAFE_CARD_CLASS);
+    }
   };
 }
 
@@ -4609,6 +5127,7 @@ var entry = makeHubEntry({
 app2.registerExtension({
   name: "comfy.image-browser",
   settings: [
+    ...safeViewSettings(),
     {
       id: "ImageBrowser.SidebarStars",
       category: ["Touch Tools", "Image Browser", "Star ratings"],
@@ -4648,6 +5167,7 @@ app2.registerExtension({
   ...installHubButton(),
   setup() {
     registerHubEntry(entry.hubEntry);
+    registerSafeViewHubToggle();
   }
 });
 export {
