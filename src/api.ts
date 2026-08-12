@@ -1,6 +1,8 @@
 // api.ts — typed wrappers over the /image_browser/* backend endpoints plus the
 // URL builders the grid uses for thumbnails and previews. No DOM here.
 
+import type { PromptVerdict } from "@laurigates/comfy-modal-kit";
+
 export const EXT_NAME = "comfyui-image-browser";
 
 const BASE_URL = "/image_browser/base";
@@ -18,6 +20,7 @@ const RMDIR_URL = "/image_browser/rmdir";
 const MKDIR_URL = "/image_browser/mkdir";
 const PINS_URL = "/image_browser/pins";
 export const RATING_URL = "/image_browser/rating";
+const SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
 
 export const IMG_EXTS = new Set([
   ".png",
@@ -111,6 +114,17 @@ export interface ListingFile {
   // not dropped ("the file moved" and "you never pinned it" are different
   // facts), and renders dimmed with an unpin affordance.
   pinExists?: boolean;
+  // Safe View's opt-in prompt tier. Present ONLY when the listing was requested
+  // with `safePrompt`, and only for a file whose container has a metadata
+  // reader. The snake_case name is the backend's JSON key verbatim.
+  //
+  // FOUR STATES, and the two easy to collapse are the two that matter:
+  // `"unscanned"` means the file participates but has no cached verdict yet and
+  // is read as SENSITIVE (fail-safe), while ABSENT means the file is outside the
+  // tier and is never sensitive by it. A folder card and a .avi are absent, not
+  // unscanned — collapsing the two would blur the whole grid the moment the tier
+  // came on. See the kit's PromptVerdict doc comment.
+  prompt_match?: PromptVerdict;
 }
 
 interface ListResponse {
@@ -124,6 +138,12 @@ interface ListResponse {
   exists: boolean;
   // True when a recursive listing hit the backend's file cap and stopped early.
   truncated?: boolean;
+  // Safe View prompt tier: how many files this listing could not yet judge —
+  // returned with the `"unscanned"` sentinel, or dropped outright when hiding is
+  // also on (where nothing carries a sentinel to count). Present only when the
+  // tier was requested. It is what the toolbar's "scanning N" pill reports, so a
+  // mostly-blurred grid on first enable explains itself instead of looking broken.
+  safe_unscanned?: number;
 }
 
 // Which media family the listing is narrowed to — the toolbar's segmented
@@ -154,6 +174,11 @@ interface ListParams {
   // dropping them from an already-truncated response would return a near-empty
   // grid. This is the whole reason hiding is a backend feature at all.
   safeHide?: boolean;
+  // Also match the file's embedded generation prompt and model name. Opt-in and
+  // OFF by default because it is the only tier that costs a file parse per file;
+  // the backend answers from a persistent cache and reports "unscanned" for
+  // anything not in it yet. Independent of `safeHide` — the two compose.
+  safePrompt?: boolean;
 }
 
 let BASE_PATHS: BasePaths | null = null;
@@ -197,6 +222,15 @@ export async function fetchListing(p: ListParams): Promise<ListResponse> {
   if (p.safeHide && p.safeKeywords && p.safeKeywords.length > 0) {
     params.set("safe_kw", p.safeKeywords.join(","));
     params.set("safe_hide", "1");
+  }
+  // Same both-conditions rule as `safe_hide`, and for the same reason: the
+  // backend refuses to run the tier on an empty keyword list, so sending the
+  // flag alone would ask for a filter it will not get. `safe_kw` is set here too
+  // rather than assumed from the branch above — the two flags are independent,
+  // and the prompt tier is usable with hiding off.
+  if (p.safePrompt && p.safeKeywords && p.safeKeywords.length > 0) {
+    params.set("safe_kw", p.safeKeywords.join(","));
+    params.set("safe_prompt", "1");
   }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -552,6 +586,24 @@ async function postJSONBatch<T extends { ok: boolean; errors?: BatchError[] }>(
 
 export function deleteMany(items: BatchItem[]): Promise<DeleteManyResult> {
   return postJSONBatch<DeleteManyResult>(DELETE_MANY_URL, { items });
+}
+
+interface WarmResult {
+  ok: boolean;
+  scanned: number;
+}
+
+/**
+ * Ask the backend to parse and cache the prompt metadata of these files.
+ *
+ * The prompt tier's FAST warmer, driven by the `executed` websocket event: a
+ * file the user just generated is the most visible card in the grid, and
+ * without this it would be `"unscanned"` — and therefore blurred — until the
+ * background sweep next ran. The sweep covers the backlog; this covers the
+ * present. Neither subsumes the other.
+ */
+export function warmSafeView(items: BatchItem[]): Promise<WarmResult> {
+  return postJSONBatch<WarmResult>(SAFEVIEW_WARM_URL, { items });
 }
 
 // ---- Folder deletion (sandboxed roots only) ----------------------------

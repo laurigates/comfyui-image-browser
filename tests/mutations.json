@@ -1,5 +1,11 @@
 {
-  "command": ["bun", "run", "test", "--", "tests/js/safe-view.test.js"],
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/safe-view.test.js"
+  ],
   "reporter": "vitest-json",
   "mutations": [
     {
@@ -53,8 +59,8 @@
     {
       "label": "the modal stops repainting on a settings change (its own toggle appears inert)",
       "file": "src/browser.ts",
-      "before": "    void loadAndRender({ preserveScroll: true });",
-      "after": "    void 0;"
+      "before": "  const disposeSafeView = onSafeViewChange(() => {\n    void loadAndRender({ preserveScroll: true });\n  });",
+      "after": "  const disposeSafeView = onSafeViewChange(() => {\n    void 0;\n  });"
     },
     {
       "label": "the toolbar toggle claims 🙈 with an empty keyword list (advertises a filter that is off)",
@@ -109,6 +115,84 @@
       "file": "src/lightbox-actions.ts",
       "before": "    dialog.appendChild(btn);",
       "after": "    void btn;"
+    },
+    {
+      "label": "prompt tier: the verdict is never passed to the matcher (a matched prompt renders in the clear)",
+      "file": "src/browser.ts",
+      "before": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };",
+      "after": "    return { name: f.name, path: safePathOf(f) };"
+    },
+    {
+      "label": "prompt tier: an ABSENT verdict is defaulted to `unscanned` (every folder card and unreadable file blurs)",
+      "file": "src/browser.ts",
+      "before": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };",
+      "after": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match ?? \"unscanned\" };"
+    },
+    {
+      "label": "prompt tier: the listing never asks for it (the tier silently never runs)",
+      "file": "src/browser.ts",
+      "before": "          safePrompt: safeCfg.matchPrompt,",
+      "after": "          safePrompt: false,"
+    },
+    {
+      "label": "prompt tier: the scanning pill never reports a count (a mostly-blurred grid looks broken, not busy)",
+      "file": "src/browser.ts",
+      "before": "        renderScanPill(data.safe_unscanned ?? 0);",
+      "after": "        renderScanPill(0);"
+    },
+    {
+      "label": "prompt tier: safe_prompt is sent unconditionally (the default listing URL stops being byte-identical)",
+      "file": "src/api.ts",
+      "before": "  if (p.safePrompt && p.safeKeywords && p.safeKeywords.length > 0) {",
+      "after": "  if (true) {"
+    },
+    {
+      "label": "warmer: videos are not swept (every freshly generated clip stays blurred forever)",
+      "file": "src/scan-warm.ts",
+      "before": "const MEDIA_KEYS = [\"images\", \"video\"] as const;",
+      "after": "const MEDIA_KEYS = [\"images\"] as const;"
+    },
+    {
+      "label": "warmer: audio is swept too (a round trip for a container no reader can parse)",
+      "file": "src/scan-warm.ts",
+      "before": "const MEDIA_KEYS = [\"images\", \"video\"] as const;",
+      "after": "const MEDIA_KEYS = [\"images\", \"video\", \"audio\"] as const;"
+    },
+    {
+      "label": "warmer: an item with no filename is posted anyway (a bogus address gets scanned)",
+      "file": "src/scan-warm.ts",
+      "before": "      if (typeof filename !== \"string\" || filename === \"\") continue;",
+      "after": "      if (false) continue;"
+    },
+    {
+      "label": "warmer: it runs with the tier switched off (work nobody asked for, on every render)",
+      "file": "src/scan-warm.ts",
+      "before": "    if (!cfg.matchPrompt) return;",
+      "after": "    if (false) return;"
+    },
+    {
+      "label": "warmer: the teardown does not remove the listener (one leak per install)",
+      "file": "src/scan-warm.ts",
+      "before": "  return () => api.removeEventListener(\"executed\", onExecuted);",
+      "after": "  return () => {};"
+    },
+    {
+      "label": "INERT prompt tier: every card reads `unscanned` (the whole grid blurs, and a one-sided cold-cache test cannot see it)",
+      "file": "src/browser.ts",
+      "before": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };",
+      "after": "    return { name: f.name, path: safePathOf(f), promptMatch: \"unscanned\" };"
+    },
+    {
+      "label": "INERT warmer: it never posts (a one-sided \"no posts\" assertion cannot tell this from correct restraint)",
+      "file": "src/scan-warm.ts",
+      "before": "    const items = itemsFromExecuted((event as CustomEvent).detail);\n    if (items.length === 0) return;",
+      "after": "    const items = itemsFromExecuted((event as CustomEvent).detail);\n    if (true) return;"
+    },
+    {
+      "label": "INERT pill: it is shown even at zero, so it never goes away",
+      "file": "src/browser.ts",
+      "before": "    if (unscanned <= 0) {",
+      "after": "    if (false) {"
     }
   ]
 }

@@ -1,5 +1,11 @@
 {
-  "command": ["uv", "run", "pytest", "-q", "tests/test_helpers.py"],
+  "command": [
+    "uv",
+    "run",
+    "pytest",
+    "-q",
+    "tests/test_helpers.py"
+  ],
   "reporter": "exit-code",
   "mutations": [
     {
@@ -67,6 +73,114 @@
       "file": "image_browser.py",
       "before": "            base, exts, image_subset, FLAT_LIST_CAP, hide_keywords, hide_prefix",
       "after": "            base, exts, image_subset, FLAT_LIST_CAP, None, hide_prefix"
+    },
+    {
+      "label": "prompt tier: `unscanned` is reported as a definite `false` (a cold cache shows sensitive renders in the clear)",
+      "file": "image_browser.py",
+      "before": "        out[path] = _PROMPT_UNSCANNED if text is None else is_safe_match(keywords, text)",
+      "after": "        out[path] = False if text is None else is_safe_match(keywords, text)"
+    },
+    {
+      "label": "prompt tier: a container with NO metadata reader is treated as unscanned (every unreadable file blurs)",
+      "file": "image_browser.py",
+      "before": "    participating = [e for e in entries if _has_metadata_reader(e[2])]",
+      "after": "    participating = list(entries)"
+    },
+    {
+      "label": "prompt tier: the flag alone is honoured, ignoring the keyword list",
+      "file": "image_browser.py",
+      "before": "    if q.get(\"safe_prompt\", \"\") in (\"1\", \"true\", \"yes\"):\n        prompt_keywords = parse_safe_keywords(q.get(\"safe_kw\", \"\"))",
+      "after": "    if q.get(\"safe_prompt\", \"\") in (\"1\", \"true\", \"yes\"):\n        prompt_keywords = parse_safe_keywords(q.get(\"safe_kw\", \"\")) or {\"nsfw\"}"
+    },
+    {
+      "label": "prompt tier: the tier runs unconditionally (the default listing starts parsing metadata nobody asked for)",
+      "file": "image_browser.py",
+      "before": "    if q.get(\"safe_prompt\", \"\") in (\"1\", \"true\", \"yes\"):\n        prompt_keywords",
+      "after": "    if True:\n        prompt_keywords"
+    },
+    {
+      "label": "prompt tier: hiding KEEPS an unscanned file (a not-yet-judged sensitive render is listed in the clear)",
+      "file": "image_browser.py",
+      "before": "            found = [entry for entry in found if verdicts.get(entry[4]) in (None, False)]",
+      "after": "            found = [\n                entry\n                for entry in found\n                if verdicts.get(entry[4]) in (None, False, _PROMPT_UNSCANNED)\n            ]"
+    },
+    {
+      "label": "prompt tier: the tier never reaches the recursive walk (flat view stops matching prompts)",
+      "file": "image_browser.py",
+      "before": "        hide_prefix=hide_prefix,\n        prompt_keywords=prompt_keywords,\n    )",
+      "after": "        hide_prefix=hide_prefix,\n        prompt_keywords=None,\n    )"
+    },
+    {
+      "label": "prompt tier: the sweep is started on every listing, cached or not (a warm library re-walks the tree per request)",
+      "file": "image_browser.py",
+      "before": "    if unscanned:\n        _maybe_start_sweep()",
+      "after": "    if True:\n        _maybe_start_sweep()"
+    },
+    {
+      "label": "warm endpoint: the batch cap is dropped (a client can hand the executor a whole library)",
+      "file": "image_browser.py",
+      "before": "    if len(items) > MAX_WARM_BATCH:",
+      "after": "    if False:"
+    },
+    {
+      "label": "warm endpoint: the sandbox perimeter is dropped (type=path reaches the scanner)",
+      "file": "image_browser.py",
+      "before": "        if err or target is None or not _has_metadata_reader(target):\n            continue",
+      "after": "        if target is None:\n            continue"
+    },
+    {
+      "label": "store: the cache key drops mtime and size (an edited file keeps its old verdict forever)",
+      "file": "safeview_store.py",
+      "before": "    return hashlib.sha1(f\"{path}:{st.st_mtime_ns}:{st.st_size}\".encode()).hexdigest()",
+      "after": "    return hashlib.sha1(path.encode()).hexdigest()"
+    },
+    {
+      "label": "store: a file carrying no prompt is NOT cached (it stays unscanned, and blurred, forever)",
+      "file": "safeview_store.py",
+      "before": "        pending.append((key, extract_text(target)))",
+      "after": "        text = extract_text(target)\n        if text:\n            pending.append((key, text))"
+    },
+    {
+      "label": "store: an unopenable cache raises instead of degrading (a listing dies on a read-only user dir)",
+      "file": "safeview_store.py",
+      "before": "        conn.execute(_SCHEMA)\n    except Exception as exc:",
+      "after": "        conn.execute(_SCHEMA)\n    except sqlite3.OperationalError as exc:"
+    },
+    {
+      "label": "store: the sweep walk follows symlinked directories (it escapes the roots it was given)",
+      "file": "safeview_store.py",
+      "before": "                        if entry.is_dir(follow_symlinks=False):",
+      "after": "                        if entry.is_dir():"
+    },
+    {
+      "label": "store: the model name is dropped from the haystack (a keyword naming a checkpoint matches nothing)",
+      "file": "safeview_store.py",
+      "before": "TEXT_KEYS = (\"positive\", \"negative\", \"model\")",
+      "after": "TEXT_KEYS = (\"positive\", \"negative\")"
+    },
+    {
+      "label": "store: the stored text is uncapped (a megabyte-scale prompt lands in the cache)",
+      "file": "safeview_store.py",
+      "before": "    return \" \".join(p for p in parts if p)[:MAX_TEXT_BYTES]",
+      "after": "    return \" \".join(p for p in parts if p)"
+    },
+    {
+      "label": "INERT prompt tier: every verdict is `unscanned` (the whole library blurs, and a one-sided cold-cache test cannot see it)",
+      "file": "image_browser.py",
+      "before": "    participating = [e for e in entries if _has_metadata_reader(e[2])]",
+      "after": "    return {e[4]: _PROMPT_UNSCANNED for e in entries if _has_metadata_reader(e[2])}\n    participating = [e for e in entries if _has_metadata_reader(e[2])]"
+    },
+    {
+      "label": "INERT sweep trigger: it never fires (nothing ever warms the backlog)",
+      "file": "image_browser.py",
+      "before": "    if unscanned:\n        _maybe_start_sweep()",
+      "after": "    if False:\n        _maybe_start_sweep()"
+    },
+    {
+      "label": "store: the READ path creates the cache directory (a listing mkdir's a mis-resolved user dir)",
+      "file": "safeview_store.py",
+      "before": "        if create and parent:",
+      "after": "        if parent:"
     }
   ]
 }

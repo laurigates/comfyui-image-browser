@@ -12,6 +12,12 @@ export const app = {
     this.registrations.push(ext);
   },
   graph: { _nodes: [] },
+  // ComfyUI's ComfyApi is an EventTarget hanging off app.api, and the `executed`
+  // websocket message reaches extensions as a CustomEvent dispatched there
+  // (api.ts:743-749 -> dispatchCustomEvent(msg.type, msg.data)). A real one
+  // lands HERE, so the scan-warm suite dispatches here rather than on document —
+  // an event dispatched somewhere a real one never arrives asserts nothing.
+  api: new EventTarget(),
   // loadWorkflow() hands a File to the app's own loader. Recording the calls
   // lets a test assert the pack delegates rather than parsing graphs itself.
   handleFileCalls: [],

@@ -9,10 +9,14 @@ folder_paths and is covered by the live smoke matrix.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import zlib
 from types import SimpleNamespace
 
 import image_browser as ib
+import image_meta
+import safeview_store
 
 
 class TestParseExtensions:
@@ -1313,6 +1317,536 @@ class TestBatchEndpointsRegistered:
     def test_mkdir_route_present(self):
         registered = PromptServer.instance.routes.registered
         assert any(r.method == "POST" and r.path == "/image_browser/mkdir" for r in registered)
+
+
+# ---------------------------------------------------------------------------
+# Safe View — the opt-in prompt-metadata tier
+# ---------------------------------------------------------------------------
+#
+# Fixtures are REAL containers with REAL embedded metadata, synthesized in
+# process (conftest stubs PIL, so nothing here may depend on an encoder). The
+# builder below is the same spec shape tests/test_metadata.py uses — real CRCs,
+# a real ComfyUI API graph — and the suite opens with a CONTROL asserting the
+# parser actually reads it. A fixture the parser could not read would make every
+# "does not match" assertion below pass while testing nothing.
+
+
+def _png_chunk(ctype: bytes, data: bytes) -> bytes:
+    body = ctype + data
+    return len(data).to_bytes(4, "big") + body + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, "big")
+
+
+def _png_with_prompt(positive: str, model: str = "sd_xl_base_1.0.safetensors") -> bytes:
+    """A PNG carrying one `prompt` tEXt chunk holding a ComfyUI API graph."""
+    graph = {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": model}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry", "clip": ["4", 1]}},
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 1,
+                "steps": 20,
+                "cfg": 8.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+            },
+        },
+    }
+    payload = b"prompt\x00" + json.dumps(graph).encode()
+    return image_meta.PNG_SIG + b"".join(
+        [
+            _png_chunk(b"IHDR", b"\x00" * 13),
+            _png_chunk(b"tEXt", payload),
+            _png_chunk(b"IEND", b""),
+        ]
+    )
+
+
+class TestSafeViewStore:
+    """The sqlite text cache in safeview_store.py."""
+
+    def test_CONTROL_the_fixture_really_carries_a_readable_prompt(self, tmp_path):
+        """Every assertion in this file rests on this, and the dependency is
+        invisible from the assertions themselves: if the builder produced a PNG
+        image_meta could not read, extract_text would return "" and every
+        "does not match" test below would pass having proved nothing."""
+        f = tmp_path / "a.png"
+        f.write_bytes(_png_with_prompt("a cat in a hat"))
+        text = safeview_store.extract_text(str(f))
+        assert "cat" in text
+        assert "sd_xl_base_1.0.safetensors" in text
+
+    def test_key_shape_matches_thumb_cache(self, tmp_path):
+        """Same key as the thumbnail cache — path + mtime_ns + size. One
+        invalidation model to reason about, not two."""
+        import thumb_cache
+
+        f = tmp_path / "a.png"
+        f.write_bytes(b"x")
+        st = os.stat(f)
+        assert safeview_store.cache_key(str(f), st) == thumb_cache.cache_key(str(f), st)
+
+    def test_an_edited_file_keys_a_fresh_entry(self, tmp_path):
+        f = tmp_path / "a.png"
+        f.write_bytes(b"x")
+        first = safeview_store.cache_key(str(f), os.stat(f))
+        f.write_bytes(b"xy")
+        assert safeview_store.cache_key(str(f), os.stat(f)) != first
+
+    def test_round_trip_and_a_missing_key_is_ABSENT(self, tmp_path):
+        """Absent, never empty-string. "not scanned yet" and "scanned, carries
+        no prompt" are different facts, and the endpoint turns exactly that
+        difference into `"unscanned"` versus `false`."""
+        db = str(tmp_path / "c.sqlite")
+        assert safeview_store.store_texts(db, [("k1", "a cat")]) == 1
+        assert safeview_store.read_cached(db, ["k1", "k2"]) == {"k1": "a cat"}
+
+    def test_a_file_with_no_metadata_is_still_CACHED_as_empty(self, tmp_path):
+        """Otherwise every screenshot in the library is re-parsed forever and
+        stays "unscanned" — and therefore blurred — however often the sweep
+        runs."""
+        db = str(tmp_path / "c.sqlite")
+        f = tmp_path / "plain.png"
+        f.write_bytes(image_meta.PNG_SIG + _png_chunk(b"IEND", b""))
+        safeview_store.scan_paths(db, [str(f)])
+        key = safeview_store.cache_key(str(f), os.stat(f))
+        assert safeview_store.read_cached(db, [key]) == {key: ""}
+
+    def test_a_READ_creates_nothing_on_disk(self, tmp_path):
+        """A read must have no side effects. With the cache opened for creation
+        on the read path, a listing against a mis-resolved user directory
+        silently mkdir's it — observed leaving a literal `<MagicMock ...>/`
+        directory in the repo root during a mutation run, which is the shape a
+        real folder_paths misconfiguration takes on someone's disk.
+
+        Two-sided: the WRITE must still create what it needs, or "nothing was
+        created" passes against a store that never works at all.
+        """
+        nested = tmp_path / "does" / "not" / "exist"
+        db = str(nested / "c.sqlite")
+        assert safeview_store.read_cached(db, ["k"]) == {}
+        assert not nested.exists()
+        assert safeview_store.store_texts(db, [("k", "v")]) == 1
+        assert nested.is_dir()
+
+    def test_scan_paths_skips_a_file_that_vanished(self, tmp_path):
+        """A sweep racing a delete is normal, not an error."""
+        db = str(tmp_path / "c.sqlite")
+        present = tmp_path / "here.png"
+        present.write_bytes(_png_with_prompt("a cat in a hat"))
+        # Both in one batch: `0` on its own passes against a scanner that never
+        # scans anything, so the surviving file has to be counted.
+        assert safeview_store.scan_paths(db, [str(tmp_path / "gone.png"), str(present)]) == 1
+
+    def test_an_already_cached_file_is_not_re_parsed(self, tmp_path):
+        db = str(tmp_path / "c.sqlite")
+        f = tmp_path / "a.png"
+        f.write_bytes(_png_with_prompt("a cat in a hat"))
+        assert safeview_store.scan_paths(db, [str(f)]) == 1
+        assert safeview_store.scan_paths(db, [str(f)]) == 0
+
+    def test_the_text_is_capped(self, tmp_path):
+        f = tmp_path / "a.png"
+        f.write_bytes(_png_with_prompt("cat " * 4000))
+        assert len(safeview_store.extract_text(str(f))) <= safeview_store.MAX_TEXT_BYTES
+
+    def test_an_unwritable_cache_degrades_instead_of_raising(self, tmp_path):
+        """A cache is an optimisation. A listing must still answer when the user
+        dir is read-only or the disk is full."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_bytes(b"x")
+        db = str(blocker / "c.sqlite")
+        assert safeview_store.store_texts(db, [("k", "v")]) == 0
+        assert safeview_store.read_cached(db, ["k"]) == {}
+        # Paired positive: a store that never worked would satisfy the two
+        # assertions above without degrading gracefully at all.
+        good = str(tmp_path / "good.sqlite")
+        assert safeview_store.store_texts(good, [("k", "v")]) == 1
+        assert safeview_store.read_cached(good, ["k"]) == {"k": "v"}
+
+    def test_walk_candidates_filters_by_extension_and_skips_hidden(self, tmp_path):
+        (tmp_path / "keep.png").write_bytes(b"x")
+        (tmp_path / "skip.avi").write_bytes(b"x")
+        (tmp_path / ".hidden.png").write_bytes(b"x")
+        sub = tmp_path / "clipspace"
+        sub.mkdir()
+        (sub / "deep.png").write_bytes(b"x")
+        found = safeview_store.walk_candidates([str(tmp_path)], {".png"})
+        assert [os.path.basename(p) for p in found] == ["keep.png"]
+
+    def test_walk_candidates_does_not_follow_a_symlinked_dir(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.png").write_bytes(b"x")
+        inner = tmp_path / "inner"
+        inner.mkdir()
+        (inner / "real.png").write_bytes(b"x")
+        (inner / "link").symlink_to(outside, target_is_directory=True)
+        # `real.png` must be found, so an empty result cannot pass here: a walk
+        # that returns nothing at all fails this exactly as a walk that followed
+        # the link does.
+        found = safeview_store.walk_candidates([str(inner)], {".png"})
+        assert [os.path.basename(p) for p in found] == ["real.png"]
+
+
+class TestListSafePromptTier:
+    """`safe_prompt` on /list — the four verdict states and the request gate.
+
+    DISCRETION, NOT ACCESS CONTROL, like the rest of Safe View. These pin
+    behaviour, not a security boundary.
+    """
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+        monkeypatch.setattr(
+            folder_paths, "get_user_directory", lambda: str(base / "_user"), raising=False
+        )
+        (base / "_user").mkdir(exist_ok=True)
+        # The lazy sweep is asserted on its own below. Stubbed here so the
+        # endpoint tests neither leave a pending asyncio task behind every
+        # asyncio.run() nor walk a tree in the background.
+        monkeypatch.setattr(ib, "_maybe_start_sweep", lambda: None)
+
+    def _by_name(self, resp):
+        return {f["name"]: f for f in resp._body["files"]}
+
+    def _mixed(self, base):
+        (base / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        (base / "leather.png").write_bytes(_png_with_prompt("a nsfw leather couch"))
+
+    def _warm(self, base, *names):
+        db = safeview_store.db_path(str(base / "_user"))
+        return safeview_store.scan_paths(db, [str(base / n) for n in names])
+
+    def test_a_cold_cache_answers_UNSCANNED_and_counts_it(self, tmp_path, monkeypatch):
+        """The fail-safe state. The kit reads `"unscanned"` as sensitive, so a
+        never-scanned sensitive render is blurred rather than shown in the clear
+        while the sweep catches up.
+
+        BOTH DIRECTIONS, in the same listing. Asserting only that an uncached
+        file reads `"unscanned"` passes against a verdict path that answers
+        `"unscanned"` for EVERYTHING — which is exactly the failure that would
+        blur a user's whole library. One file is warmed first and must come back
+        with a real verdict; the other must not.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        assert self._warm(tmp_path, "cat.png") == 1
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        files = self._by_name(resp)
+        assert files["cat.png"]["prompt_match"] is False
+        assert files["leather.png"]["prompt_match"] == "unscanned"
+        assert resp._body["safe_unscanned"] == 1
+
+    def test_a_warm_cache_answers_the_verdict(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        assert self._warm(tmp_path, "cat.png", "leather.png") == 2
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        files = self._by_name(resp)
+        assert files["leather.png"]["prompt_match"] is True
+        assert files["cat.png"]["prompt_match"] is False
+        assert resp._body["safe_unscanned"] == 0
+
+    def test_CONTROL_the_prompt_is_matched_as_WHOLE_TOKENS(self, tmp_path, monkeypatch):
+        """`ass` must not match a prompt reading "a bag of assets". A substring
+        implementation passes every positive test above and fails only this."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "bag.png").write_bytes(_png_with_prompt("a bag of assets"))
+        (tmp_path / "hit.png").write_bytes(_png_with_prompt("one ass and a hat"))
+        self._warm(tmp_path, "bag.png", "hit.png")
+        resp = self._call({"type": "output", "safe_kw": "ass", "safe_prompt": "1"})
+        files = self._by_name(resp)
+        assert files["bag.png"]["prompt_match"] is False
+        # Paired positive in the same listing: a tier that matched nothing at all
+        # would satisfy the negative on its own.
+        assert files["hit.png"]["prompt_match"] is True
+
+    def test_CONTROL_a_container_with_no_reader_carries_NO_verdict_key(
+        self, tmp_path, monkeypatch
+    ):
+        """The fourth state, and the one easiest to collapse. An `.avi` is listed
+        (it is in VIDEO_EXTS) but has no metadata reader, so it does not
+        participate — the key must be ABSENT, not `"unscanned"`, or every
+        unreadable file in the library blurs the moment the tier comes on."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "clip.avi").write_bytes(b"x")
+        (tmp_path / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        files = self._by_name(resp)
+        assert "prompt_match" not in files["clip.avi"]
+        # Paired positive: the readable file in the SAME listing must still carry
+        # one, so "the tier never ran" cannot satisfy this.
+        assert files["cat.png"]["prompt_match"] == "unscanned"
+        # And the unreadable one is not counted as work the sweep will ever do.
+        assert resp._body["safe_unscanned"] == 1
+
+    def test_the_default_listing_is_unchanged(self, tmp_path, monkeypatch):
+        """No flag, no verdict keys, no count — byte-identical to what /list
+        answered before this tier existed."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output"})
+        assert "safe_unscanned" not in resp._body
+        assert all("prompt_match" not in f for f in resp._body["files"])
+        # Paired positive, same tree, same test: absence alone passes against a
+        # tier that never runs at all, which is indistinguishable from a tier
+        # that is correctly off.
+        on = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert on._body["safe_unscanned"] == 2
+
+    def test_the_flag_without_keywords_does_nothing(self, tmp_path, monkeypatch):
+        """Same rule as `safe_hide`: a request that forgot the list must not blur
+        a user's whole grid on verdicts nobody asked for."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "", "safe_prompt": "1"})
+        assert "safe_unscanned" not in resp._body
+        assert all("prompt_match" not in f for f in resp._body["files"])
+        # Same flag, same tree, keywords supplied — must run.
+        on = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert on._body["safe_unscanned"] == 2
+
+    def test_an_unrecognised_flag_value_does_nothing(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "maybe"})
+        assert all("prompt_match" not in f for f in resp._body["files"])
+        # And a recognised one on the same tree must run, so this cannot pass
+        # against a tier that ignores the flag entirely.
+        on = self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert all("prompt_match" in f for f in on._body["files"])
+
+    def test_the_prompt_is_consulted_ONLY_through_this_flag(self, tmp_path, monkeypatch):
+        """The tier is opt-in end to end: hiding on its own keeps matching names
+        and paths, and a matching PROMPT is simply not consulted."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        # A third file matching on its NAME, so ONE assertion carries both
+        # directions: hiding must still drop the name match (proving the request
+        # was filtered at all) while keeping the file whose only match is its
+        # prompt. Without it, "both survive" passes against an endpoint that
+        # hides nothing.
+        (tmp_path / "my_nsfw_pic.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        self._warm(tmp_path, "cat.png", "leather.png", "my_nsfw_pic.png")
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert set(self._by_name(resp)) == {"cat.png", "leather.png"}
+
+    def test_hiding_DROPS_a_prompt_match(self, tmp_path, monkeypatch):
+        """With hiding on the two flags compose: a file whose prompt matched is
+        removed from the listing, exactly as a matching NAME already is."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        self._warm(tmp_path, "cat.png", "leather.png")
+        resp = self._call(
+            {"type": "output", "safe_kw": "nsfw", "safe_hide": "1", "safe_prompt": "1"}
+        )
+        assert set(self._by_name(resp)) == {"cat.png"}
+
+    def test_hiding_also_drops_an_UNSCANNED_file_and_reports_it(self, tmp_path, monkeypatch):
+        """Mirrors the kit's isSensitive, which reads `"unscanned"` as sensitive.
+        Keeping it would show a not-yet-judged sensitive render in the clear —
+        and hiding mode has no blur to fall back on. The count is what lets the
+        toolbar explain the missing files rather than leaving the user with a
+        grid that looks emptied for no reason."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        # `cat.png` is warmed and clean, so it MUST survive. An empty survivor
+        # set alone passes against an endpoint that drops everything — the very
+        # failure this direction is most likely to produce.
+        assert self._warm(tmp_path, "cat.png") == 1
+        resp = self._call(
+            {"type": "output", "safe_kw": "nsfw", "safe_hide": "1", "safe_prompt": "1"}
+        )
+        assert set(self._by_name(resp)) == {"cat.png"}
+        assert resp._body["safe_unscanned"] == 1
+
+    def test_the_tier_reaches_the_recursive_walk(self, tmp_path, monkeypatch):
+        """Flat view is a separate call site; a tier wired only into the
+        non-recursive lister would silently stop applying there."""
+        self._sandbox(tmp_path, monkeypatch)
+        deep = tmp_path / "sub"
+        deep.mkdir()
+        (deep / "leather.png").write_bytes(_png_with_prompt("a nsfw leather couch"))
+        self._warm(tmp_path, "sub/leather.png")
+        resp = self._call(
+            {"type": "output", "recursive": "1", "safe_kw": "nsfw", "safe_prompt": "1"}
+        )
+        assert self._by_name(resp)["leather.png"]["prompt_match"] is True
+
+    def test_the_tier_applies_on_the_path_tab_too(self, tmp_path, monkeypatch):
+        """/metadata accepts type=path, so the tier can answer there — and the
+        browse… tab is exactly where an unexpected folder gets opened."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._mixed(tmp_path)
+        self._warm(tmp_path, "leather.png")
+        resp = self._call(
+            {"type": "path", "path": str(tmp_path), "safe_kw": "nsfw", "safe_prompt": "1"}
+        )
+        assert self._by_name(resp)["leather.png"]["prompt_match"] is True
+
+
+class TestSafeViewSweepTrigger:
+    """When the lazy background sweep is started."""
+
+    def _sandbox(self, base, monkeypatch, calls):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+        monkeypatch.setattr(
+            folder_paths, "get_user_directory", lambda: str(base / "_user"), raising=False
+        )
+        (base / "_user").mkdir(exist_ok=True)
+        monkeypatch.setattr(ib, "_maybe_start_sweep", lambda: calls.append(1))
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def test_a_listing_with_unscanned_files_starts_the_sweep(self, tmp_path, monkeypatch):
+        calls = []
+        self._sandbox(tmp_path, monkeypatch, calls)
+        (tmp_path / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert calls == [1]
+
+    def test_a_fully_cached_listing_does_NOT_start_one(self, tmp_path, monkeypatch):
+        """A warm library must not re-walk the output tree on every request."""
+        calls = []
+        self._sandbox(tmp_path, monkeypatch, calls)
+        (tmp_path / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        safeview_store.scan_paths(
+            safeview_store.db_path(str(tmp_path / "_user")), [str(tmp_path / "cat.png")]
+        )
+        self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert calls == []
+        # Paired positive, same test: an empty call list alone passes against a
+        # trigger that never fires under any condition. Adding one uncached file
+        # must start it.
+        (tmp_path / "new.png").write_bytes(_png_with_prompt("a dog in a hat"))
+        self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert calls == [1]
+
+    def test_a_listing_without_the_flag_never_starts_one(self, tmp_path, monkeypatch):
+        """The whole point of starting lazily: a user who never enables the tier
+        never pays for a walk of their output tree."""
+        calls = []
+        self._sandbox(tmp_path, monkeypatch, calls)
+        (tmp_path / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        self._call({"type": "output"})
+        assert calls == []
+        # Paired positive on the SAME uncached tree: with the flag, it fires.
+        self._call({"type": "output", "safe_kw": "nsfw", "safe_prompt": "1"})
+        assert calls == [1]
+
+
+class TestSafeViewWarmEndpoint:
+    """POST /safeview_warm — the `executed` fast warmer's landing point."""
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+        monkeypatch.setattr(
+            folder_paths, "get_user_directory", lambda: str(base / "_user"), raising=False
+        )
+        (base / "_user").mkdir(exist_ok=True)
+
+    def _call(self, body):
+        return asyncio.run(ib.image_browser_safeview_warm(_FakeRequest(body)))
+
+    def test_scans_and_caches_a_freshly_rendered_file(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "leather.png").write_bytes(_png_with_prompt("a nsfw leather couch"))
+        resp = self._call({"items": [{"type": "output", "subfolder": "", "name": "leather.png"}]})
+        assert resp._body == {"ok": True, "scanned": 1}
+        key = safeview_store.cache_key(
+            str(tmp_path / "leather.png"), os.stat(tmp_path / "leather.png")
+        )
+        cached = safeview_store.read_cached(safeview_store.db_path(str(tmp_path / "_user")), [key])
+        assert "nsfw" in cached[key]
+
+    def test_rejects_type_path(self, tmp_path, monkeypatch):
+        """Same perimeter as every write and the batch rating read. ComfyUI's own
+        output addresses are always sandboxed, so this costs nothing."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "leather.png").write_bytes(_png_with_prompt("a nsfw leather couch"))
+        (tmp_path / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        # A valid sandboxed sibling in the SAME batch: `scanned: 0` on its own
+        # passes against an endpoint that scans nothing at all, which cannot
+        # tell a rejected address from a broken scanner.
+        resp = self._call(
+            {
+                "items": [
+                    {"type": "path", "subfolder": str(tmp_path), "name": "leather.png"},
+                    {"type": "output", "subfolder": "", "name": "cat.png"},
+                ]
+            }
+        )
+        assert resp._body == {"ok": True, "scanned": 1}
+        db = safeview_store.db_path(str(tmp_path / "_user"))
+        leather_key = safeview_store.cache_key(
+            str(tmp_path / "leather.png"), os.stat(tmp_path / "leather.png")
+        )
+        cat_key = safeview_store.cache_key(
+            str(tmp_path / "cat.png"), os.stat(tmp_path / "cat.png")
+        )
+        cached = safeview_store.read_cached(db, [leather_key, cat_key])
+        assert cat_key in cached
+        assert leather_key not in cached
+
+    def test_SKIPS_an_unreadable_container_rather_than_failing_the_batch(
+        self, tmp_path, monkeypatch
+    ):
+        """The frontend posts every output of one execution. A mixed batch must
+        not lose its images because one entry was an .avi."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "clip.avi").write_bytes(b"x")
+        (tmp_path / "cat.png").write_bytes(_png_with_prompt("a cat in a hat"))
+        resp = self._call(
+            {
+                "items": [
+                    {"type": "output", "subfolder": "", "name": "clip.avi"},
+                    {"type": "output", "subfolder": "", "name": "cat.png"},
+                ]
+            }
+        )
+        assert resp._body == {"ok": True, "scanned": 1}
+
+    def test_caps_the_batch(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        items = [
+            {"type": "output", "subfolder": "", "name": f"a{i}.png"}
+            for i in range(ib.MAX_WARM_BATCH + 1)
+        ]
+        resp = self._call({"items": items})
+        assert resp.status == 400
+        assert "max" in resp._body["error"]
+
+    def test_rejects_an_empty_body(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call({"items": []})
+        assert resp.status == 400
+
+    def test_route_is_registered(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(
+            r.method == "POST" and r.path == "/image_browser/safeview_warm" for r in registered
+        )
 
 
 # Imported at the bottom so the class above can reference the stubbed server

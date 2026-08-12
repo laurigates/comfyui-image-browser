@@ -91,8 +91,8 @@ manage without leaving ComfyUI.
 
 You are browsing generation output as a grid of thumbnails, on a phone, and
 someone else is in the room. Safe View matches a keyword list against each
-file's name and the folders above it, and **blurs the matching thumbnails** and
-**blocks out their names**.
+file's name, the folders above it and — optionally — its embedded generation
+prompt, and **blurs the matching thumbnails** and **blocks out their names**.
 
 **This is discretion, not access control.** The blur is CSS — one devtools
 override away from gone — and the blurred bytes are still downloaded and still
@@ -110,7 +110,7 @@ the **Safe View** row in the Touch Tools chooser. Configure it under
 | **Keywords** | `nsfw` | Comma- or space-separated. Case-insensitive. Empty means nothing is filtered. |
 | **Remove matches from the listing entirely** | off | Drops matches **server-side** instead of blurring them, so they never reach the browser. |
 | **Block out names too** | on | Also blanks the file name, its folder label and its tooltip. |
-| **Also match the generation prompt and model** | off | Not implemented yet — a later release. |
+| **Also match the generation prompt and model** | off | Also matches the prompt and model name embedded in each file. Off by default because it is expensive — see below. |
 
 Two behaviours worth knowing:
 
@@ -122,6 +122,32 @@ Two behaviours worth knowing:
 - **Hiding is filtered above the listing limit.** A folder of 6000 mostly
   sensitive files still returns a full page of the rest, rather than the
   handful that survived a filter applied to an already-truncated listing.
+
+#### Matching the generation prompt
+
+The first three matchers are free: the file name, its folders and its XMP tags
+all come with the listing. Matching the **prompt** does not — every file's
+embedded metadata has to be parsed, which is why this one is opt-in.
+
+Switching it on changes what you see, in a way worth knowing before you do it:
+
+- The extracted prompt and model name are **cached on the server**, next to the
+  shared thumbnail cache, keyed on the file's path, size and modification time.
+  Editing a file re-scans it; nothing else does.
+- A file whose prompt has **not been scanned yet is blurred**, not shown. An
+  unknown reads as sensitive — the safe direction — so on a large library the
+  first enable shows a mostly-blurred grid that clears as the scan progresses.
+  A **🔍 scanning N** button in the toolbar reports how many are left; tap it to
+  pull progress.
+- Two things fill the cache: a **background scan** of input/output/temp, started
+  the first time the browser asks for this tier (never before — a user who
+  leaves it off never pays for it), and a **live hook** on finished generations,
+  so anything you render while a tab is open is scanned immediately.
+- Only the **verdict** reaches the browser, never the prompt text.
+- Folders and files in a container with no metadata reader (`.avi`, `.mpg`)
+  simply do not take part in this tier, and are never blurred by it.
+
+Turning it back off stops the matching immediately; the cache is kept.
 
 Tap the **👁** on a blurred card to reveal that one card. Reveals last for the
 session and are forgotten when you leave the folder or close the browser.
@@ -146,7 +172,8 @@ Listed because you should know the shape of the gap before relying on it:
   (**≣**), which lists the files themselves and matches their full paths.
 - **Delete, rename and move confirmations name the file in plain text**, as do
   the toasts that report them.
-- **The ⓘ metadata card shows the full prompt**, unblurred.
+- **The ⓘ metadata card shows the full prompt**, unblurred — including for a
+  file that was blurred *because* of its prompt.
 - **The move-destination picker lists folder names unblurred.**
 - **A fresh render appears full-size on the canvas** in a `PreviewImage` node,
   untouched — nothing in this pack can reach it.
