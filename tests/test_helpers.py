@@ -505,12 +505,24 @@ class TestSafeViewMatcher:
         The false-positive class this guards is invisible to the user — a
         wrongly-hidden file and a deliberately-hidden one look identical
         (absent), so nothing would ever report it.
+
+        BOTH DIRECTIONS, on the same keyword, in the same test. The negative
+        alone passes against a matcher hard-wired to `return False` — it proves
+        only that nothing is over-matched, never that anything is matched — so
+        it cannot tell "correct" from "inert". The positive is what gives it
+        teeth. (Measured: with `is_safe_match` returning False as its first
+        statement, the negative-only version passed.)
         """
         assert not ib.is_safe_match({"ass"}, "output/assets", "", "classic.png")
+        assert ib.is_safe_match({"ass"}, "output/ass", "", "classic.png")
 
     def test_a_keyword_does_not_match_a_word_that_merely_starts_with_it(self):
-        """CONTROL: `nsfw` must not match `nsfwish.png`."""
+        """CONTROL: `nsfw` must not match `nsfwish.png` — but must match `nsfw.png`.
+
+        Two-sided for the reason given above.
+        """
         assert not ib.is_safe_match({"nsfw"}, "output/holiday", "", "nsfwish.png")
+        assert ib.is_safe_match({"nsfw"}, "output/holiday", "", "nsfw.png")
 
     def test_no_keywords_matches_nothing(self):
         assert not ib.is_safe_match(set(), "output/nsfw", "", "nsfw.png")
@@ -608,13 +620,26 @@ class TestListSafeHide:
         The matcher's own control test covers the predicate; this one proves the
         endpoint calls it with whole-token semantics rather than doing its own
         `in` check on the way past.
+
+        ONE assertion, both directions. `assets/` holds a file that must survive
+        and a file that must be hidden, and the request carries a keyword for
+        each. A substring matcher hides both (`ass` in `assets`) and fails; a
+        matcher that hides nothing returns both and fails too. Asserting only
+        the survivor — with nothing in the folder to hide — passes against an
+        endpoint that filters nothing at all, which is what this used to do.
         """
         self._sandbox(tmp_path, monkeypatch)
         assets = tmp_path / "assets"
         assets.mkdir()
         (assets / "classic.png").write_bytes(b"x")
+        (assets / "my_nsfw_pic.png").write_bytes(b"x")
         resp = self._call(
-            {"type": "output", "subfolder": "assets", "safe_kw": "ass", "safe_hide": "1"}
+            {
+                "type": "output",
+                "subfolder": "assets",
+                "safe_kw": "ass, nsfw",
+                "safe_hide": "1",
+            }
         )
         assert self._names(resp) == {"classic.png"}
 
