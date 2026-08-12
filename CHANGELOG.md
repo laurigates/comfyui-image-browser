@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.26](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.25...comfyui-image-browser-v0.1.26) (2026-08-12)
+
+
+### Features
+
+* Safe View — the opt-in prompt-metadata tier ([#83](https://github.com/laurigates/comfyui-image-browser/issues/83)) ([b357b80](https://github.com/laurigates/comfyui-image-browser/commit/b357b801ff9b1336a96e3165735395d09e46de1f)), closes [#77](https://github.com/laurigates/comfyui-image-browser/issues/77)
+* **safe-view:** match dc:subject keywords and add the 🙈 mark control ([#86](https://github.com/laurigates/comfyui-image-browser/issues/86)) ([3de9ab4](https://github.com/laurigates/comfyui-image-browser/commit/3de9ab4ce3c4ed082401841cd51a967c8b71cc07))
+
+
+### Miscellaneous
+
+* re-sync vendored xmp_meta.py after the dc:subject tier ([#85](https://github.com/laurigates/comfyui-image-browser/issues/85)) ([58820c8](https://github.com/laurigates/comfyui-image-browser/commit/58820c87d1f721f233bab6bc4f6f18358076d9ac))
+
 ## [0.1.25](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.24...comfyui-image-browser-v0.1.25) (2026-08-12)
 
 
