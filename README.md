@@ -91,8 +91,9 @@ manage without leaving ComfyUI.
 
 You are browsing generation output as a grid of thumbnails, on a phone, and
 someone else is in the room. Safe View matches a keyword list against each
-file's name, the folders above it and — optionally — its embedded generation
-prompt, and **blurs the matching thumbnails** and **blocks out their names**.
+file's name, the folders above it, its `dc:subject` keywords and — optionally —
+its embedded generation prompt, and **blurs the matching thumbnails** and
+**blocks out their names**.
 
 **This is discretion, not access control.** The blur is CSS — one devtools
 override away from gone — and the blurred bytes are still downloaded and still
@@ -122,6 +123,34 @@ Two behaviours worth knowing:
 - **Hiding is filtered above the listing limit.** A folder of 6000 mostly
   sensitive files still returns a full page of the rest, rather than the
   handful that survived a filter applied to an already-truncated listing.
+
+#### Marking a file yourself — 🙈
+
+The name and folder matchers only see what your folders happen to be called. To
+mark **one file** regardless of where it lives, tap **🙈** on its card. That
+writes your first configured keyword into the file's `dc:subject` — the standard
+XMP keyword list digiKam, Lightroom, Bridge, XnView and Windows all read and
+write — so:
+
+- the file is matched here **and** in `comfyui-gallery-loader`, which reads the
+  same files off the same disk;
+- a file you tagged in another photo manager is matched here without doing
+  anything;
+- the mark travels with the file when you copy or back it up. It is in the file,
+  not in a database this pack owns.
+
+Tap again to unmark. The button writes **your first keyword**, not a hidden
+constant — with an empty keyword list it is not offered at all, because any
+other choice would produce a file that says "marked" and is not blurred.
+
+Like every other write in this pack, it is offered only on the **Input / Output
+/ Temp** tabs — never on **browse…**, where writes are refused by design. And a
+keyword is still discretion: it changes what this grid blurs, not what any
+endpoint will serve.
+
+A matched keyword is compared as **whole words** like every other haystack, so a
+file tagged `nsfw art` is matched by the keyword `nsfw`, while one tagged
+`assets` is not matched by `ass`.
 
 #### Matching the generation prompt
 

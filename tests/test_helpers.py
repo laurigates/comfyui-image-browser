@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import image_browser as ib
 import image_meta
 import safeview_store
+import xmp_meta
 
 
 class TestParseExtensions:
@@ -1849,6 +1850,406 @@ class TestSafeViewWarmEndpoint:
         )
 
 
-# Imported at the bottom so the class above can reference the stubbed server
+def _plain_png() -> bytes:
+    """A minimal, structurally valid PNG with no metadata at all.
+
+    Real bytes rather than a truncated header, because `xmp_meta`'s in-file
+    write walks the chunk stream: a stub would silently divert every write to a
+    sidecar, and the preservation tests below would then be asserting the
+    sidecar's behaviour while claiming to assert the file's.
+    """
+    return image_meta.PNG_SIG + b"".join(
+        [
+            _png_chunk(b"IHDR", b"\x00" * 13),
+            _png_chunk(b"IEND", b""),
+        ]
+    )
+
+
+class TestSafeMatchTags:
+    """`dc:subject` keywords as a haystack — the tag tier's matcher half.
+
+    They enter `is_safe_match` through the ordinary `*parts` door, so what is
+    under test here is that a tag is TOKENIZED like every other part rather than
+    compared whole. That is what the kit's `isSensitive` does, and a whole-tag
+    comparison would make this pack disagree with `comfyui-gallery-loader` about
+    the same file on the same disk.
+    """
+
+    def test_a_tag_matches_the_keyword(self):
+        assert ib.is_safe_match({"nsfw"}, "output/holiday", "", "plain.png", "nsfw")
+
+    def test_an_unrelated_tag_does_not_match(self):
+        assert not ib.is_safe_match({"nsfw"}, "output/holiday", "", "plain.png", "landscape")
+
+    def test_CONTROL_a_tag_is_tokenized_not_compared_whole(self):
+        """`nsfw art` must match the keyword `nsfw` — but `assets` must not
+        match `ass`.
+
+        BOTH DIRECTIONS, same test. The positive alone passes against a matcher
+        that compares substrings; the negative alone passes against one hard-
+        wired to `return False`. Only the pair separates "tokenized" from either
+        failure, and a whole-tag `==` comparison fails the positive.
+        """
+        assert ib.is_safe_match({"nsfw"}, "output/holiday", "", "plain.png", "nsfw art")
+        assert not ib.is_safe_match({"ass"}, "output/holiday", "", "plain.png", "assets")
+
+    def test_no_keywords_matches_no_tag(self):
+        assert not ib.is_safe_match(set(), "output/holiday", "", "plain.png", "nsfw")
+
+
+class TestListTags:
+    """`/list` surfaces each file's `dc:subject` keywords, and the tag tier
+    hides on them when Safe View is hiding."""
+
+    def _call(self, query):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def _names(self, resp):
+        return {f["name"] for f in resp._body["files"]}
+
+    def _tagged(self, base, name, tags):
+        """Write a real PNG and put `tags` on it through the shipped writer."""
+        p = base / name
+        p.write_bytes(_plain_png())
+        if tags:
+            ok, _backend = xmp_meta.write_tags(str(p), add=list(tags))
+            assert ok
+        return p
+
+    def test_CONTROL_the_fixture_really_round_trips_its_keywords(self, tmp_path):
+        """Every assertion below rests on the writer actually storing a keyword
+        the reader can see, and that dependency is invisible from the
+        assertions. If it broke, every "not hidden" case would pass having
+        proved nothing — an untagged file is not hidden either."""
+        p = self._tagged(tmp_path, "a.png", ["nsfw"])
+        assert xmp_meta.read_tags(str(p), head_only=False) == ["nsfw"]
+
+    def test_a_listing_row_carries_its_tags(self, tmp_path, monkeypatch):
+        """And an untagged file carries an EMPTY list, not a missing key: the
+        frontend blurs off this value, and 'no keywords' must not look like
+        'the backend does not send keywords'."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._tagged(tmp_path, "marked.png", ["nsfw"])
+        self._tagged(tmp_path, "plain.png", [])
+        rows = {f["name"]: f for f in self._call({"type": "output"})._body["files"]}
+        assert rows["marked.png"]["tags"] == ["nsfw"]
+        assert rows["plain.png"]["tags"] == []
+
+    def test_hides_a_tagged_file_and_keeps_an_untagged_one(self, tmp_path, monkeypatch):
+        """The tier, end to end, BOTH DIRECTIONS in one request.
+
+        'A tagged file is hidden' alone is satisfied by a tier that hides
+        everything; 'an untagged file survives' alone by a tier that hides
+        nothing. Only the pair says the verdict came from the tags. Both files
+        have innocent names in an innocent folder, so nothing but the keyword
+        can decide either one.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        self._tagged(tmp_path, "a.png", ["nsfw"])
+        self._tagged(tmp_path, "b.png", [])
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert self._names(resp) == {"b.png"}
+
+    def test_CONTROL_a_tag_is_tokenized_end_to_end(self, tmp_path, monkeypatch):
+        """`nsfw art` is hidden by `nsfw`; `assets` is not hidden by `ass`.
+
+        The matcher's own control covers the predicate; this proves the LISTING
+        reaches it with whole-token semantics rather than doing its own compare
+        on the way past. One request carries a keyword for each direction, so a
+        substring matcher and an inert one both fail.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        self._tagged(tmp_path, "a.png", ["nsfw art"])
+        self._tagged(tmp_path, "b.png", ["assets"])
+        resp = self._call({"type": "output", "safe_kw": "nsfw, ass", "safe_hide": "1"})
+        assert self._names(resp) == {"b.png"}
+
+    def test_tags_without_the_hide_flag_hide_nothing(self, tmp_path, monkeypatch):
+        """Blur-only is the default: the row still carries its keywords so the
+        browser can blur, but the server drops nothing."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._tagged(tmp_path, "a.png", ["nsfw"])
+        self._tagged(tmp_path, "b.png", [])
+        resp = self._call({"type": "output", "safe_kw": "nsfw"})
+        assert self._names(resp) == {"a.png", "b.png"}
+
+    def test_the_tier_reaches_the_recursive_walk(self, tmp_path, monkeypatch):
+        """Flat view hides on tags too — the same shape of miss `kind` guards
+        against, where a filter lands in only one of the two listing branches."""
+        self._sandbox(tmp_path, monkeypatch)
+        deep = tmp_path / "sub"
+        deep.mkdir()
+        self._tagged(deep, "a.png", ["nsfw"])
+        self._tagged(deep, "b.png", [])
+        resp = self._call(
+            {"type": "output", "recursive": "1", "safe_kw": "nsfw", "safe_hide": "1"}
+        )
+        assert self._names(resp) == {"b.png"}
+
+    def test_the_page_is_TOPPED_UP_past_a_tagged_row(self, tmp_path, monkeypatch):
+        """A row dropped for its tags is replaced by probing one more.
+
+        This is the whole reason the tag tier lives inside the probe loop rather
+        than after the slice. With a cap of 2 and the two NEWEST files tagged, a
+        no-top-up implementation returns an EMPTY page (it spent both probes on
+        rows it then dropped) while the correct one returns the two untagged
+        files below them.
+
+        Both directions again: the assertion names the survivors, so an
+        implementation that hid nothing would return the tagged pair and fail
+        just as loudly as one that returned nothing.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "DIR_LIST_CAP", 2)
+        # mtime order is what the cap slices on: newest two are the tagged ones.
+        for i, (name, tags) in enumerate(
+            [
+                ("old_b.png", []),
+                ("old_a.png", []),
+                ("new_b.png", ["nsfw"]),
+                ("new_a.png", ["nsfw"]),
+            ]
+        ):
+            p = self._tagged(tmp_path, name, tags)
+            os.utime(p, (1_000_000 + i, 1_000_000 + i))
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert self._names(resp) == {"old_a.png", "old_b.png"}
+
+    def test_an_all_tagged_tree_answers_short_and_TRUNCATED(self, tmp_path, monkeypatch):
+        """The pathological case the probe budget exists for. The honest answer
+        is a short page that SAYS it is short — not an unbounded walk, and not a
+        silently empty grid the user cannot tell from an empty folder."""
+        self._sandbox(tmp_path, monkeypatch)
+        monkeypatch.setattr(ib, "DIR_LIST_CAP", 2)
+        for i in range(20):
+            self._tagged(tmp_path, f"f{i}.png", ["nsfw"])
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert resp._body["files"] == []
+        assert resp._body["truncated"] is True
+
+    def test_an_untagged_listing_is_NOT_reported_truncated(self, tmp_path, monkeypatch):
+        """The paired direction for the assertion above: `truncated` moved from
+        `len(found) > cap` to `probed < len(found)`, and a formula that was
+        always True would satisfy the truncation test on its own."""
+        self._sandbox(tmp_path, monkeypatch)
+        for i in range(3):
+            self._tagged(tmp_path, f"f{i}.png", [])
+        resp = self._call({"type": "output", "safe_kw": "nsfw", "safe_hide": "1"})
+        assert len(resp._body["files"]) == 3
+        assert resp._body["truncated"] is False
+
+
+class TestTagEndpoint:
+    """`POST /image_browser/tag` — the 🙈 control's write.
+
+    Same perimeter as every other write in this pack: sandboxed roots only.
+    """
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def _call(self, body):
+        return asyncio.run(ib.image_browser_tag(_FakeRequest(body)))
+
+    def _file(self, base, name="a.png"):
+        p = base / name
+        p.write_bytes(_plain_png())
+        return p
+
+    def test_route_is_registered(self):
+        registered = PromptServer.instance.routes.registered
+        assert any(r.method == "POST" and r.path == "/image_browser/tag" for r in registered)
+
+    def test_adds_and_removes_a_keyword(self, tmp_path, monkeypatch):
+        """One test, both directions: an add that does not land and a remove
+        that does not remove are different bugs, and asserting only the add
+        passes against a handler that ignores `present` entirely."""
+        self._sandbox(tmp_path, monkeypatch)
+        p = self._file(tmp_path)
+        body = {"type": "output", "subfolder": "", "name": "a.png", "tag": "nsfw"}
+        resp = self._call({**body, "present": True})
+        assert resp.status == 200
+        assert resp._body["tags"] == ["nsfw"]
+        assert xmp_meta.read_tags(str(p), head_only=False) == ["nsfw"]
+        resp = self._call({**body, "present": False})
+        assert resp._body["tags"] == []
+        assert xmp_meta.read_tags(str(p), head_only=False) == []
+
+    def test_the_response_is_READ_BACK_not_echoed(self, tmp_path, monkeypatch):
+        """The file already carries `NSFW`; the request adds `nsfw`.
+
+        The writer matches keywords case-insensitively and keeps the casing the
+        file already has, so the stored list is still `["NSFW"]`. A handler that
+        echoed the request would answer `["nsfw"]` and the frontend would repaint
+        a state the file does not carry.
+        """
+        self._sandbox(tmp_path, monkeypatch)
+        p = self._file(tmp_path)
+        assert xmp_meta.write_tags(str(p), add=["NSFW"])[0]
+        resp = self._call(
+            {"type": "output", "subfolder": "", "name": "a.png", "tag": "nsfw", "present": True}
+        )
+        assert resp._body["tags"] == ["NSFW"]
+
+    def test_other_keywords_survive_the_write(self, tmp_path, monkeypatch):
+        """`write_tags` is a DELTA. A handler that sent the new list wholesale
+        would drop every keyword the user set in digiKam or Lightroom, and
+        nothing in this pack reads those, so nothing would notice."""
+        self._sandbox(tmp_path, monkeypatch)
+        p = self._file(tmp_path)
+        assert xmp_meta.write_tags(str(p), add=["holiday", "portfolio"])[0]
+        resp = self._call(
+            {"type": "output", "subfolder": "", "name": "a.png", "tag": "nsfw", "present": True}
+        )
+        assert set(resp._body["tags"]) == {"holiday", "portfolio", "nsfw"}
+
+    def test_rejects_type_path(self, tmp_path, monkeypatch):
+        """A tag write is a WRITE (ADR-0002) — arbitrary-path mutation is out of
+        scope by design, exactly as for /rating, /delete and /rename."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._file(tmp_path)
+        resp = self._call(
+            {
+                "type": "path",
+                "path": str(tmp_path),
+                "subfolder": "",
+                "name": "a.png",
+                "tag": "nsfw",
+                "present": True,
+            }
+        )
+        assert resp.status == 400
+        assert "input/output/temp" in resp._body["error"]
+
+    def test_rejects_traversal_in_the_name(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call(
+            {
+                "type": "output",
+                "subfolder": "",
+                "name": "../escape.png",
+                "tag": "nsfw",
+                "present": True,
+            }
+        )
+        assert resp.status == 400
+
+    def test_rejects_a_tag_that_could_not_round_trip(self, tmp_path, monkeypatch):
+        """Normalized by the SAME function the writer uses, so a value that
+        would be silently mangled is refused instead of stored."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._file(tmp_path)
+        base = {"type": "output", "subfolder": "", "name": "a.png", "present": True}
+        assert self._call({**base, "tag": "   "}).status == 400
+        assert self._call({**base, "tag": "bad\x00tag"}).status == 400
+        assert self._call({**base, "tag": 7}).status == 400
+        # Paired positive: a normal keyword must still be accepted, or the
+        # rejections above pass against a handler that refuses everything.
+        assert self._call({**base, "tag": "nsfw"}).status == 200
+
+    def test_rejects_a_non_boolean_present(self, tmp_path, monkeypatch):
+        """`present` decides ADD vs REMOVE. Coercing `"false"` — a truthy string
+        — would add the keyword a tap meant to remove."""
+        self._sandbox(tmp_path, monkeypatch)
+        self._file(tmp_path)
+        base = {"type": "output", "subfolder": "", "name": "a.png", "tag": "nsfw"}
+        assert self._call({**base, "present": "false"}).status == 400
+        assert self._call({**base}).status == 400
+        assert self._call({**base, "present": True}).status == 200
+
+    def test_missing_file_is_404(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        resp = self._call(
+            {"type": "output", "subfolder": "", "name": "gone.png", "tag": "nsfw", "present": True}
+        )
+        assert resp.status == 404
+
+
+class TestRatingTagPreservation:
+    """The two vocabularies must never strip each other.
+
+    `xmp_meta` owns `xmp:Rating` (a scalar) and `dc:subject` (an rdf:Bag), and
+    each write strips only its own half. Upstream pins this in the module's own
+    suite; it is asserted again HERE because this pack writes ratings from three
+    surfaces (`/rating`, the sidebar injector and the lightbox bar) and a
+    regression would silently delete every keyword a user set in digiKam.
+    """
+
+    def _sandbox(self, base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def _file(self, base):
+        p = base / "a.png"
+        p.write_bytes(_plain_png())
+        return p
+
+    def test_rating_through_the_endpoint_keeps_the_keywords(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        p = self._file(tmp_path)
+        assert xmp_meta.write_tags(str(p), add=["nsfw", "holiday"])[0]
+        resp = asyncio.run(
+            ib.image_browser_rating(
+                _FakeRequest({"type": "output", "subfolder": "", "name": "a.png", "rating": 4})
+            )
+        )
+        assert resp.status == 200
+        rating, tags = xmp_meta.read_meta(str(p), head_only=False)
+        assert rating == 4
+        assert set(tags) == {"nsfw", "holiday"}
+
+    def test_tagging_through_the_endpoint_keeps_the_rating(self, tmp_path, monkeypatch):
+        self._sandbox(tmp_path, monkeypatch)
+        p = self._file(tmp_path)
+        assert xmp_meta.write_rating(str(p), 3)[0]
+        resp = asyncio.run(
+            ib.image_browser_tag(
+                _FakeRequest(
+                    {
+                        "type": "output",
+                        "subfolder": "",
+                        "name": "a.png",
+                        "tag": "nsfw",
+                        "present": True,
+                    }
+                )
+            )
+        )
+        assert resp.status == 200
+        rating, tags = xmp_meta.read_meta(str(p), head_only=False)
+        assert rating == 3
+        assert tags == ["nsfw"]
+
+    def test_a_listing_reports_both_from_ONE_read(self, tmp_path, monkeypatch):
+        """`_scan_file_entry` moved from `read_rating_cached` to
+        `read_meta_cached`. Reverting half of that — keeping the rating read and
+        hard-coding `tags: []` — is invisible to any test that asserts only one
+        of the two, so this asserts the pair off a single listing row."""
+        self._sandbox(tmp_path, monkeypatch)
+        p = self._file(tmp_path)
+        assert xmp_meta.write_rating(str(p), 5)[0]
+        assert xmp_meta.write_tags(str(p), add=["nsfw"])[0]
+        resp = asyncio.run(ib.image_browser_list(_FakeGetRequest({"type": "output"})))
+        row = resp._body["files"][0]
+        assert row["rating"] == 5
+        assert row["tags"] == ["nsfw"]
+
+
+# Imported at the bottom so the classes above can reference the stubbed server
 # without leaking the import into the pure-helper tests above.
 from server import PromptServer  # noqa: E402

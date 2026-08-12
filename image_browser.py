@@ -102,6 +102,15 @@ FLAT_WALK_CAP = 200_000
 # Mirrored in comfyui-gallery-loader, which had the identical hole.
 DIR_LIST_CAP = 5000
 
+# How far past the cap `_probe_newest` may probe while Safe View is HIDING, to
+# refill a page whose rows were dropped for their `dc:subject` keywords. Only
+# the tag tier needs this: the name/path tier filters before any probe, so it
+# costs nothing, while a tag verdict is only known after the file is opened.
+# Without a factor a tree where everything is tagged would open every file in
+# it; with one, the honest answer to that tree is a short page marked
+# `truncated`. Same value and same reasoning as comfyui-gallery-loader's.
+PROBE_BUDGET_FACTOR = 4
+
 # Cover the common cases mimetypes.guess_type misses on some distros.
 mimetypes.add_type("image/webp", ".webp")
 mimetypes.add_type("image/avif", ".avif")
@@ -198,6 +207,18 @@ def is_safe_match(keywords: set[str], *parts: str) -> bool:
     ``lauri`` and ``comfyui`` into every haystack, so a keyword of ``comfyui``
     would hide the entire library — and the frontend, which never sees those
     segments, would disagree about which files matched.
+
+    A file's ``dc:subject`` KEYWORDS are a haystack too, and they enter through
+    exactly this ``*parts`` door — one part per tag, tokenized like any other.
+    That is what the kit's ``isSensitive`` does (``for (const tag of
+    target.tags ?? []) for (const t of tokenize(tag))``): a file tagged
+    ``nsfw art`` in digiKam matches the keyword ``nsfw``, while a file tagged
+    ``assets`` still does not match ``ass``. Comparing a tag WHOLE instead
+    would make this pack disagree with the browser and with
+    ``comfyui-gallery-loader`` over the same bytes on the same disk.
+    (``comfyui-gallery-loader``'s port spells the same thing with a dedicated
+    ``tags`` parameter; the two are behaviourally equivalent, not textual
+    copies — this one keeps its part-agnostic shape.)
     """
     if not keywords:
         return False
@@ -459,7 +480,7 @@ async def image_browser_base(request: web.Request) -> web.Response:
 def _scan_file_entry(
     path: str, name: str, ext: str, st: os.stat_result, image_subset: set[str]
 ) -> dict[str, Any]:
-    """Build a listing dict for one file (size + rating probes, shared by the
+    """Build a listing dict for one file (size + metadata probes, shared by the
     flat and recursive listers so both emit the identical file shape)."""
     width: int | None = None
     height: int | None = None
@@ -474,12 +495,17 @@ def _scan_file_entry(
             # listing the file.
             log.debug("size probe failed for %s: %s", path, exc)
     try:
-        rating = xmp_meta.read_rating_cached(path, st)
+        # ONE XMP read for both. The star and the dc:subject keywords come out
+        # of the SAME packet, so asking for them through two calls would double
+        # the file opens this listing already pays for — and the cache is keyed
+        # per (path, mtime, size), so the second call would be a second parse
+        # only on a cold entry, which is exactly the case that is expensive.
+        rating, tags = xmp_meta.read_meta_cached(path, st)
     except Exception as exc:
-        # Bad/absent XMP packet — treat as unrated (0) but record why the
-        # probe failed.
-        log.debug("rating probe failed for %s: %s", path, exc)
-        rating = 0
+        # Bad/absent XMP packet — treat as unrated and untagged, but record why
+        # the probe failed.
+        log.debug("metadata probe failed for %s: %s", path, exc)
+        rating, tags = 0, []
     return {
         "name": name,
         "mtime": st.st_mtime,
@@ -488,6 +514,7 @@ def _scan_file_entry(
         "height": height,
         "ext": ext,
         "rating": rating,
+        "tags": tags,
     }
 
 
@@ -526,6 +553,19 @@ def _probe_newest(
     for a sandboxed listing, the absolute directory for ``type=path``. Each
     entry's own ``subpath`` and ``name`` are matched on top of it.
 
+    THE TAG TIER CANNOT RUN UP THERE, and the top-up loop below is why it does
+    not have to. Name and path are free — already in hand from the walk — so
+    they filter the whole candidate list before a single file is opened. A
+    file's ``dc:subject`` keywords need the XMP read, which is precisely the
+    expensive probe the cap exists to bound, so probing every candidate to
+    decide membership would spend the whole tree's worth of file opens on a
+    single page. Instead the loop probes NEWEST-FIRST AND TOPS UP: a row
+    dropped for its tags is replaced by probing one more. That keeps tier one's
+    "a full page of the rest" property without paying tier one's price, and
+    costs exactly the same number of probes as before whenever nothing is
+    tagged. ``PROBE_BUDGET_FACTOR`` bounds the pathological case (a whole tree
+    tagged), where the honest answer is a short page marked ``truncated``.
+
     ``prompt_keywords`` turns on the opt-in prompt tier, tagging each
     participating file with a ``prompt_match`` verdict. The third return value
     is how many files were ``"unscanned"`` — the number the toolbar's
@@ -561,10 +601,23 @@ def _probe_newest(
         else:
             verdicts = _prompt_verdicts(found[:cap], prompt_keywords)
             unscanned = sum(1 for v in verdicts.values() if v == _PROMPT_UNSCANNED)
-    truncated = walk_truncated or len(found) > cap
+    # With hiding on, a probe can be spent on a row that is then dropped for its
+    # tags, so the loop is allowed to probe past `cap` to refill the page. With
+    # hiding off nothing is dropped here, so the budget IS the cap and the loop
+    # is byte-for-byte the old `found[:cap]` walk.
+    budget = cap * PROBE_BUDGET_FACTOR if hide_keywords else cap
     files: list[dict[str, Any]] = []
-    for _mtime, subpath, name, ext, path, st in found[:cap]:
+    probed = 0
+    for _mtime, subpath, name, ext, path, st in found:
+        if len(files) >= cap or probed >= budget:
+            break
         fd = _scan_file_entry(path, name, ext, st, image_subset)
+        probed += 1
+        # The tag tier. Each keyword is handed in as its own part, so it is
+        # tokenized exactly like the name and the folder segments — see
+        # is_safe_match.
+        if hide_keywords and is_safe_match(hide_keywords, *fd["tags"]):
+            continue
         if with_subpath:
             fd["subpath"] = subpath
         # Absent for a file outside the tier — a container with no metadata
@@ -573,6 +626,10 @@ def _probe_newest(
         if path in verdicts:
             fd["prompt_match"] = verdicts[path]
         files.append(fd)
+    # Computed from what was actually consumed, not from `len(found) > cap`:
+    # once the loop can stop early on a budget, the only honest statement is
+    # "there were candidates this response never looked at".
+    truncated = walk_truncated or probed < len(found)
     return files, truncated, unscanned
 
 
@@ -1468,6 +1525,71 @@ async def image_browser_rating(request: web.Request) -> web.Response:
         log.error("rating write failed for %s: %s", target, backend)
         return web.json_response({"ok": False, "error": backend}, status=500)
     return web.json_response({"ok": True, "rating": rating, "backend": backend})
+
+
+@PromptServer.instance.routes.post("/image_browser/tag")
+async def image_browser_tag(request: web.Request) -> web.Response:
+    """Add or remove ONE ``dc:subject`` keyword on a file's XMP (or sidecar).
+
+    Body: ``{type, subfolder, name, tag, present}`` — ``present: true`` adds the
+    keyword, ``false`` removes it. A keyword write mutates the file exactly as a
+    star does, so it goes through ``_resolve_sandboxed_file``: ``type=path`` is
+    rejected, the name must be bare, and the extension must be a media one. This
+    is the SAME perimeter ``/rating`` uses, and deliberately not a laxer one —
+    ADR-0002 keeps arbitrary-path mutation out of this pack entirely.
+
+    ``xmp_meta.write_tags`` is a DELTA, so the file's other keywords survive the
+    write, and its rating is untouched (the two vocabularies strip only their
+    own half of the packet). The response carries the keywords READ BACK OFF THE
+    FILE afterwards rather than an echo of the request: the two differ whenever
+    the file already carried the keyword under a different casing, or the write
+    landed in the sidecar, and painting the request would show the caller a
+    state the file does not have.
+
+    This is discretion, not access control. Marking a file changes what Safe
+    View blurs and what ``/list`` returns; every read endpoint still serves the
+    same bytes to anything that addresses the file directly.
+    """
+    body, err_resp = await _read_json(request)
+    if err_resp:
+        return err_resp
+    assert body is not None
+
+    # Normalized by the SAME function the writer uses, so a value that could not
+    # survive the round trip is refused here instead of written and silently
+    # mangled.
+    tag = xmp_meta.normalize_tag(body.get("tag"))
+    if not tag:
+        return web.json_response({"ok": False, "error": "invalid tag"}, status=400)
+    present = body.get("present")
+    if not isinstance(present, bool):
+        return web.json_response({"ok": False, "error": "present must be a boolean"}, status=400)
+
+    target, err = _resolve_sandboxed_file(
+        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+    )
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    assert target is not None
+    if not os.path.isfile(target):
+        return web.json_response({"ok": False, "error": "file not found"}, status=404)
+
+    ok, backend = xmp_meta.write_tags(
+        target, add=[tag] if present else [], remove=[] if present else [tag]
+    )
+    if not ok:
+        log.error("tag write failed for %s: %s", target, backend)
+        return web.json_response({"ok": False, "error": backend}, status=500)
+    return web.json_response(
+        {
+            # head_only=False: the write may have landed past the header scan
+            # window, and answering with a read that could not see it would
+            # report the keyword as absent one tap after adding it.
+            "ok": True,
+            "tags": xmp_meta.read_tags(target, head_only=False),
+            "backend": backend,
+        }
+    )
 
 
 #: Ceiling on one batch rating read. The sidebar injector asks only for the

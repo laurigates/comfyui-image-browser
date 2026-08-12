@@ -1941,6 +1941,7 @@ function pinsToFiles(entries) {
       width: e.width,
       height: e.height,
       rating: e.exists ? e.rating ?? 0 : 0,
+      ...e.exists && e.tags ? { tags: e.tags } : {},
       pinType: e.type,
       pinSub: e.subfolder,
       pinKind: "file",
@@ -1948,6 +1949,36 @@ function pinsToFiles(entries) {
     });
   }
   return out;
+}
+
+// src/safe-tag.ts
+var TAG_URL = "/image_browser/tag";
+function sensitiveKeyword(cfg) {
+  return cfg.keywords.length ? cfg.keywords[0] : null;
+}
+function hasSensitiveTag(f, keyword) {
+  const want = keyword.toLowerCase();
+  return (f.tags ?? []).some((t) => t.toLowerCase() === want);
+}
+function tagRequestBody(addr, tag, present) {
+  return { type: addr.type, subfolder: addr.subfolder, name: addr.name, tag, present };
+}
+async function postTag(url, addr, tag, present) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(tagRequestBody(addr, tag, present))
+  });
+  if (!res.ok)
+    throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data.ok)
+    throw new Error(data.error || "tag failed");
+  return Array.isArray(data.tags) ? data.tags : [];
+}
+function markSensitiveHTML(prefix, keyword, marked) {
+  const label = marked ? `Unmark sensitive (removes ‘${keyword}’)` : `Mark sensitive (‘${keyword}’)`;
+  return `<button type="button" class="${prefix}-act ${prefix}-act-mark${marked ? " is-marked" : ""}" data-action="marksensitive" aria-pressed="${marked}" title="${label}" aria-label="${label}">\uD83D\uDE48</button>`;
 }
 
 // src/browser.ts
@@ -2323,7 +2354,12 @@ function openImageBrowser() {
     return `${fileType(f)}/${fileSub(f)}`;
   }
   function safeTargetOf(f) {
-    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };
+    return {
+      name: f.name,
+      path: safePathOf(f),
+      tags: f.tags,
+      promptMatch: f.prompt_match
+    };
   }
   function isCardHidden(f, cfg) {
     if (!isSensitive(safeTargetOf(f), cfg))
@@ -2645,6 +2681,8 @@ function openImageBrowser() {
         onMove(f);
       else if (action === "pin")
         toggleFilePin(f);
+      else if (action === "marksensitive")
+        toggleSensitiveTag(f, actionBtn);
       return;
     }
     if (selectMode && canWriteFile(f)) {
@@ -2756,6 +2794,23 @@ function openImageBrowser() {
       applyStars(row, prev);
       f.rating = prev;
     });
+  }
+  async function toggleSensitiveTag(f, btn) {
+    const keyword = sensitiveKeyword(readSafeViewConfig());
+    if (!keyword)
+      return;
+    if (!canWriteFile(f))
+      return;
+    const next = !hasSensitiveTag(f, keyword);
+    const button = btn;
+    button.disabled = true;
+    try {
+      f.tags = await postTag(TAG_URL, { type: fileType(f), subfolder: fileSub(f), name: f.name }, keyword, next);
+      renderGrid();
+    } catch (e) {
+      reportError(next ? "Not marked" : "Not unmarked", e);
+      button.disabled = false;
+    }
   }
   function openFull(f) {
     if (revealed.has(fileType(f), fileSub(f), f.name)) {} else if (isCardHidden(f, readSafeViewConfig())) {
@@ -3255,6 +3310,7 @@ function openImageBrowser() {
     const q = state.query;
     const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
     const safeCfg = readSafeViewConfig();
+    const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
     const canWrite = SANDBOXED_TYPES.includes(state.type);
@@ -3350,6 +3406,7 @@ ${when}`;
            <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
       const isFilePinned = canWriteThis && isPinned(filePinItem(f));
       const pinBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
+      const markBtn = canWriteThis && !missing && safeKeyword ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       const starsRow = canWriteThis ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
       const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="${spoilNames ? "Select hidden item" : `Select ${escapeHTML(f.name)}`}">✓</button>` : "";
       const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${escapeHTML(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
@@ -3370,6 +3427,7 @@ ${when}`;
           ${metaBtn}
           ${wfBtn}
           ${pinBtn}
+          ${markBtn}
           ${writeBtns}
         </div>`;
       gridEl.appendChild(c);
@@ -4517,6 +4575,14 @@ var BROWSER_CSS = `
 /* Per-card \uD83D\uDCCC — filled while the file is pinned, matching the toolbar toggle's
    active look so "pinned" reads the same in both places. */
 .ib-act-pin.is-pinned { background: #52452f; color: #ffd866; border-color: #78683a; }
+/* Per-card \uD83D\uDE48 — filled while the file carries the keyword, same "this state is
+   on" language as \uD83D\uDCCC above, in the warning hue the Safe View toggle uses.
+   It lives in .ib-actions, a SIBLING of .ib-thumb, so the blur applied to a
+   matched thumbnail never reaches it — marking a file must not blur the control
+   that unmarks it. A class rule with no min()/calc(), so getComputedStyle can
+   read it in jsdom. */
+.ib-act-mark.is-marked { background: #4a2530; color: #ff9eb0; border-color: #7a4a58; }
+.ib-act-mark:disabled { cursor: progress; opacity: 0.5; }
 /* A pin whose target is gone. Dimmed rather than hidden: "the file moved" and
    "you never pinned it" are different facts, so the card stays — with only its
    unpin affordance — until it is pruned. */

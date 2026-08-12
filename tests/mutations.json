@@ -63,7 +63,7 @@
       "after": "  const disposeSafeView = onSafeViewChange(() => {\n    void 0;\n  });"
     },
     {
-      "label": "the toolbar toggle claims 🙈 with an empty keyword list (advertises a filter that is off)",
+      "label": "the toolbar toggle claims \ud83d\ude48 with an empty keyword list (advertises a filter that is off)",
       "file": "src/browser.ts",
       "before": "    const active = cfg.enabled && cfg.keywords.length > 0;",
       "after": "    const active = cfg.enabled;"
@@ -119,14 +119,14 @@
     {
       "label": "prompt tier: the verdict is never passed to the matcher (a matched prompt renders in the clear)",
       "file": "src/browser.ts",
-      "before": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };",
-      "after": "    return { name: f.name, path: safePathOf(f) };"
+      "before": "      promptMatch: f.prompt_match,\n",
+      "after": ""
     },
     {
       "label": "prompt tier: an ABSENT verdict is defaulted to `unscanned` (every folder card and unreadable file blurs)",
       "file": "src/browser.ts",
-      "before": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };",
-      "after": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match ?? \"unscanned\" };"
+      "before": "      promptMatch: f.prompt_match,\n",
+      "after": "      promptMatch: f.prompt_match ?? \"unscanned\",\n"
     },
     {
       "label": "prompt tier: the listing never asks for it (the tier silently never runs)",
@@ -179,8 +179,8 @@
     {
       "label": "INERT prompt tier: every card reads `unscanned` (the whole grid blurs, and a one-sided cold-cache test cannot see it)",
       "file": "src/browser.ts",
-      "before": "    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };",
-      "after": "    return { name: f.name, path: safePathOf(f), promptMatch: \"unscanned\" };"
+      "before": "      promptMatch: f.prompt_match,\n",
+      "after": "      promptMatch: \"unscanned\",\n"
     },
     {
       "label": "INERT warmer: it never posts (a one-sided \"no posts\" assertion cannot tell this from correct restraint)",
@@ -193,6 +193,48 @@
       "file": "src/browser.ts",
       "before": "    if (unscanned <= 0) {",
       "after": "    if (false) {"
+    },
+    {
+      "label": "the file's tags are dropped from the Safe View target (the tag tier stops blurring entirely)",
+      "file": "src/browser.ts",
+      "before": "      tags: f.tags,\n",
+      "after": ""
+    },
+    {
+      "label": "the \ud83d\ude48 repaint uses the OPTIMISTIC local guess instead of what the server stored",
+      "file": "src/browser.ts",
+      "before": "      f.tags = await postTag(",
+      "after": "      f.tags = next ? [keyword] : [];\n      await postTag("
+    },
+    {
+      "label": "\ud83d\ude48 escapes the per-card write mirror and renders on the browse\u2026/path tab, where /tag 400s",
+      "file": "src/browser.ts",
+      "before": "        canWriteThis && !missing && safeKeyword",
+      "after": "        !missing && safeKeyword"
+    },
+    {
+      "label": "\ud83d\ude48 is offered with no configured keyword, writing the packaged default the user's filter does not contain",
+      "file": "src/safe-tag.ts",
+      "before": "  return cfg.keywords.length ? (cfg.keywords[0] as string) : null;",
+      "after": "  return (cfg.keywords[0] as string) ?? \"nsfw\";"
+    },
+    {
+      "label": "the pressed state asks \"would the filter match it\" instead of \"does the file carry exactly this keyword\"",
+      "file": "src/safe-tag.ts",
+      "before": "  return (f.tags ?? []).some((t) => t.toLowerCase() === want);",
+      "after": "  return (f.tags ?? []).some((t) => t.toLowerCase().includes(want));"
+    },
+    {
+      "label": "the \ud83d\ude48 button loses its data-action, so the card handler treats the tap as an open",
+      "file": "src/safe-tag.ts",
+      "before": " data-action=\"marksensitive\"",
+      "after": ""
+    },
+    {
+      "label": "a pinned row drops its tags (the pinned tab stops blurring by keyword and \ud83d\ude48 reads unmarked on a marked file)",
+      "file": "src/api.ts",
+      "before": "      ...(e.exists && e.tags ? { tags: e.tags } : {}),\n",
+      "after": ""
     }
   ]
 }

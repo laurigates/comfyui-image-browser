@@ -1056,3 +1056,390 @@ describe("Safe View — the executed cache warmer", () => {
     expect(posts.map((p) => p.body.items[0].name)).toEqual(["a.png"]);
   });
 });
+
+// --------------------------------------------------------------------------
+// The dc:subject tag tier — matching on a file's keywords, and the 🙈 control
+// that writes them.
+// --------------------------------------------------------------------------
+
+/**
+ * Fetch stub for the tag tests.
+ *
+ * Distinct from `stubFetch` above because a /tag POST has to answer with a
+ * `tags` array, and because these tests need to control what the SERVER says
+ * was stored independently of what was sent — the whole point of the repaint
+ * assertion. `tagReply` receives the parsed request body and returns the list
+ * the server claims to hold afterwards.
+ */
+function stubTagFetch(files, posts = [], tagReply = (body) => (body.present ? [body.tag] : [])) {
+  const fn = vi.fn(async (url, init) => {
+    const s = String(url);
+    if (init?.method === "POST") {
+      const body = JSON.parse(init.body);
+      posts.push({ url: s, body });
+      if (s.includes("/image_browser/tag")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, tags: tagReply(body) }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    if (s.includes("/image_browser/pins")) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
+    }
+    if (s.includes("/image_browser/base")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          base_path: "/",
+          input_dir: "",
+          output_dir: "",
+          temp_dir: "",
+        }),
+      };
+    }
+    if (s.includes("/image_browser/list")) {
+      const type = new URL(s, "http://localhost").searchParams.get("type") ?? "output";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type,
+          subfolder: "",
+          path: "/out",
+          dirs: [],
+          files,
+          exists: true,
+          truncated: false,
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  });
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+/** The 🙈 control on `name`'s card, or null when it was not rendered. */
+function markBtn(modal, name) {
+  return card(modal, name)?.querySelector('[data-action="marksensitive"]') ?? null;
+}
+
+describe("Safe View — the dc:subject tag tier", () => {
+  const TAGGED = [
+    { name: "a.png", ...PNG, tags: ["nsfw"] },
+    { name: "b.png", ...PNG, tags: [] },
+  ];
+
+  it("blurs a file whose TAGS carry the keyword and leaves an untagged one alone", async () => {
+    // BOTH DIRECTIONS, one test. "A tagged file is blurred" alone is satisfied
+    // by a tier that blurs everything; "an untagged file is not" alone by a tier
+    // that blurs nothing. Both names are innocent and both sit in the same
+    // innocent folder, so nothing but the keywords can decide either card.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubTagFetch(TAGGED);
+    const modal = await open();
+    expect(isBlurred(card(modal, "a.png"))).toBe(true);
+    expect(isBlurred(card(modal, "b.png"))).toBe(false);
+  });
+
+  it("CONTROL: a tag is TOKENIZED, not compared whole", async () => {
+    // `nsfw art` must match `nsfw`; `assets` must not match `ass`. The positive
+    // alone passes against a substring matcher, the negative alone against an
+    // inert one — and a whole-tag `===` comparison fails the positive. This is
+    // the assertion that keeps this pack agreeing with comfyui-gallery-loader
+    // about the same file on the same disk.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw, ass" });
+    stubTagFetch([
+      { name: "a.png", ...PNG, tags: ["nsfw art"] },
+      { name: "b.png", ...PNG, tags: ["assets"] },
+    ]);
+    const modal = await open();
+    expect(isBlurred(card(modal, "a.png"))).toBe(true);
+    expect(isBlurred(card(modal, "b.png"))).toBe(false);
+  });
+
+  it("a row with NO tags key is not treated as a match", async () => {
+    // An older backend sends no `tags` at all. Absent must read as "no
+    // keywords", never as an unknown to fail safe on — this tier's four-state
+    // trap belongs to `prompt_match`, not here, and blurring every card against
+    // a backend that predates the field would be indistinguishable from the
+    // feature simply being broken.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubTagFetch([
+      { name: "a.png", ...PNG },
+      { name: "my_nsfw_pic.png", ...PNG },
+    ]);
+    const modal = await open();
+    expect(isBlurred(card(modal, "a.png"))).toBe(false);
+    // Paired positive: the name tier must still work on the same listing, or
+    // this passes against a grid that blurs nothing at all.
+    expect(isBlurred(card(modal, "my_nsfw_pic.png"))).toBe(true);
+  });
+});
+
+describe("Safe View — the 🙈 mark-sensitive control", () => {
+  const FILES = [
+    { name: "a.png", ...PNG, tags: [] },
+    { name: "marked.png", ...PNG, tags: ["nsfw"] },
+  ];
+
+  it("renders on a sandboxed card and NOT on the browse…/path tab", async () => {
+    // A tag write is a WRITE, so it rides the per-card canWriteFile mirror:
+    // /image_browser/tag rejects type=path, and a control that 400s is worse
+    // than no control. Both halves in one test — asserting only the absence
+    // passes against a build that never renders the button anywhere.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubTagFetch(FILES);
+    const modal = await open();
+    expect(markBtn(modal, "a.png")).not.toBeNull();
+
+    modal.dialog.querySelector('.ib-tab[data-type="path"]').click();
+    await vi.waitFor(() => {
+      if (markBtn(modal, "a.png")) throw new Error("still rendered on the path tab");
+    });
+    // …and the grid really did repaint, so the absence above is not just an
+    // empty grid.
+    expect(card(modal, "a.png")).not.toBeNull();
+  });
+
+  it("is not offered at all when the keyword list is empty", async () => {
+    // There is no packaged fallback: writing `nsfw` into a file whose owner
+    // filters on something else produces a file that says "marked" and is not
+    // hidden — the one outcome a discretion feature must never have.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "" });
+    stubTagFetch(FILES);
+    const modal = await open();
+    expect(markBtn(modal, "a.png")).toBeNull();
+    // Paired: with a keyword configured, the same card DOES get the control.
+    modal.close();
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    const modal2 = await open();
+    expect(markBtn(modal2, "a.png")).not.toBeNull();
+  });
+
+  it("reflects whether the file already carries EXACTLY the keyword", async () => {
+    // `aria-pressed` decides which way the next tap writes. Exact, not "would
+    // the filter match it": a file tagged `nsfw art` is hidden by `nsfw` but
+    // does not carry it, and offering to REMOVE a keyword that is not on the
+    // file would be a tap that does nothing.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubTagFetch([...FILES, { name: "phrase.png", ...PNG, tags: ["nsfw art"] }]);
+    const modal = await open();
+    expect(markBtn(modal, "marked.png").getAttribute("aria-pressed")).toBe("true");
+    expect(markBtn(modal, "a.png").getAttribute("aria-pressed")).toBe("false");
+    expect(markBtn(modal, "phrase.png").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("POSTs the card's own address and does NOT open the file", async () => {
+    // The second half is the trap the gallery-loader implementation already
+    // solved: the mark button sits inside the card, so a handler that did not
+    // consume the tap would ALSO run the card's own click — which here opens
+    // the file in a new tab.
+    //
+    // BOTH DIRECTIONS. "window.open was not called" is trivially satisfied by a
+    // build where the card handler is broken outright, so the same test then
+    // taps the card body and requires that one to open.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    const posts = [];
+    stubTagFetch(FILES, posts);
+    const opened = vi.fn();
+    vi.stubGlobal("open", opened);
+    const modal = await open();
+
+    markBtn(modal, "a.png").click();
+    await vi.waitFor(() => {
+      if (posts.length === 0) throw new Error("no tag POST");
+    });
+    expect(posts[0].url).toContain("/image_browser/tag");
+    expect(posts[0].body).toEqual({
+      type: "output",
+      subfolder: "",
+      name: "a.png",
+      tag: "nsfw",
+      present: true,
+    });
+    expect(opened).not.toHaveBeenCalled();
+
+    card(modal, "a.png").querySelector(".ib-name").click();
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+
+  it("repaints from what the SERVER stored, not from the local guess", async () => {
+    // `postTag` resolves to the keywords read back OFF THE FILE after the
+    // write, and that answer is authoritative — it can disagree with what the
+    // tap assumed. Here the server accepts the request and reports that the
+    // keyword is NOT on the file (a concurrent unmark from the other pack, a
+    // write that landed in a sidecar the reader then refused): the truthful
+    // repaint is unmarked and unblurred.
+    //
+    // This is the assertion an optimistic `f.tags = next ? [keyword] : []`
+    // fails and every weaker one passes. Asserting the marked case alone does
+    // NOT discriminate — the guess and the truth agree whenever the write lands,
+    // which is the common case — so the second card below is the pair: same
+    // request shape, a server that confirms, and the opposite expectation.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    const posts = [];
+    stubTagFetch(
+      [
+        { name: "refused.png", ...PNG, tags: [] },
+        { name: "ok.png", ...PNG, tags: [] },
+      ],
+      posts,
+      (body) => (body.name === "refused.png" ? [] : ["NSFW", "holiday"]),
+    );
+    const modal = await open();
+
+    markBtn(modal, "refused.png").click();
+    markBtn(modal, "ok.png").click();
+    await vi.waitFor(() => {
+      if (posts.length < 2) throw new Error("both taps not posted");
+      if (markBtn(modal, "ok.png")?.getAttribute("aria-pressed") !== "true") {
+        throw new Error("confirmed card not repainted as marked");
+      }
+    });
+    // The server said the keyword is not there — so the card is not marked and
+    // not blurred, however the tap was meant.
+    expect(markBtn(modal, "refused.png").getAttribute("aria-pressed")).toBe("false");
+    expect(isBlurred(card(modal, "refused.png"))).toBe(false);
+    // …and the one it confirmed IS, including through a casing the request did
+    // not send: `hasSensitiveTag` compares case-insensitively, so `NSFW` reads
+    // as carrying `nsfw`.
+    expect(isBlurred(card(modal, "ok.png"))).toBe(true);
+  });
+
+  it("surfaces a failed write instead of painting it as done", async () => {
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    const fn = vi.fn(async (url, init) => {
+      const s = String(url);
+      if (init?.method === "POST" && s.includes("/image_browser/tag")) {
+        return { ok: false, status: 500, json: async () => ({ ok: false, error: "disk full" }) };
+      }
+      if (s.includes("/image_browser/pins")) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
+      }
+      if (s.includes("/image_browser/list")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            type: "output",
+            subfolder: "",
+            path: "/out",
+            dirs: [],
+            files: [{ name: "a.png", ...PNG, tags: [] }],
+            exists: true,
+            truncated: false,
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    });
+    vi.stubGlobal("fetch", fn);
+    const modal = await open();
+
+    markBtn(modal, "a.png").click();
+    await vi.waitFor(() => {
+      if (!document.querySelector(".cmn-toast")) throw new Error("no toast");
+    });
+    // The card is still unmarked and still unblurred — the failure did not get
+    // painted as a successful mark.
+    expect(markBtn(modal, "a.png").getAttribute("aria-pressed")).toBe("false");
+    expect(isBlurred(card(modal, "a.png"))).toBe(false);
+  });
+});
+
+describe("Safe View — the tag tier on the pinned tab", () => {
+  it("blurs a pinned file by its tags, and 🙈 shows its true pressed state there", async () => {
+    // Pins span roots, so a pinned row is built by `pinsToFiles` rather than by
+    // a /list response — a separate construction path that has to carry `tags`
+    // of its own. It does not participate in the PROMPT tier (no verdict is
+    // resolved for a pin), but the tag tier is not a second read: /pins builds
+    // its row through the same `_scan_file_entry`, so the keywords are already
+    // there.
+    //
+    // BOTH DIRECTIONS: a tagged pin blurred AND an untagged one left alone, so
+    // neither an inert path nor a blur-everything one passes. The 🙈 assertion
+    // is the second half of the same bug — dropping `tags` here would leave the
+    // control reading "unmarked" on a file that IS marked, and the first tap
+    // would try to add a keyword the file already carries.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    const fn = vi.fn(async (url, init) => {
+      const s = String(url);
+      if (init?.method === "POST") {
+        return { ok: true, status: 200, json: async () => ({ ok: true, tags: [] }) };
+      }
+      if (s.includes("/image_browser/pins")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            max: 200,
+            pins: [
+              {
+                kind: "file",
+                type: "output",
+                subfolder: "",
+                name: "marked.png",
+                exists: true,
+                ...PNG,
+                tags: ["nsfw"],
+              },
+              {
+                kind: "file",
+                type: "output",
+                subfolder: "",
+                name: "plain.png",
+                exists: true,
+                ...PNG,
+                tags: [],
+              },
+            ],
+          }),
+        };
+      }
+      if (s.includes("/image_browser/base")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            base_path: "/",
+            input_dir: "",
+            output_dir: "",
+            temp_dir: "",
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          type: "output",
+          subfolder: "",
+          path: "/out",
+          dirs: [],
+          files: [{ name: "seed.png", ...PNG, tags: [] }],
+          exists: true,
+          truncated: false,
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fn);
+    const modal = await open();
+
+    modal.dialog.querySelector('.ib-tab[data-type="pinned"]').click();
+    await vi.waitFor(() => {
+      if (!card(modal, "marked.png")) throw new Error("pinned grid not rendered");
+    });
+
+    expect(isBlurred(card(modal, "marked.png"))).toBe(true);
+    expect(isBlurred(card(modal, "plain.png"))).toBe(false);
+    expect(markBtn(modal, "marked.png").getAttribute("aria-pressed")).toBe("true");
+    expect(markBtn(modal, "plain.png").getAttribute("aria-pressed")).toBe("false");
+  });
+});
