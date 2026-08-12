@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.25](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.24...comfyui-image-browser-v0.1.25) (2026-08-12)
+
+
+### Features
+
+* Safe View — blur sensitive thumbnails, names and listings ([#81](https://github.com/laurigates/comfyui-image-browser/issues/81)) ([962401a](https://github.com/laurigates/comfyui-image-browser/commit/962401ac98a7516bca9d12db5268b9dd4fc12af7))
+
+
+### Miscellaneous
+
+* re-sync vendored xmp_meta.py after the packet-clobber fix ([#79](https://github.com/laurigates/comfyui-image-browser/issues/79)) ([c8aae9f](https://github.com/laurigates/comfyui-image-browser/commit/c8aae9f2dbba2d3860a52a35cb197cecce4aa26b)), closes [#78](https://github.com/laurigates/comfyui-image-browser/issues/78)
+
 ## [0.1.24](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.23...comfyui-image-browser-v0.1.24) (2026-08-08)
 
 
