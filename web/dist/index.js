@@ -1614,7 +1614,7 @@ function promptInShell(shell, opts) {
 }
 
 // src/index.ts
-import { app as app2 } from "/scripts/app.js";
+import { app as app3 } from "/scripts/app.js";
 
 // src/browser.ts
 import { app } from "/scripts/app.js";
@@ -1636,6 +1636,7 @@ var RMDIR_URL = "/image_browser/rmdir";
 var MKDIR_URL = "/image_browser/mkdir";
 var PINS_URL = "/image_browser/pins";
 var RATING_URL = "/image_browser/rating";
+var SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
 var IMG_EXTS = new Set([
   ".png",
   ".jpg",
@@ -1696,6 +1697,10 @@ async function fetchListing(p) {
   if (p.safeHide && p.safeKeywords && p.safeKeywords.length > 0) {
     params.set("safe_kw", p.safeKeywords.join(","));
     params.set("safe_hide", "1");
+  }
+  if (p.safePrompt && p.safeKeywords && p.safeKeywords.length > 0) {
+    params.set("safe_kw", p.safeKeywords.join(","));
+    params.set("safe_prompt", "1");
   }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
   if (!r.ok)
@@ -1860,6 +1865,9 @@ async function postJSONBatch(url, body) {
 }
 function deleteMany(items) {
   return postJSONBatch(DELETE_MANY_URL, { items });
+}
+function warmSafeView(items) {
+  return postJSONBatch(SAFEVIEW_WARM_URL, { items });
 }
 async function removeDir(type, subfolder, name, recursive = false) {
   const r = await fetch(RMDIR_URL, {
@@ -2055,6 +2063,8 @@ function pinLabel(p) {
   return `${p.type}${p.subfolder ? `/${p.subfolder}` : ""}`;
 }
 var PINS_STORAGE_KEY = "comfyui-image-browser:pins";
+var SCAN_POLL_MS = 3000;
+var SCAN_POLL_MAX = 20;
 async function migrateLocalPins() {
   let raw = null;
   try {
@@ -2125,6 +2135,7 @@ function openImageBrowser() {
       disposeBackGuard?.();
       disposeBackGuard = null;
       disposeSafeView();
+      cancelScanPoll();
       revealed.clear();
     }
   });
@@ -2191,6 +2202,11 @@ function openImageBrowser() {
   const safeToggleEl = document.createElement("button");
   safeToggleEl.type = "button";
   safeToggleEl.className = "ib-control ib-icon ib-safe-toggle";
+  const scanPillEl = document.createElement("button");
+  scanPillEl.type = "button";
+  scanPillEl.className = "ib-control ib-scan-pill";
+  scanPillEl.title = "Files whose generation prompt has not been scanned yet — blurred until it is. Tap to refresh.";
+  scanPillEl.style.display = "none";
   const filterEl = document.createElement("div");
   filterEl.className = "ib-filter";
   const filterGroupEl = document.createElement("div");
@@ -2211,7 +2227,7 @@ function openImageBrowser() {
   filterEl.appendChild(filterGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, sortEl, refreshEl, filterEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, scanPillEl, sortEl, refreshEl, filterEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -2306,8 +2322,11 @@ function openImageBrowser() {
       return state.absPath;
     return `${fileType(f)}/${fileSub(f)}`;
   }
+  function safeTargetOf(f) {
+    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };
+  }
   function isCardHidden(f, cfg) {
-    if (!isSensitive({ name: f.name, path: safePathOf(f) }, cfg))
+    if (!isSensitive(safeTargetOf(f), cfg))
       return false;
     return !revealed.has(fileType(f), fileSub(f), f.name);
   }
@@ -2319,6 +2338,35 @@ function openImageBrowser() {
     safeToggleEl.setAttribute("aria-pressed", String(active));
   }
   safeToggleEl.addEventListener("click", () => toggleSafeView());
+  let scanPollTimer = null;
+  let scanPollsLeft = 0;
+  function cancelScanPoll() {
+    if (scanPollTimer !== null) {
+      clearTimeout(scanPollTimer);
+      scanPollTimer = null;
+    }
+  }
+  function renderScanPill(unscanned) {
+    cancelScanPoll();
+    if (unscanned <= 0) {
+      scanPillEl.style.display = "none";
+      scanPollsLeft = 0;
+      return;
+    }
+    scanPillEl.style.display = "";
+    scanPillEl.textContent = `\uD83D\uDD0D scanning ${unscanned}`;
+    if (scanPollsLeft > 0) {
+      scanPollsLeft -= 1;
+      scanPollTimer = setTimeout(() => {
+        scanPollTimer = null;
+        loadAndRender({ preserveScroll: true });
+      }, SCAN_POLL_MS);
+    }
+  }
+  scanPillEl.addEventListener("click", () => {
+    scanPollsLeft = SCAN_POLL_MAX;
+    loadAndRender({ preserveScroll: true });
+  });
   const disposeSafeView = onSafeViewChange(() => {
     loadAndRender({ preserveScroll: true });
   });
@@ -3120,6 +3168,7 @@ function openImageBrowser() {
     if (revealLocation !== here) {
       revealed.clear();
       revealLocation = here;
+      scanPollsLeft = SCAN_POLL_MAX;
     }
     renderTabs();
     renderCrumbs();
@@ -3135,8 +3184,9 @@ function openImageBrowser() {
         state.dirs = [];
         state.files = narrowByKind(pinsToFiles(res.pins), state.typeFilter);
         if (safeCfg.hide) {
-          state.files = state.files.filter((f) => !isSensitive({ name: f.name, path: safePathOf(f) }, safeCfg));
+          state.files = state.files.filter((f) => !isSensitive(safeTargetOf(f), safeCfg));
         }
+        renderScanPill(0);
         modal.setStatus(res.pins.length ? "" : "Nothing pinned yet.");
       } else {
         const data = await fetchListing({
@@ -3146,10 +3196,12 @@ function openImageBrowser() {
           recursive: isFlat(),
           kind: state.typeFilter,
           safeHide: safeCfg.hide,
-          safeKeywords: safeCfg.keywords
+          safeKeywords: safeCfg.keywords,
+          safePrompt: safeCfg.matchPrompt
         });
         state.dirs = data.dirs || [];
         state.files = data.files || [];
+        renderScanPill(data.safe_unscanned ?? 0);
         modal.setStatus(data.exists ? "" : "Directory not found.");
         if (data.truncated) {
           notify({
@@ -3164,6 +3216,7 @@ function openImageBrowser() {
       modal.setStatus(`Error: ${e.message}`);
       state.dirs = [];
       state.files = [];
+      renderScanPill(0);
     }
     modal.setBusy(false);
     renderPins();
@@ -4471,6 +4524,7 @@ var BROWSER_CSS = `
 .ib-card.is-missing:hover { border-color: #78384a; transform: none; }
 .ib-card.is-missing .ib-meta { color: #c07a8a; font-style: italic; }
 .ib-prune { white-space: nowrap; }
+.ib-scan-pill { white-space: nowrap; color: #c8b06a; border-color: #4a4230; }
 /* Folder delete — corner overlay on dir cards (write-gated). */
 .ib-dir-del {
     position: absolute; top: 4px; right: 4px; z-index: 2;
@@ -4932,6 +4986,56 @@ function installLightboxActions() {
   };
 }
 
+// src/scan-warm.ts
+import { app as app2 } from "/scripts/app.js";
+var MEDIA_KEYS = ["images", "video"];
+function itemsFromExecuted(detail) {
+  const output = detail?.output;
+  if (!output || typeof output !== "object")
+    return [];
+  const out = [];
+  const seen = new Set;
+  for (const key of MEDIA_KEYS) {
+    const arr = output[key];
+    if (!Array.isArray(arr))
+      continue;
+    for (const raw of arr) {
+      const item = raw;
+      const filename = item?.filename;
+      const type = item?.type;
+      if (typeof filename !== "string" || filename === "")
+        continue;
+      if (typeof type !== "string" || !SANDBOXED_TYPES.includes(type))
+        continue;
+      const subfolder = typeof item?.subfolder === "string" ? item.subfolder : "";
+      const id = `${type}:${subfolder}:${filename}`;
+      if (seen.has(id))
+        continue;
+      seen.add(id);
+      out.push({ type, subfolder, name: filename });
+    }
+  }
+  return out;
+}
+function installScanWarm(host) {
+  const api = app2.api;
+  if (!api || typeof api.addEventListener !== "function")
+    return () => {};
+  const onExecuted = (event) => {
+    const cfg = host ? readSafeViewConfig(host) : readSafeViewConfig();
+    if (!cfg.matchPrompt)
+      return;
+    const items = itemsFromExecuted(event.detail);
+    if (items.length === 0)
+      return;
+    warmSafeView(items).catch((e) => {
+      console.warn(`[${EXT_NAME}] ${SAFE_VIEW_SETTINGS.matchPrompt} warm failed`, e);
+    });
+  };
+  api.addEventListener("executed", onExecuted);
+  return () => api.removeEventListener("executed", onExecuted);
+}
+
 // src/sidebar-stars.ts
 var STYLE_ID7 = "ib-sidebar-stars-style";
 var ROW_CLASS2 = "ibs-stars";
@@ -5124,7 +5228,7 @@ var entry = makeHubEntry({
   open: openImageBrowser,
   priority: 10
 });
-app2.registerExtension({
+app3.registerExtension({
   name: "comfy.image-browser",
   settings: [
     ...safeViewSettings(),
@@ -5168,6 +5272,7 @@ app2.registerExtension({
   setup() {
     registerHubEntry(entry.hubEntry);
     registerSafeViewHubToggle();
+    installScanWarm();
   }
 });
 export {

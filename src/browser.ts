@@ -10,6 +10,7 @@ import type {
   ModalShellController,
   RatingAddress,
   SafeViewConfig,
+  SafeViewTarget,
 } from "@laurigates/comfy-modal-kit";
 import {
   applyStars,
@@ -285,6 +286,13 @@ function pinLabel(p: PinItem): string {
 // was a FOLDER pin — file pins never existed client-side.
 const PINS_STORAGE_KEY = "comfyui-image-browser:pins";
 
+// The prompt tier's progress poll. 3 s x 20 is about a minute of watching a
+// sweep before the pill goes quiet — long enough to cover a typical library,
+// short enough that a stalled sweep does not leave a request loop running.
+// Re-armed per LOCATION (see loadAndRender) and by tapping the pill.
+const SCAN_POLL_MS = 3000;
+const SCAN_POLL_MAX = 20;
+
 /**
  * Move any localStorage pin list into the server store, then drop the key.
  *
@@ -400,6 +408,9 @@ export function openImageBrowser(): ModalShellController {
       // detached grid on every future settings change, for the rest of the page's
       // life — one leak per open.
       disposeSafeView();
+      // Same rule again: the scan poll is a timer, and a timer that outlives the
+      // modal re-lists a dead grid every 3 s forever.
+      cancelScanPoll();
       // Reveals are per-session by design: reopening the browser must not still
       // be showing what the user unblurred an hour ago.
       revealed.clear();
@@ -501,6 +512,22 @@ export function openImageBrowser(): ModalShellController {
   safeToggleEl.type = "button";
   safeToggleEl.className = "ib-control ib-icon ib-safe-toggle";
 
+  // Safe View's prompt tier reports how many files it could not yet judge. That
+  // number is the difference between "these files matched your keywords" and
+  // "I have not looked at these yet" — and without it, first enabling the tier
+  // on a large library shows a mostly-blurred grid that looks broken rather
+  // than busy. Hidden whenever the count is 0, which is the steady state.
+  //
+  // A button, not a label: tapping it re-lists, so a user watching the sweep
+  // has a way to pull progress without hunting for the refresh control. The
+  // bounded auto-poll below does the same thing on a timer.
+  const scanPillEl = document.createElement("button");
+  scanPillEl.type = "button";
+  scanPillEl.className = "ib-control ib-scan-pill";
+  scanPillEl.title =
+    "Files whose generation prompt has not been scanned yet — blurred until it is. Tap to refresh.";
+  scanPillEl.style.display = "none";
+
   // Media-type filter — a segmented All / 🖼 Images / 🎬 Videos control on its
   // own full-width toolbar row (.ib-filter is the row, .ib-filter-group the
   // pill; flex-basis:100% on the pill itself would stretch its border across
@@ -541,6 +568,7 @@ export function openImageBrowser(): ModalShellController {
     newFolderEl,
     pruneEl,
     safeToggleEl,
+    scanPillEl,
     sortEl,
     refreshEl,
     filterEl,
@@ -783,9 +811,24 @@ export function openImageBrowser(): ModalShellController {
     return `${fileType(f)}/${fileSub(f)}`;
   }
 
+  /**
+   * The Safe View target for one card.
+   *
+   * `promptMatch` is passed straight through, INCLUDING when it is absent. The
+   * kit distinguishes four states and the two that look alike are the two that
+   * matter: `"unscanned"` reads as sensitive (fail-safe for an unknown), while
+   * an absent key means the file is outside the tier and is never sensitive by
+   * it. Defaulting the absent case to anything — `false` or `"unscanned"` —
+   * collapses that distinction, and one of those two collapses blurs every
+   * pinned card and every file the backend has no reader for.
+   */
+  function safeTargetOf(f: ListingFile): SafeViewTarget {
+    return { name: f.name, path: safePathOf(f), promptMatch: f.prompt_match };
+  }
+
   /** Whether this card should be blurred right now — match AND not revealed. */
   function isCardHidden(f: ListingFile, cfg: SafeViewConfig): boolean {
-    if (!isSensitive({ name: f.name, path: safePathOf(f) }, cfg)) return false;
+    if (!isSensitive(safeTargetOf(f), cfg)) return false;
     return !revealed.has(fileType(f), fileSub(f), f.name);
   }
 
@@ -804,6 +847,56 @@ export function openImageBrowser(): ModalShellController {
   }
 
   safeToggleEl.addEventListener("click", () => toggleSafeView());
+
+  // ---- The prompt tier's "scanning N" pill ------------------------
+  //
+  // Bounded auto-poll, deliberately. The backend's sweep has no channel to push
+  // progress here, so the grid would otherwise stay blurred until the user
+  // happened to re-list. Three disciplines keep the timer honest, and they are
+  // the same ones thumbObserver and restoreScroll already follow:
+  //
+  //   * it is cancelled on close and re-armed by each load, so nothing
+  //     scheduled outlives the modal or a navigation;
+  //   * it stops the moment the count reaches 0 — the steady state costs
+  //     nothing;
+  //   * it is capped at SCAN_POLL_MAX ticks, so a sweep that stalls (an
+  //     unreadable tree, a full disk) settles into a visible "scanning N" pill
+  //     rather than an endless request loop nobody asked for.
+  let scanPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let scanPollsLeft = 0;
+
+  function cancelScanPoll(): void {
+    if (scanPollTimer !== null) {
+      clearTimeout(scanPollTimer);
+      scanPollTimer = null;
+    }
+  }
+
+  /** Paint the pill from a listing's unscanned count, and arm the next poll. */
+  function renderScanPill(unscanned: number): void {
+    cancelScanPoll();
+    if (unscanned <= 0) {
+      scanPillEl.style.display = "none";
+      scanPollsLeft = 0;
+      return;
+    }
+    scanPillEl.style.display = "";
+    scanPillEl.textContent = `🔍 scanning ${unscanned}`;
+    if (scanPollsLeft > 0) {
+      scanPollsLeft -= 1;
+      scanPollTimer = setTimeout(() => {
+        scanPollTimer = null;
+        void loadAndRender({ preserveScroll: true });
+      }, SCAN_POLL_MS);
+    }
+  }
+
+  scanPillEl.addEventListener("click", () => {
+    // An explicit tap re-arms the budget: the user asking for progress is the
+    // signal that the poll is worth spending again.
+    scanPollsLeft = SCAN_POLL_MAX;
+    void loadAndRender({ preserveScroll: true });
+  });
 
   // Repaint when the preference changes ANYWHERE — the other gallery pack, the
   // settings dialog, or the Touch Tools chooser's toggle row. Only one pack's
@@ -1905,6 +1998,10 @@ export function openImageBrowser(): ModalShellController {
     if (revealLocation !== here) {
       revealed.clear();
       revealLocation = here;
+      // A fresh location gets a fresh poll budget. Re-arming per LOAD instead
+      // would make the budget unbounded: each poll is a load, so the poll would
+      // top up the allowance it just spent and never stop.
+      scanPollsLeft = SCAN_POLL_MAX;
     }
     renderTabs();
     renderCrumbs();
@@ -1941,10 +2038,14 @@ export function openImageBrowser(): ModalShellController {
         // be a hole in the filter — pin a sensitive file once and it is listed
         // in full every time hiding is on.
         if (safeCfg.hide) {
-          state.files = state.files.filter(
-            (f) => !isSensitive({ name: f.name, path: safePathOf(f) }, safeCfg),
-          );
+          state.files = state.files.filter((f) => !isSensitive(safeTargetOf(f), safeCfg));
         }
+        // The pinned view has no verdicts to report: /pins carries no
+        // prompt_match, so every pinned card is outside the tier (documented
+        // alongside the narrowByKind exemption). Painting a stale count from
+        // the previous folder would claim a scan that is not running for this
+        // listing.
+        renderScanPill(0);
         modal.setStatus(res.pins.length ? "" : "Nothing pinned yet.");
       } else {
         const data = await fetchListing({
@@ -1958,9 +2059,13 @@ export function openImageBrowser(): ModalShellController {
           // was before Safe View existed — the same discipline `kind` follows.
           safeHide: safeCfg.hide,
           safeKeywords: safeCfg.keywords,
+          // The opt-in prompt tier. Independent of `safeHide`: the two compose,
+          // and blur-only is this tier's default mode as it is for the others.
+          safePrompt: safeCfg.matchPrompt,
         });
         state.dirs = data.dirs || [];
         state.files = data.files || [];
+        renderScanPill(data.safe_unscanned ?? 0);
         modal.setStatus(data.exists ? "" : "Directory not found.");
         if (data.truncated) {
           notify({
@@ -1979,6 +2084,9 @@ export function openImageBrowser(): ModalShellController {
       modal.setStatus(`Error: ${(e as Error).message}`);
       state.dirs = [];
       state.files = [];
+      // A failed load says nothing about the scan; polling on top of an error
+      // would retry the failing request on a timer.
+      renderScanPill(0);
     }
     modal.setBusy(false);
     // Pins render into the toolbar, which lives INSIDE the scroller — do it
@@ -3613,6 +3721,7 @@ const BROWSER_CSS = `
 .ib-card.is-missing:hover { border-color: #78384a; transform: none; }
 .ib-card.is-missing .ib-meta { color: #c07a8a; font-style: italic; }
 .ib-prune { white-space: nowrap; }
+.ib-scan-pill { white-space: nowrap; color: #c8b06a; border-color: #4a4230; }
 /* Folder delete — corner overlay on dir cards (write-gated). */
 .ib-dir-del {
     position: absolute; top: 4px; right: 4px; z-index: 2;

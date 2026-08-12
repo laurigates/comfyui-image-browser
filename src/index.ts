@@ -27,6 +27,7 @@ import {
 import { app } from "/scripts/app.js";
 import { openImageBrowser } from "./browser.js";
 import { installLightboxActions } from "./lightbox-actions.js";
+import { installScanWarm } from "./scan-warm.js";
 import { installSidebarStars } from "./sidebar-stars.js";
 
 // Exported so the jsdom mount smoke test can open the view without the app
@@ -154,5 +155,12 @@ app.registerExtension({
     // an entry would make getHubEntries().length === 2 for a single-pack user
     // and cost them the one-tap short-circuit on every launch.
     registerSafeViewHubToggle();
+    // Safe View's fast cache warmer. Installed unconditionally and gated at
+    // EVENT time on the `MatchPrompt` setting rather than here — a user who
+    // switches the tier on mid-session is then covered without a reload, and one
+    // who never switches it on never sends a request. Deliberately NOT bound to
+    // a setting's onChange like the two injectors above: those own DOM that must
+    // be torn down, this owns one listener that costs nothing while idle.
+    installScanWarm();
   },
 });

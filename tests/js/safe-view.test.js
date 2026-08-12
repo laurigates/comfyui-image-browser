@@ -29,6 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "/scripts/app.js";
 import { openShell } from "../../src/index.ts";
 import { installLightboxActions } from "../../src/lightbox-actions.ts";
+import { installScanWarm } from "../../src/scan-warm.ts";
 import { installSidebarStars } from "../../src/sidebar-stars.ts";
 
 // --------------------------------------------------------------------------
@@ -65,10 +66,14 @@ const PNG = { ext: ".png", mtime: 2, size: 10, width: 8, height: 8, rating: 0 };
  * Fetch stub. `listings` maps a subfolder to its `{dirs, files}`; every /list
  * request URL is recorded so a test can assert on the query string.
  */
-function stubFetch(listings, calls = []) {
-  const fn = vi.fn(async (url) => {
+function stubFetch(listings, calls = [], posts = []) {
+  const fn = vi.fn(async (url, init) => {
     const s = String(url);
     calls.push(s);
+    if (init?.method === "POST") {
+      posts.push({ url: s, body: JSON.parse(init.body) });
+      return { ok: true, status: 200, json: async () => ({ ok: true, scanned: 0 }) };
+    }
     if (s.includes("/image_browser/pins")) {
       return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
     }
@@ -100,6 +105,9 @@ function stubFetch(listings, calls = []) {
           files: entry.files ?? [],
           exists: true,
           truncated: false,
+          // The prompt tier's progress count. Passed through from the fixture so
+          // a test can drive the "scanning N" pill without a second stub.
+          ...(entry.unscanned === undefined ? {} : { safe_unscanned: entry.unscanned }),
         }),
       };
     }
@@ -145,6 +153,13 @@ const EXTENSION = app.registrations.find((r) => r.name === "comfy.image-browser"
 beforeEach(() => {
   localStorage.clear();
   document.body.innerHTML = "";
+  // A fresh event bus per test. `app.api` is MODULE-level state shared by every
+  // test in this file, and the registration suite's `EXTENSION.setup()` installs
+  // a permanent `executed` listener that nothing tears down — correct in
+  // production (setup runs once per page load) and a cross-test leak here.
+  // Without this reset, a later "stopped listening" assertion sees a post made
+  // by somebody else's listener and fails for a reason that is not the code's.
+  app.api = new EventTarget();
 });
 
 afterEach(() => {
@@ -750,5 +765,294 @@ describe("Safe View — the asset lightbox injector", () => {
       if (img.classList.contains(SAFE_VIEW_BLUR_CLASS)) throw new Error("still blurred");
     });
     expect(dialog.querySelector(".cmk-sv-reveal")).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------
+// The opt-in prompt tier
+// --------------------------------------------------------------------------
+//
+// WHAT THIS TIER CAN ASSERT HERE. The verdict arrives as a field on the listing
+// row, so jsdom sees the whole decision path: request flag -> response field ->
+// isSensitive -> the resolved blur class. What it CANNOT see is whether the
+// backend's cache actually holds the right text — that is tests/test_helpers.py's
+// TestSafeViewPromptTier, driven against real embedded metadata.
+//
+// THE FOUR STATES ARE THE POINT. `true` and `false` are the easy half. The two
+// that matter are `"unscanned"` (participates, no verdict yet -> blurred,
+// fail-safe) and ABSENT (outside the tier -> never blurred). Collapsing them in
+// either direction is a shipped bug: default-absent-to-unscanned blurs every
+// folder card and every unreadable container the moment the tier comes on, and
+// default-unscanned-to-false shows a sensitive render in the clear on a cold
+// cache. Both directions are asserted below.
+
+describe("Safe View — the prompt tier's four states", () => {
+  const ON = {
+    [SAFE_VIEW_SETTINGS.keywords]: "nsfw",
+    [SAFE_VIEW_SETTINGS.matchPrompt]: true,
+  };
+  // Innocent name, innocent folder: nothing but the verdict can blur these.
+  const MATCHED = { name: "holiday_a.png", ...PNG, prompt_match: true };
+  const CLEAR = { name: "holiday_b.png", ...PNG, prompt_match: false };
+  const UNSCANNED = { name: "holiday_c.png", ...PNG, prompt_match: "unscanned" };
+  // No `prompt_match` key at all — a container the backend has no reader for.
+  const OUTSIDE = { name: "holiday_d.avi", ...PNG, ext: ".avi" };
+  const ALL = [MATCHED, CLEAR, UNSCANNED, OUTSIDE];
+
+  it("blurs a file whose cached prompt matched, on an innocent name and path", async () => {
+    stubSettings(ON);
+    stubFetch({ "": { files: ALL } });
+    const modal = await open();
+    expect(isBlurred(card(modal, "holiday_a.png"))).toBe(true);
+    // Paired negative in the SAME listing: a tier that blurred everything would
+    // satisfy the positive on its own.
+    expect(isBlurred(card(modal, "holiday_b.png"))).toBe(false);
+  });
+
+  it("COLD CACHE: `unscanned` is blurred — the fail-safe reading of an unknown", async () => {
+    // BOTH DIRECTIONS, same listing. The positive alone passes against a tier
+    // that blurs EVERYTHING — which is exactly what a wrong default here does,
+    // and it would look identical to a working fail-safe on a cold cache. The
+    // scanned-and-clean card is what tells them apart.
+    stubSettings(ON);
+    stubFetch({ "": { files: ALL } });
+    const modal = await open();
+    expect(isBlurred(card(modal, "holiday_c.png"))).toBe(true);
+    expect(isBlurred(card(modal, "holiday_b.png"))).toBe(false);
+  });
+
+  it("CONTROL: a row with NO verdict is never blurred by this tier", async () => {
+    // The other half of the four-state contract. `undefined` means "does not
+    // participate", not "not scanned yet"; treating it as unscanned would blur
+    // every unreadable container — and every card in the pinned view, which
+    // carries no verdicts at all.
+    stubSettings(ON);
+    stubFetch({ "": { files: ALL } });
+    const modal = await open();
+    expect(isBlurred(card(modal, "holiday_d.avi"))).toBe(false);
+    // Paired positive: the same listing must still blur the unscanned row, so
+    // "the tier is off" cannot satisfy this test.
+    expect(isBlurred(card(modal, "holiday_c.png"))).toBe(true);
+  });
+
+  it("CONTROL: a FOLDER card is never blurred by this tier", async () => {
+    // A folder has no generation metadata to read, so it is outside the tier by
+    // construction — and it is the case where a wrong default is most visible,
+    // because every doorway in the grid would blur at once.
+    stubSettings(ON);
+    stubFetch({ "": { dirs: [{ name: "holiday" }], files: [UNSCANNED] } });
+    const modal = await open();
+    const dir = modal.bodyEl.querySelector(".ib-card.is-dir");
+    expect(getComputedStyle(dir.querySelector(".ib-thumb")).filter).not.toBe("blur(18px)");
+    expect(isBlurred(card(modal, "holiday_c.png"))).toBe(true);
+  });
+
+  it("consults no verdict while the tier is SWITCHED OFF", async () => {
+    // A stale `"unscanned"` left on a row must not blur anything once the user
+    // turns the tier back off — the kit gates the whole check on matchPrompt.
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubFetch({ "": { files: [...ALL, { name: "my_nsfw_pic.png", ...PNG }] } });
+    const modal = await open();
+    expect(isBlurred(card(modal, "holiday_c.png"))).toBe(false);
+    expect(isBlurred(card(modal, "holiday_a.png"))).toBe(false);
+    // Paired positive: Safe View ITSELF is still on, so the name match must
+    // still blur. Without it, "nothing is blurred" passes against a filter that
+    // has been switched off entirely rather than one tier being skipped.
+    expect(isBlurred(card(modal, "my_nsfw_pic.png"))).toBe(true);
+  });
+
+  it("asks for the tier only when it is on AND there are keywords", async () => {
+    const calls = [];
+    stubSettings(ON);
+    stubFetch({ "": { files: ALL } }, calls);
+    await open();
+    expect(calls.some((u) => u.includes("/list") && u.includes("safe_prompt=1"))).toBe(true);
+  });
+
+  it("does NOT ask for the tier when it is off (the default URL is unchanged)", async () => {
+    const calls = [];
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubFetch({ "": { files: ALL } }, calls);
+    await open();
+    // A listing must have happened, or "no safe_prompt anywhere" is trivially
+    // true against a browser that never asked for anything.
+    expect(calls.some((u) => u.includes("/image_browser/list"))).toBe(true);
+    expect(calls.some((u) => u.includes("safe_prompt"))).toBe(false);
+  });
+
+  it("does NOT ask for the tier with an empty keyword list", async () => {
+    // The backend refuses to run it without keywords, so sending the flag alone
+    // would ask for a filter it will not get.
+    const calls = [];
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "", [SAFE_VIEW_SETTINGS.matchPrompt]: true });
+    stubFetch({ "": { files: ALL } }, calls);
+    await open();
+    expect(calls.some((u) => u.includes("/image_browser/list"))).toBe(true);
+    expect(calls.some((u) => u.includes("safe_prompt"))).toBe(false);
+  });
+});
+
+describe("Safe View — the scanning pill", () => {
+  const ON = {
+    [SAFE_VIEW_SETTINGS.keywords]: "nsfw",
+    [SAFE_VIEW_SETTINGS.matchPrompt]: true,
+  };
+  const FILES = [{ name: "holiday.png", ...PNG, prompt_match: "unscanned" }];
+
+  function pill(modal) {
+    return modal.dialog.querySelector(".ib-scan-pill");
+  }
+
+  it("reports the count, then hides once the listing is fully scanned", async () => {
+    // ONE test, both directions, driven by a real navigation. Asserting only
+    // that the pill appears passes against a pill that is always visible;
+    // asserting only that it hides passes against one that never shows. The
+    // descent into a fully-scanned folder is what makes each half falsifiable.
+    stubSettings(ON);
+    stubFetch({
+      "": { dirs: [{ name: "done" }], files: FILES, unscanned: 7 },
+      done: { files: [{ name: "scanned.png", ...PNG, prompt_match: false }], unscanned: 0 },
+    });
+    const modal = await open();
+    expect(pill(modal).style.display).not.toBe("none");
+    expect(pill(modal).textContent).toContain("7");
+
+    modal.bodyEl.querySelector(".ib-card.is-dir").click();
+    await vi.waitFor(() => {
+      if (!card(modal, "scanned.png")) throw new Error("subfolder not rendered");
+    });
+    expect(pill(modal).style.display).toBe("none");
+  });
+
+  it("stays hidden when the tier is off, however the response is shaped", async () => {
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubFetch({ "": { files: FILES } });
+    const modal = await open();
+    expect(pill(modal).style.display).toBe("none");
+  });
+});
+
+describe("Safe View — the executed cache warmer", () => {
+  const ON = {
+    [SAFE_VIEW_SETTINGS.keywords]: "nsfw",
+    [SAFE_VIEW_SETTINGS.matchPrompt]: true,
+  };
+  let uninstall = null;
+
+  afterEach(() => {
+    uninstall?.();
+    uninstall = null;
+  });
+
+  /**
+   * Dispatch an `executed` message where a real one lands: at `app.api`, the
+   * EventTarget ComfyUI's own `dispatchCustomEvent` fires on. `installScanWarm`
+   * binds to the MODULE's `app`, not to `globalThis.app` (which stubSettings
+   * owns), so this must be the same object the module imported — dispatching
+   * anywhere else would pass with the listener removed entirely.
+   */
+  function fireExecuted(output) {
+    app.api.dispatchEvent(
+      new CustomEvent("executed", { detail: { node: "9", prompt_id: "p", output } }),
+    );
+  }
+
+  it("posts the images AND the videos a render produced", async () => {
+    // `video` is the half the original plan missed. This pack lists videos and
+    // the backend reads MP4/WebM, so skipping them would leave every fresh clip
+    // permanently unscanned — and therefore permanently blurred.
+    const posts = [];
+    stubSettings(ON);
+    stubFetch({}, [], posts);
+    uninstall = installScanWarm();
+    fireExecuted({
+      images: [{ filename: "a.png", subfolder: "d", type: "output" }],
+      video: [{ filename: "b.mp4", subfolder: "", type: "output" }],
+    });
+    await vi.waitFor(() => {
+      if (posts.length === 0) throw new Error("no warm posted");
+    });
+    expect(posts[0].url).toContain("/image_browser/safeview_warm");
+    expect(posts[0].body.items).toEqual([
+      { type: "output", subfolder: "d", name: "a.png" },
+      { type: "output", subfolder: "", name: "b.mp4" },
+    ]);
+  });
+
+  it("SKIPS an item with no filename rather than posting a bogus address", async () => {
+    // zResultItem marks every field optional. Destructuring blind builds
+    // `undefined` into an address and posts it — which is how a warm request
+    // ends up scanning something that is not the file.
+    const posts = [];
+    stubSettings(ON);
+    stubFetch({}, [], posts);
+    uninstall = installScanWarm();
+    fireExecuted({
+      images: [
+        { subfolder: "d", type: "output" },
+        { filename: "real.png", type: "output" },
+      ],
+    });
+    await vi.waitFor(() => {
+      if (posts.length === 0) throw new Error("no warm posted");
+    });
+    expect(posts[0].body.items).toEqual([{ type: "output", subfolder: "", name: "real.png" }]);
+  });
+
+  it("does not post AUDIO, while still posting the image beside it", async () => {
+    // One assertion, both directions. `posts === []` on an audio-only payload
+    // passes against a warmer that never posts anything — so the image has to
+    // be in the same payload and has to come through.
+    const posts = [];
+    stubSettings(ON);
+    stubFetch({}, [], posts);
+    uninstall = installScanWarm();
+    fireExecuted({
+      audio: [{ filename: "a.flac", type: "output" }],
+      images: [{ filename: "b.png", type: "output" }],
+    });
+    await vi.waitFor(() => {
+      if (posts.length === 0) throw new Error("no warm posted");
+    });
+    expect(posts[0].body.items).toEqual([{ type: "output", subfolder: "", name: "b.png" }]);
+  });
+
+  it("posts nothing while the tier is off, and starts the moment it is on", async () => {
+    // The setting is read per EVENT, so both directions fit in one test — and
+    // they have to: "no posts" alone passes against a warmer that never posts,
+    // which is indistinguishable from one correctly held back by the setting.
+    const posts = [];
+    const host = stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    stubFetch({}, [], posts);
+    uninstall = installScanWarm();
+    fireExecuted({ images: [{ filename: "a.png", type: "output" }] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(posts).toEqual([]);
+
+    host.set(SAFE_VIEW_SETTINGS.matchPrompt, true);
+    fireExecuted({ images: [{ filename: "b.png", type: "output" }] });
+    await vi.waitFor(() => {
+      if (posts.length === 0) throw new Error("no warm posted after enabling");
+    });
+    expect(posts[0].body.items).toEqual([{ type: "output", subfolder: "", name: "b.png" }]);
+  });
+
+  it("stops listening after teardown", async () => {
+    // Fire once BEFORE tearing down. Without that half, "no posts after
+    // teardown" is satisfied by a listener that was never installed — the one
+    // outcome a teardown test must not be able to mistake for success.
+    const posts = [];
+    stubSettings(ON);
+    stubFetch({}, [], posts);
+    const stop = installScanWarm();
+    fireExecuted({ images: [{ filename: "a.png", type: "output" }] });
+    await vi.waitFor(() => {
+      if (posts.length === 0) throw new Error("no warm posted while installed");
+    });
+
+    stop();
+    fireExecuted({ images: [{ filename: "b.png", type: "output" }] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(posts.map((p) => p.body.items[0].name)).toEqual(["a.png"]);
   });
 });
