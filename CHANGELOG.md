@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.27](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.26...comfyui-image-browser-v0.1.27) (2026-08-12)
+
+
+### Features
+
+* **safe-view:** match dc:subject keywords and add the 🙈 mark control ([#87](https://github.com/laurigates/comfyui-image-browser/issues/87)) ([722d46d](https://github.com/laurigates/comfyui-image-browser/commit/722d46dd540e123956588f988c3f2fb6ffb7fd83))
+
 ## [0.1.26](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.25...comfyui-image-browser-v0.1.26) (2026-08-12)
 
 
