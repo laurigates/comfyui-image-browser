@@ -1428,6 +1428,128 @@ function registerSafeViewHubToggle() {
     set: () => toggleSafeView()
   });
 }
+var SCROLL_RESTORE_FRAMES = 12;
+var NATIVE_SCROLL_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End"
+]);
+var GESTURE_EVENTS = ["pointerdown", "wheel", "touchstart"];
+function defaultIsTypingTarget() {
+  const el = typeof document === "undefined" ? null : document.activeElement;
+  if (!el)
+    return false;
+  if (el.isContentEditable)
+    return true;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+function installScrollRestore(host, opts) {
+  const frames = Math.max(0, opts?.frames ?? SCROLL_RESTORE_FRAMES);
+  const isTyping = opts?.isTypingTarget ?? defaultIsTypingTarget;
+  const keyTarget = opts?.keyTarget ?? (typeof window === "undefined" ? null : window);
+  let liveScrollTop = 0;
+  let userTookOver = false;
+  let raf = 0;
+  const onScroll = () => {
+    liveScrollTop = host.scrollTop;
+  };
+  host.addEventListener("scroll", onScroll, { passive: true });
+  function cancel() {
+    if (raf !== 0) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  }
+  function yieldScroller() {
+    userTookOver = true;
+    cancel();
+  }
+  for (const ev of GESTURE_EVENTS) {
+    host.addEventListener(ev, yieldScroller, { passive: true, capture: true });
+  }
+  const onKey = (e) => {
+    const key = e.key;
+    if (!NATIVE_SCROLL_KEYS.has(key) || isTyping())
+      return;
+    yieldScroller();
+  };
+  keyTarget?.addEventListener("keydown", onKey, true);
+  function current() {
+    if (host.isConnected)
+      liveScrollTop = host.scrollTop;
+    return liveScrollTop;
+  }
+  function set(top) {
+    host.scrollTop = top;
+    liveScrollTop = host.scrollTop;
+  }
+  function restore(target) {
+    cancel();
+    userTookOver = false;
+    set(target);
+    if (target <= 0)
+      return;
+    if (typeof requestAnimationFrame !== "function" || host.clientHeight <= 0)
+      return;
+    if (frames <= 0)
+      return;
+    let n = 0;
+    const step = () => {
+      raf = 0;
+      if (userTookOver || !host.isConnected)
+        return;
+      const max = Math.max(0, host.scrollHeight - host.clientHeight);
+      const reachable = Math.min(target, max);
+      if (Math.abs(host.scrollTop - reachable) > 1)
+        set(reachable);
+      if (++n >= frames)
+        return;
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  }
+  return {
+    host,
+    current,
+    set,
+    restore,
+    cancel,
+    sync() {
+      liveScrollTop = host.scrollTop;
+    },
+    dispose() {
+      cancel();
+      host.removeEventListener("scroll", onScroll);
+      for (const ev of GESTURE_EVENTS) {
+        host.removeEventListener(ev, yieldScroller, true);
+      }
+      keyTarget?.removeEventListener("keydown", onKey, true);
+    }
+  };
+}
+function createScrollMemory() {
+  const slots = new Map;
+  return {
+    get(key) {
+      return slots.get(key) ?? 0;
+    },
+    remember(key, top) {
+      slots.set(key, top);
+    },
+    forget(key) {
+      slots.delete(key);
+    },
+    get size() {
+      return slots.size;
+    }
+  };
+}
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
 .cmp-ov-backdrop {
@@ -2077,7 +2199,7 @@ function saveDest(d) {
     localStorage.setItem(MOVE_DEST_STORAGE_KEY, `${d.type}:${d.subfolder}`);
   } catch {}
 }
-var scrollMemory = new Map;
+var scrollMemory = createScrollMemory();
 var pinEntries = [];
 var pinKeys = new Set;
 function setPinCache(entries) {
@@ -2160,9 +2282,8 @@ function openImageBrowser() {
       markFlatPending(false);
       disposeLazyThumbs?.();
       disposeLazyThumbs = null;
-      cancelScrollRestore();
+      scroller.dispose();
       window.removeEventListener("keydown", onWindowKey, true);
-      window.removeEventListener("keydown", onScrollKey, true);
       disposeBackGuard?.();
       disposeBackGuard = null;
       disposeSafeView();
@@ -2263,74 +2384,7 @@ function openImageBrowser() {
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
   const scrollHost = modal.bodyEl;
-  let liveScrollTop = 0;
-  let userTookOver = false;
-  let restoreRaf = 0;
-  scrollHost.addEventListener("scroll", () => {
-    liveScrollTop = scrollHost.scrollTop;
-  }, { passive: true });
-  function yieldScroller() {
-    userTookOver = true;
-    cancelScrollRestore();
-  }
-  for (const ev of ["pointerdown", "wheel", "touchstart"]) {
-    scrollHost.addEventListener(ev, yieldScroller, { passive: true, capture: true });
-  }
-  const SCROLL_KEYS = new Set([
-    "ArrowUp",
-    "ArrowDown",
-    "ArrowLeft",
-    "ArrowRight",
-    "PageUp",
-    "PageDown",
-    "Home",
-    "End"
-  ]);
-  function onScrollKey(e) {
-    if (!SCROLL_KEYS.has(e.key) || isInInput())
-      return;
-    yieldScroller();
-  }
-  window.addEventListener("keydown", onScrollKey, true);
-  function currentScrollTop() {
-    if (scrollHost.isConnected)
-      liveScrollTop = scrollHost.scrollTop;
-    return liveScrollTop;
-  }
-  function setScrollTop(v) {
-    scrollHost.scrollTop = v;
-    liveScrollTop = scrollHost.scrollTop;
-  }
-  function cancelScrollRestore() {
-    if (restoreRaf !== 0) {
-      cancelAnimationFrame(restoreRaf);
-      restoreRaf = 0;
-    }
-  }
-  const RESTORE_FRAMES = 12;
-  function restoreScroll(target) {
-    cancelScrollRestore();
-    userTookOver = false;
-    setScrollTop(target);
-    if (target <= 0)
-      return;
-    if (typeof requestAnimationFrame !== "function" || scrollHost.clientHeight <= 0)
-      return;
-    let frames = 0;
-    const step = () => {
-      restoreRaf = 0;
-      if (userTookOver || !scrollHost.isConnected)
-        return;
-      const max = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
-      const reachable = Math.min(target, max);
-      if (Math.abs(scrollHost.scrollTop - reachable) > 1)
-        setScrollTop(reachable);
-      if (++frames >= RESTORE_FRAMES)
-        return;
-      restoreRaf = requestAnimationFrame(step);
-    };
-    restoreRaf = requestAnimationFrame(step);
-  }
+  const scroller = installScrollRestore(scrollHost, { isTypingTarget: () => isInInput() });
   const selBar = document.createElement("div");
   selBar.className = "ib-selbar";
   selBar.innerHTML = `
@@ -2458,7 +2512,7 @@ function openImageBrowser() {
     return state.type === "path" ? `path:${state.absPath}${filter}` : `${state.type}:${state.subfolder}${view}${filter}`;
   }
   function rememberScroll() {
-    scrollMemory.set(locationKey(), currentScrollTop());
+    scrollMemory.remember(locationKey(), scroller.current());
   }
   function navigateUp() {
     rememberScroll();
@@ -3276,7 +3330,7 @@ function openImageBrowser() {
     modal.setBusy(false);
     renderPins();
     renderGrid({
-      scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey()) ?? 0
+      scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey())
     });
     markFlatPending(false);
   }
@@ -3308,7 +3362,7 @@ function openImageBrowser() {
   }
   function renderGrid(opts) {
     const q = state.query;
-    const targetScrollTop = opts?.scrollTo ?? currentScrollTop();
+    const targetScrollTop = opts?.scrollTo ?? scroller.current();
     const safeCfg = readSafeViewConfig();
     const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
@@ -3442,7 +3496,7 @@ ${when}`;
       gridEl.appendChild(el);
     }
     setCount(visible, state.files.length);
-    restoreScroll(targetScrollTop);
+    scroller.restore(targetScrollTop);
     installLazyThumbs(gridEl);
   }
   function applySafeView(card, f, spoilNames) {
@@ -3510,9 +3564,9 @@ ${when}`;
       c.classList.toggle("is-focused", i === focusIndex);
     }
     const focused = gridEl.querySelector(".ib-card.is-focused");
-    cancelScrollRestore();
+    scroller.cancel();
     focused?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    liveScrollTop = scrollHost.scrollTop;
+    scroller.sync();
   }
   function refreshSelectionClasses() {
     for (const [i, c] of fileCards().entries()) {

@@ -37,10 +37,13 @@ const ROOT_FILES = folderSpec("").fileCount;
 const BULK = "bulk-400";
 const BULK_FILES = folderSpec(BULK).fileCount;
 
-// browser.ts's RESTORE_FRAMES — how many frames a restore re-asserts for. Kept
-// here as the number a chain that runs to COMPLETION reaches, so "the restore
-// let go early" is asserted against the real budget rather than against a
-// hand-picked constant.
+// The kit's SCROLL_RESTORE_FRAMES (comfy-modal-kit/src/scroll-restore.ts) —
+// how many frames a restore re-asserts for. Kept here as the number a chain
+// that runs to COMPLETION reaches, so "the restore let go early" is asserted
+// against the real budget rather than against a hand-picked constant. It is
+// inlined into the bundle, so a kit bump that changes it lands here silently:
+// the tests that use it also assert a cancellation happened, which is what
+// keeps them from passing vacuously if this drifts.
 const RESTORE_FRAMES = 12;
 
 // Renderer slowdown used by the gesture tests to widen the ~200 ms restore window
@@ -379,12 +382,25 @@ async function descendIntoBulkFast(page) {
   }, BULK_FILES);
 }
 
-/** The restore chain's frame callbacks: `restoreScroll` arms it, `step` continues it. */
+/**
+ * The restore chain's frame callbacks: the kit's `restore` arms it and `step`
+ * continues it (both inlined into the bundle by `bun build`, so they appear in
+ * the probe's stack traces under those names).
+ *
+ * Both names are asked for because either alone would go quiet on a rename
+ * without failing anything — every caller pairs this with an assertion that
+ * the ledger is NON-EMPTY, which is what makes a rename fail loudly here.
+ */
 async function restoreFrames(page) {
-  return page.evaluate(() => [
-    ...window.__IB_PROBE__.rafsBy("restoreScroll"),
-    ...window.__IB_PROBE__.rafsBy("step"),
-  ]);
+  // Matched with a regex rather than rafsBy()'s exact compare: the engine
+  // reports these as `Object.restore` / `step` depending on how the inlined
+  // method was reached, and an exact name that stops matching would quietly
+  // return [] rather than fail.
+  return page.evaluate(() =>
+    window.__IB_PROBE__
+      .dump()
+      .rafs.filter((r) => r.by.some((f) => /(^|\.)(restore|step)$/.test(f))),
+  );
 }
 
 /** Sample until the offset stops changing, then report it with its clamp bound. */
@@ -802,10 +818,7 @@ test("LOCK — closing during an active restore leaves nothing scheduled", async
   // Give any survivor 30 frames to announce itself.
   await page.evaluate(() => window.__IB_PROBE__.frames(30));
   const after = await page.evaluate(() => window.__IB_PROBE__.dump());
-  const restoreRafs = await page.evaluate(() => [
-    ...window.__IB_PROBE__.rafsBy("restoreScroll"),
-    ...window.__IB_PROBE__.rafsBy("step"),
-  ]);
+  const restoreRafs = await restoreFrames(page);
   report("leak — remembered", settled.scrollTop);
   report("leak — close timing (ms)", closed);
   report("leak — writes at close vs after 30 frames", {
