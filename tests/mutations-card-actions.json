@@ -1,0 +1,78 @@
+{
+  "command": ["bun", "run", "test", "--", "tests/js/card-actions.test.js"],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "/** Label for each `data-action`, used by the overflow sheet's rows. */",
+      "after": "/** Human label per `data-action`, used by the overflow sheet's rows. */"
+    },
+    {
+      "label": "the touch floor's min-width is dropped, so flex:1 shrinks the button without limit again",
+      "file": "src/browser.ts",
+      "before": "    padding: 6px 0; font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;\n    min-width: 44px; min-height: 44px;",
+      "after": "    padding: 6px 0; font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;\n    min-height: 44px;"
+    },
+    {
+      "label": "the touch floor's min-height goes back to the pre-fix 34px",
+      "file": "src/browser.ts",
+      "before": "    padding: 6px 0; font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;\n    min-width: 44px; min-height: 44px;",
+      "after": "    padding: 6px 0; font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;\n    min-width: 44px; min-height: 34px;"
+    },
+    {
+      "label": "the sheet's rows drop below the floor (the sheet is the whole reason the overflow is acceptable)",
+      "file": "src/browser.ts",
+      "before": "    padding: 10px 12px; font-size: 14px; cursor: pointer; font-family: inherit;\n    min-width: 44px; min-height: 44px;",
+      "after": "    padding: 10px 12px; font-size: 14px; cursor: pointer; font-family: inherit;\n    min-width: 44px; min-height: 34px;"
+    },
+    {
+      "label": "the overflow is DROPPED instead of stashed — the visible row is identical, the controls are simply gone",
+      "file": "src/browser.ts",
+      "before": "    <div class=\"ib-more-stash\" hidden>${stashed.join(\"\\n\")}</div>`;",
+      "after": "    <div class=\"ib-more-stash\" hidden></div>`;"
+    },
+    {
+      "label": "the budget is ignored and every control renders inline again (eight ~15px buttons on a 150px card)",
+      "file": "src/browser.ts",
+      "before": "  if (present.length <= INLINE_ACTION_SLOTS) return present.join(\"\\n\");",
+      "after": "  if (present.length <= 99) return present.join(\"\\n\");"
+    },
+    {
+      "label": "⋯ is rendered even when everything already fits (the paired negative for the overflow tests)",
+      "file": "src/browser.ts",
+      "before": "  if (present.length <= INLINE_ACTION_SLOTS) return present.join(\"\\n\");\n  const inline = present.slice(0, INLINE_ACTION_SLOTS - 1);",
+      "after": "  const inline = present.slice(0, INLINE_ACTION_SLOTS - 1);"
+    },
+    {
+      "label": "⋯ does not cost a slot, so the row renders one control too many for the floor",
+      "file": "src/browser.ts",
+      "before": "  const inline = present.slice(0, INLINE_ACTION_SLOTS - 1);",
+      "after": "  const inline = present.slice(0, INLINE_ACTION_SLOTS);"
+    },
+    {
+      "label": "the priority order is reversed: 🗑 delete returns to the inline row and the stateful 📌/🙈 are buried",
+      "file": "src/browser.ts",
+      "before": "  const present = controls.filter((c) => c !== \"\");",
+      "after": "  const present = controls.filter((c) => c !== \"\").reverse();"
+    },
+    {
+      "label": "the sheet's rows are inert — correct markup, no dispatch (markup-only assertions cannot see this)",
+      "file": "src/browser.ts",
+      "before": "      runCardAction(row.dataset.action, f, row);",
+      "after": "      void row;"
+    },
+    {
+      "label": "the sheet does not close before running the action, so the result is hidden behind it",
+      "file": "src/browser.ts",
+      "before": "      ov.close();\n      runCardAction(row.dataset.action, f, row);",
+      "after": "      runCardAction(row.dataset.action, f, row);"
+    },
+    {
+      "label": "the budget is computed from a card width the CSS does not use (arithmetic about a layout that does not exist)",
+      "file": "src/browser.ts",
+      "before": "const CARD_MIN_WIDTH = 150; // .ib-grid  grid-template-columns: minmax(150px, 1fr)",
+      "after": "const CARD_MIN_WIDTH = 220; // .ib-grid  grid-template-columns: minmax(150px, 1fr)"
+    }
+  ]
+}

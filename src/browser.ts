@@ -222,6 +222,84 @@ function markFlatPending(pending: boolean): void {
   }
 }
 
+// ---- The card action row's width budget -----------------------------------
+//
+// The row used to render every control it had — up to EIGHT on one card — into
+// a flex row with `flex: 1` and no `min-width`, so on the narrowest column each
+// button was about 15px wide. 🗑 delete sat 15px from ✎ rename, which is a
+// mis-tap that destroys a file. See #90.
+//
+// The floor is the family's D02 target, >=44px, hardcoded twice in the kit
+// (modal-shell.ts's 44x44 close control, hub.ts's 48px rows). The fix is to
+// stop deriving the button SIZE from the count and start deriving the COUNT
+// from the size — so the floor holds by construction instead of by having
+// picked a number that happens to work at one card width.
+//
+// These four are the CSS constants the row is laid out with; they are asserted
+// against the shipped stylesheet in tests/js/card-actions.test.js, because a
+// budget computed from numbers that have drifted out of the CSS is arithmetic
+// about a layout that does not exist.
+const CARD_MIN_WIDTH = 150; // .ib-grid  grid-template-columns: minmax(150px, 1fr)
+const ACTIONS_PADDING_X = 12; // .ib-actions  padding: 0 6px 6px
+const ACTIONS_GAP = 2; // .ib-actions  gap: 2px
+const TOUCH_FLOOR = 44; // .ib-act  min-width / min-height
+
+/**
+ * How many controls fit on the NARROWEST card at the touch floor.
+ *
+ * `auto-fill` + `minmax(150px, 1fr)` never produces a track under 150px, so
+ * this is the worst case and a count that holds here holds at every width. A
+ * wider column simply gives each of these buttons more than its minimum.
+ *
+ * (150 - 12 + 2) / (44 + 2) = 3.04 -> 3
+ */
+export const INLINE_ACTION_SLOTS = Math.floor(
+  (CARD_MIN_WIDTH - ACTIONS_PADDING_X + ACTIONS_GAP) / (TOUCH_FLOOR + ACTIONS_GAP),
+);
+
+/** Label for each `data-action`, used by the overflow sheet's rows. */
+const ACTION_LABELS: Record<string, string> = {
+  open: "Open full size",
+  pin: "Pin / unpin",
+  marksensitive: "Mark sensitive",
+  meta: "Metadata",
+  workflow: "Load workflow",
+  rename: "Rename…",
+  move: "Move…",
+  delete: "Delete…",
+};
+
+/**
+ * Lay out one card's controls under the budget above.
+ *
+ * `controls` arrives in PRIORITY order (most-reached and least-destructive
+ * first) and may contain empty strings for controls this card does not offer.
+ * Everything past the budget moves behind a `⋯` button that opens a sheet of
+ * full-width rows — so the destructive actions are a deliberate second tap
+ * rather than a 15px neighbour, and nothing is dropped.
+ *
+ * `⋯` costs a slot itself, which is why the overflow case renders one fewer
+ * action than the fit case.
+ *
+ * The overflowed buttons are STASHED in the card rather than dropped, and the
+ * sheet is built from the stash. That keeps one source of truth for "which
+ * controls does this card offer": recomputing the set at sheet-open time would
+ * be a second copy of the canWrite / META_EXTS / safeKeyword gating, and the
+ * two would drift — which is precisely how a control ends up offered in one
+ * place and rejected in the other. The stash also carries each button's live
+ * state (a filled 📌, a pressed 🙈), so the sheet can show it without asking.
+ */
+function actionRowHTML(controls: string[]): string {
+  const present = controls.filter((c) => c !== "");
+  if (present.length <= INLINE_ACTION_SLOTS) return present.join("\n");
+  const inline = present.slice(0, INLINE_ACTION_SLOTS - 1);
+  const stashed = present.slice(inline.length);
+  return `${inline.join("\n")}
+    <button type="button" class="ib-act ib-act-more" data-action="more"
+      title="${stashed.length} more actions" aria-label="${stashed.length} more actions">⋯</button>
+    <div class="ib-more-stash" hidden>${stashed.join("\n")}</div>`;
+}
+
 // Last successful move destination — the picker opens there next time, so
 // sorting a batch of files into the same folder is one tap per file.
 const MOVE_DEST_STORAGE_KEY = "comfyui-image-browser:move-dest";
@@ -1122,14 +1200,10 @@ export function openImageBrowser(): ModalShellController {
     if (actionBtn) {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
-      if (action === "open") openFull(f);
-      else if (action === "meta") void openMetadata(f);
-      else if (action === "workflow") void loadWorkflow(f);
-      else if (action === "delete") onDelete(f);
-      else if (action === "rename") onRename(f);
-      else if (action === "move") onMove(f);
-      else if (action === "pin") void toggleFilePin(f);
-      else if (action === "marksensitive") void toggleSensitiveTag(f, actionBtn);
+      // `⋯` is the only action that is about the ROW rather than the file: it
+      // opens the sheet holding the controls the width budget pushed out.
+      if (action === "more") openMoreSheet(card, f);
+      else runCardAction(action, f, actionBtn);
       return;
     }
     // In select mode a card tap toggles selection instead of opening.
@@ -1312,6 +1386,71 @@ export function openImageBrowser(): ModalShellController {
       reportError(next ? "Not marked" : "Not unmarked", e);
       button.disabled = false;
     }
+  }
+
+  /**
+   * Run one card action. Extracted from the grid's click handler so the
+   * overflow sheet drives the SAME dispatch rather than a parallel copy — a
+   * second switch is how a control ends up doing something subtly different
+   * depending on which surface it was tapped from.
+   */
+  function runCardAction(action: string | undefined, f: ListingFile, btn: HTMLElement): void {
+    if (action === "open") openFull(f);
+    else if (action === "meta") void openMetadata(f);
+    else if (action === "workflow") void loadWorkflow(f);
+    else if (action === "delete") onDelete(f);
+    else if (action === "rename") onRename(f);
+    else if (action === "move") onMove(f);
+    else if (action === "pin") void toggleFilePin(f);
+    else if (action === "marksensitive") void toggleSensitiveTag(f, btn);
+  }
+
+  /**
+   * The overflow sheet: the controls the row's width budget pushed out, as
+   * full-width rows at the touch floor.
+   *
+   * Built from the card's own stash (see `actionRowHTML`), so it offers exactly
+   * the controls that card offers — including their live pressed state — and
+   * cannot drift from the row's gating.
+   *
+   * The sheet closes BEFORE the action runs, so the result is visible: every
+   * one of these either opens its own overlay (rename / move / delete / meta),
+   * repaints the grid (pin / mark), or leaves the modal (workflow). The button
+   * handed to `runCardAction` is the sheet's row, which is detached by then —
+   * that only costs `toggleSensitiveTag` its in-flight `disabled` styling, and
+   * the outcome still lands on the card via its `renderGrid()`.
+   */
+  function openMoreSheet(card: HTMLElement, f: ListingFile): void {
+    const stashed = Array.from(card.querySelectorAll<HTMLElement>(".ib-more-stash [data-action]"));
+    if (!stashed.length) return;
+    const ov = openShellOverlay(modal);
+    ov.card.classList.add("ib-more-card");
+    // No pressed/filled state is carried into a row, because no STATEFUL
+    // control ever reaches the sheet: 📌 and 🙈 lead the priority order
+    // precisely so their state stays legible on the card, and
+    // tests/js/card-actions.test.js asserts that across every card shape the
+    // pack renders. Reading a state here that cannot arrive would be an
+    // untested branch pretending to be defensive.
+    const rows = stashed
+      .map((b) => {
+        const action = b.dataset.action ?? "";
+        const danger = b.classList.contains("ib-act-danger") ? " ib-more-danger" : "";
+        return `<button type="button" class="ib-more-row${danger}" data-action="${escHTML(action)}">
+          <span class="ib-more-glyph">${escHTML(b.textContent?.trim() || "")}</span>
+          <span>${escHTML(ACTION_LABELS[action] ?? action)}</span>
+        </button>`;
+      })
+      .join("");
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${escHTML(f.name)}</div>
+      <div class="ib-more-list">${rows}</div>`;
+    ov.card.addEventListener("click", (e) => {
+      const row = (e.target as HTMLElement).closest(".ib-more-row") as HTMLElement | null;
+      if (!row) return;
+      e.stopPropagation();
+      ov.close();
+      runCardAction(row.dataset.action, f, row);
+    });
   }
 
   function openFull(f: ListingFile): void {
@@ -2203,10 +2342,11 @@ export function openImageBrowser(): ModalShellController {
       const moveBtn = canWriteThis
         ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>`
         : "";
-      const writeBtns = canWriteThis
-        ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
-           ${moveBtn}
-           <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">🗑</button>`
+      const renameBtn = canWriteThis
+        ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>`
+        : "";
+      const deleteBtn = canWriteThis
+        ? `<button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">🗑</button>`
         : "";
       // Pin/unpin this file. Same perimeter as the writes — a pin addresses a
       // sandboxed root only — so the browse…/path tab gets none, and the state
@@ -2275,14 +2415,25 @@ export function openImageBrowser(): ModalShellController {
         <div class="ib-name" title="${escHTML(titleText)}">${escHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
         ${starsRow}
-        <div class="ib-actions">
-          <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
-          ${metaBtn}
-          ${wfBtn}
-          ${pinBtn}
-          ${markBtn}
-          ${writeBtns}
-        </div>`;
+        <div class="ib-actions">${actionRowHTML([
+          // PRIORITY ORDER — see actionRowHTML. The two STATEFUL controls come
+          // first, because their state is the reason they are on the card at
+          // all: 📌 renders filled while pinned and 🙈 pressed while marked,
+          // and a control whose state you cannot see without opening a sheet
+          // has stopped being an indicator. ↗ open follows them rather than
+          // leading, because a tap anywhere on the card already calls
+          // openFull() (the grid click handler's fall-through) — so it is the
+          // one control whose demotion costs the user nothing. Destructive
+          // last, which is the whole point of #90.
+          pinBtn,
+          markBtn,
+          `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
+          metaBtn,
+          wfBtn,
+          renameBtn,
+          moveBtn,
+          deleteBtn,
+        ])}</div>`;
       gridEl.appendChild(c);
       if (hidden) applySafeView(c, f, spoilNames);
       visible++;
@@ -3549,14 +3700,46 @@ const BROWSER_CSS = `
     .ib-star { font-size: 18px; padding: 7px 5px; min-width: 30px; min-height: 32px; }
 }
 .ib-stars.is-ro { color: #ffd866; font-size: 12px; cursor: default; }
+/* The card action row. The gap and the horizontal padding here are two of the
+   four constants INLINE_ACTION_SLOTS is computed from — change one and the
+   budget is wrong, so tests/js/card-actions.test.js reads them back out of
+   this stylesheet rather than trusting the TS literals. */
 .ib-actions { display: flex; gap: 2px; padding: 0 6px 6px; margin-top: auto; }
+/* min-width AND min-height at the family's >=44px D02 floor (the kit hardcodes
+   the same number in modal-shell.ts and hub.ts). flex:1 still lets a button
+   GROW on a wide card; what it may no longer do is shrink below the floor —
+   which is what put eight ~15px buttons, delete among them, on a 150px card.
+   The count is bounded by actionRowHTML so the floor cannot overflow the row. */
 .ib-act {
     flex: 1; background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
     padding: 6px 0; font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
-    min-height: 34px;
+    min-width: 44px; min-height: 44px;
 }
 .ib-act:hover { background: #3a3a4a; color: #fff; }
 .ib-act-danger:hover { background: #5c2a3c; color: #ff9eb0; }
+/* Overflow. The stash holds the controls the budget pushed out; it is the
+   sheet's source of truth, never rendered. display:none rather than only the
+   hidden attribute, because .ib-act above sets a min-width that would
+   otherwise still occupy the row in a browser that ignores hidden. */
+.ib-more-stash { display: none; }
+.ib-more-card { width: min(420px, calc(100% - 24px)); }
+.ib-more-list {
+    display: flex; flex-direction: column; gap: 2px; max-height: 60vh; overflow-y: auto;
+    border: 1px solid #2a2a32; border-radius: 6px; padding: 4px; background: #17171e;
+}
+/* Full-width rows, comfortably over the floor — the point of the sheet is that
+   a destructive action is a deliberate second tap on a large target instead of
+   a 15px neighbour of ✎ rename. */
+.ib-more-row {
+    display: flex; align-items: center; gap: 10px; text-align: left; width: 100%;
+    background: transparent; color: #cfcfd6; border: 0; border-radius: 4px;
+    padding: 10px 12px; font-size: 14px; cursor: pointer; font-family: inherit;
+    min-width: 44px; min-height: 44px;
+}
+.ib-more-row:hover { background: #2a2a3a; color: #fff; }
+.ib-more-glyph { display: inline-block; min-width: 20px; text-align: center; font-size: 15px; }
+.ib-more-danger { color: #ff9eb0; }
+.ib-more-danger:hover { background: #5c2a3c; color: #fff; }
 .ib-empty { grid-column: 1 / -1; padding: 48px; text-align: center; color: #777; font-style: italic; }
 .ib-count { color: #888; }
 .ib-move-card { width: min(560px, calc(100% - 24px)); }
