@@ -109,12 +109,27 @@ jobs:
       - uses: actions/checkout@v6
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
-      # Same reason as test-js: `playwright` is a Node bin too, so an unpinned
-      # runner Node is an unpinned test runtime here as well.
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: .node-version
+      # DELIBERATELY NOT PINNED to .node-version, unlike test-js.
+      #
+      # @playwright/test 1.56.0 cannot install its browser under Node 26: the
+      # download reaches 100% and the process then hangs forever in the unzip,
+      # with no error. Measured both here and locally, same command, only the
+      # runtime varying:
+      #
+      #   node 24.19.0  bunx playwright install chromium -> exit 0, "downloaded to ..."
+      #   node 26.5.0   bunx playwright install chromium -> hung at 100%, killed at 300s
+      #
+      # It was pinned in the first push of this branch and the job sat at
+      # "Install Chromium" for 50 minutes (run 31962595191) before being
+      # cancelled. The pin's whole justification is the localStorage/Storage
+      # divergence, which is a jsdom concern — this suite drives a real
+      # Chromium at a version Playwright pins itself, so there is no equivalent
+      # runtime-dependent behaviour to make deterministic here, and the
+      # determinism is not worth a job that cannot run.
+      #
+      # Revisit when Playwright supports Node 26; tests/test_ci_node_pin.py
+      # holds this exemption as data so it cannot be forgotten in either
+      # direction.
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Install Chromium for Playwright
