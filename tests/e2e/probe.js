@@ -239,8 +239,8 @@ export async function installScrollProbe(page, { selector = ".cmp-body" } = {}) 
       },
       /**
        * Only the frame callbacks a named bundle function scheduled — the
-       * restore chain is `restoreScroll` (its first frame) and then `step`
-       * (every frame after that).
+       * restore chain is the kit's `restore` (its first frame) and then
+       * `step` (every frame after that), both inlined into the bundle.
        */
       rafsBy(name) {
         return log.rafs.filter((r) => r.by.includes(name));
