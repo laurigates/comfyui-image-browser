@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.28](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.27...comfyui-image-browser-v0.1.28) (2026-08-16)
+
+
+### Features
+
+* **sort:** take the sort menu from the kit, and gain the two orders the copy had dropped ([#94](https://github.com/laurigates/comfyui-image-browser/issues/94)) ([39dc517](https://github.com/laurigates/comfyui-image-browser/commit/39dc517e88c0323f6400576d691778f3ffd90a09))
+
+
+### Bug Fixes
+
+* **cards:** derive the action count from the 44px floor instead of the button size ([#96](https://github.com/laurigates/comfyui-image-browser/issues/96)) ([1368f40](https://github.com/laurigates/comfyui-image-browser/commit/1368f403355073515243536305c4b7de6fd2608d)), closes [#90](https://github.com/laurigates/comfyui-image-browser/issues/90)
+* **deps:** take the listing helpers and the sensitive keyword from kit 0.14.0 ([#97](https://github.com/laurigates/comfyui-image-browser/issues/97)) ([a47f5e9](https://github.com/laurigates/comfyui-image-browser/commit/a47f5e995f1c92abe36c22a3a70738bdc9eb8195))
+
+
+### Miscellaneous
+
+* **ci:** guard registry-health against closing on Pending; drop duplicate Renovate runner ([#92](https://github.com/laurigates/comfyui-image-browser/issues/92)) ([5be4e63](https://github.com/laurigates/comfyui-image-browser/commit/5be4e633056288e9e5e808e65c7402da50bf48ee))
+
 ## [0.1.27](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.26...comfyui-image-browser-v0.1.27) (2026-08-12)
 
 
