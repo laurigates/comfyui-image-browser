@@ -1,0 +1,42 @@
+{
+  "command": ["bun", "run", "test", "--", "tests/js/sort-options.test.js"],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "  // Options come from the kit so the menu and the isValidSort whitelist above",
+      "after": "  // Options come from the kit so the menu and its whitelist above"
+    },
+    {
+      "label": "the menu goes back to the hand-copied eight options (size:asc and pixels:asc vanish, pixels:desc is mislabelled)",
+      "file": "src/browser.ts",
+      "before": "  sortEl.innerHTML = SORT_OPTIONS.map(\n    (o) => `<option value=\"${o.value}\">${escHTML(o.label)}</option>`,\n  ).join(\"\");",
+      "after": "  sortEl.innerHTML = `\n    <option value=\"mtime:desc\">Newest</option>\n    <option value=\"mtime:asc\">Oldest</option>\n    <option value=\"name:asc\">Name A\\u2192Z</option>\n    <option value=\"name:desc\">Name Z\\u2192A</option>\n    <option value=\"size:desc\">Largest file</option>\n    <option value=\"pixels:desc\">Highest resolution</option>\n    <option value=\"rating:desc\">Highest rating</option>\n    <option value=\"rating:asc\">Lowest rating</option>`;"
+    },
+    {
+      "label": "the menu keeps the kit's ten values but reverts the one drifted LABEL (values-only assertions cannot see this)",
+      "file": "src/browser.ts",
+      "before": "    (o) => `<option value=\"${o.value}\">${escHTML(o.label)}</option>`,",
+      "after": "    (o) => `<option value=\"${o.value}\">${escHTML(o.value === \"pixels:desc\" ? \"Highest resolution\" : o.label)}</option>`,"
+    },
+    {
+      "label": "the stored preference is validated against the OLD private eight-entry whitelist (size:asc/pixels:asc silently fall back)",
+      "file": "src/browser.ts",
+      "before": "    if (!raw || !isValidSort(raw)) return null;",
+      "after": "    if (!raw || ![\"mtime:desc\", \"mtime:asc\", \"name:asc\", \"name:desc\", \"size:desc\", \"pixels:desc\", \"rating:desc\", \"rating:asc\"].includes(raw)) return null;"
+    },
+    {
+      "label": "the loader is inert — every stored preference is discarded (the paired positive for the reject-a-bad-value negative)",
+      "file": "src/browser.ts",
+      "before": "    const raw = localStorage.getItem(SORT_STORAGE_KEY);\n    if (!raw || !isValidSort(raw)) return null;",
+      "after": "    const raw = localStorage.getItem(SORT_STORAGE_KEY);\n    if (raw) return null;"
+    },
+    {
+      "label": "the sort preference is written under the sibling pack's key (both packs then fight over one value)",
+      "file": "src/browser.ts",
+      "before": "const SORT_STORAGE_KEY = \"comfyui-image-browser:sort\";",
+      "after": "const SORT_STORAGE_KEY = \"comfyui-gallery-loader:sort\";"
+    }
+  ]
+}
