@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
-import { getHubEntries } from "@laurigates/comfy-modal-kit";
+// META_FIELDS / metaRows / metaClipboardText are the KIT's since 0.14.0 — this
+// pack's byte-identical copies were deleted rather than kept as a second name
+// for the same functions, so the suite imports them where they now live.
+import {
+  getHubEntries,
+  META_FIELDS,
+  metaClipboardText,
+  metaRows,
+} from "@laurigates/comfy-modal-kit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { app } from "/scripts/app.js";
 // Vitest transpiles TypeScript, so the test imports the `.ts` source directly
@@ -11,13 +19,7 @@ import { app } from "/scripts/app.js";
 // pure-helper unit tests but ships a blank dialog — so it is asserted here.
 // The initial fetch fires asynchronously and (harmlessly) fails under jsdom;
 // the synchronous scaffold (root + toolbar tabs + grid) is what we assert on.
-import {
-  fetchMetadata,
-  hasEmbeddedWorkflow,
-  META_FIELDS,
-  metaClipboardText,
-  metaRows,
-} from "../../src/api.ts";
+import { fetchMetadata, hasEmbeddedWorkflow } from "../../src/api.ts";
 import { openShell } from "../../src/index.ts";
 
 /** Dispatch a real keydown on window (capture phase, cancelable). */
