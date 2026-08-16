@@ -55,6 +55,31 @@ const CPU_THROTTLE = 20;
 // which flavour a given call site chose.
 const OV_CONFIRM = ".cmp-ov-backdrop .cmp-ov-danger, .cmp-ov-backdrop .cmp-ov-primary";
 
+/**
+ * Reach a card action that the row's width budget pushed behind the ⋯ sheet.
+ *
+ * Since #90 a 150px card renders only INLINE_ACTION_SLOTS controls inline; the
+ * rest live in a hidden `.ib-more-stash` and are offered as sheet rows. Clicking
+ * the stashed button directly is what these two tests used to do, and it now
+ * times out — Playwright resolves the element and then waits forever for it to
+ * become visible, which is the browser tier correctly reporting that the control
+ * moved. Going through ⋯ is the real user path.
+ *
+ * Falls through to the inline button when the action did NOT overflow, so the
+ * driver keeps working if the priority order or the budget changes.
+ */
+async function clickCardAction(page, idx, action) {
+  const inline = page.locator(
+    `${FILE_CARD}[data-idx="${idx}"] .ib-actions > [data-action="${action}"]`,
+  );
+  if (await inline.count()) {
+    await inline.click();
+    return;
+  }
+  await page.locator(`${FILE_CARD}[data-idx="${idx}"] [data-action="more"]`).click();
+  await page.locator(`.ib-more-row[data-action="${action}"]`).click();
+}
+
 function report(label, value) {
   process.stdout.write(`[scroll] ${label}: ${JSON.stringify(value)}\n`);
 }
@@ -590,7 +615,7 @@ test("LOCK A — an in-place re-render (delete a visible card) keeps the offset"
   expect(idx).not.toBeNull();
 
   const m = await measureAction(page, thumbs, async () => {
-    await page.locator(`${FILE_CARD}[data-idx="${idx}"] [data-action="delete"]`).click();
+    await clickCardAction(page, idx, "delete");
     // confirmInShell → in-dialog overlay (single-modal discipline), not a
     // second modal shell.
     await page.locator(OV_CONFIRM).click();
@@ -615,7 +640,7 @@ test("LOCK A2 — the other in-place re-render: rename a visible card", async ({
   expect(idx).not.toBeNull();
 
   const m = await measureAction(page, thumbs, async () => {
-    await page.locator(`${FILE_CARD}[data-idx="${idx}"] [data-action="rename"]`).click();
+    await clickCardAction(page, idx, "rename");
     const input = page.locator(".cmp-ov-backdrop .cmp-ov-input");
     await input.fill("renamed-probe.png");
     await page.locator(OV_CONFIRM).click();

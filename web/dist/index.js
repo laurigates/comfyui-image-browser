@@ -2170,6 +2170,35 @@ function markFlatPending(pending) {
       localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {}
 }
+var CARD_MIN_WIDTH = 150;
+var ACTIONS_PADDING_X = 12;
+var ACTIONS_GAP = 2;
+var TOUCH_FLOOR = 44;
+var INLINE_ACTION_SLOTS = Math.floor((CARD_MIN_WIDTH - ACTIONS_PADDING_X + ACTIONS_GAP) / (TOUCH_FLOOR + ACTIONS_GAP));
+var ACTION_LABELS = {
+  open: "Open full size",
+  pin: "Pin / unpin",
+  marksensitive: "Mark sensitive",
+  meta: "Metadata",
+  workflow: "Load workflow",
+  rename: "Rename…",
+  move: "Move…",
+  delete: "Delete…"
+};
+function actionRowHTML(controls) {
+  const present = controls.filter((c) => c !== "");
+  if (present.length <= INLINE_ACTION_SLOTS)
+    return present.join(`
+`);
+  const inline = present.slice(0, INLINE_ACTION_SLOTS - 1);
+  const stashed = present.slice(inline.length);
+  return `${inline.join(`
+`)}
+    <button type="button" class="ib-act ib-act-more" data-action="more"
+      title="${stashed.length} more actions" aria-label="${stashed.length} more actions">⋯</button>
+    <div class="ib-more-stash" hidden>${stashed.join(`
+`)}</div>`;
+}
 var MOVE_DEST_STORAGE_KEY = "comfyui-image-browser:move-dest";
 function loadSavedDest() {
   try {
@@ -2706,22 +2735,10 @@ function openImageBrowser() {
     if (actionBtn) {
       e.stopPropagation();
       const action = actionBtn.dataset.action;
-      if (action === "open")
-        openFull(f);
-      else if (action === "meta")
-        openMetadata(f);
-      else if (action === "workflow")
-        loadWorkflow(f);
-      else if (action === "delete")
-        onDelete(f);
-      else if (action === "rename")
-        onRename(f);
-      else if (action === "move")
-        onMove(f);
-      else if (action === "pin")
-        toggleFilePin(f);
-      else if (action === "marksensitive")
-        toggleSensitiveTag(f, actionBtn);
+      if (action === "more")
+        openMoreSheet(card, f);
+      else
+        runCardAction(action, f, actionBtn);
       return;
     }
     if (selectMode && canWriteFile(f)) {
@@ -2850,6 +2867,50 @@ function openImageBrowser() {
       reportError(next ? "Not marked" : "Not unmarked", e);
       button.disabled = false;
     }
+  }
+  function runCardAction(action, f, btn) {
+    if (action === "open")
+      openFull(f);
+    else if (action === "meta")
+      openMetadata(f);
+    else if (action === "workflow")
+      loadWorkflow(f);
+    else if (action === "delete")
+      onDelete(f);
+    else if (action === "rename")
+      onRename(f);
+    else if (action === "move")
+      onMove(f);
+    else if (action === "pin")
+      toggleFilePin(f);
+    else if (action === "marksensitive")
+      toggleSensitiveTag(f, btn);
+  }
+  function openMoreSheet(card, f) {
+    const stashed = Array.from(card.querySelectorAll(".ib-more-stash [data-action]"));
+    if (!stashed.length)
+      return;
+    const ov = openShellOverlay(modal);
+    ov.card.classList.add("ib-more-card");
+    const rows = stashed.map((b) => {
+      const action = b.dataset.action ?? "";
+      const danger = b.classList.contains("ib-act-danger") ? " ib-more-danger" : "";
+      return `<button type="button" class="ib-more-row${danger}" data-action="${escapeHTML(action)}">
+          <span class="ib-more-glyph">${escapeHTML(b.textContent?.trim() || "")}</span>
+          <span>${escapeHTML(ACTION_LABELS[action] ?? action)}</span>
+        </button>`;
+    }).join("");
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">${escapeHTML(f.name)}</div>
+      <div class="ib-more-list">${rows}</div>`;
+    ov.card.addEventListener("click", (e) => {
+      const row = e.target.closest(".ib-more-row");
+      if (!row)
+        return;
+      e.stopPropagation();
+      ov.close();
+      runCardAction(row.dataset.action, f, row);
+    });
   }
   function openFull(f) {
     if (revealed.has(fileType(f), fileSub(f), f.name)) {} else if (isCardHidden(f, readSafeViewConfig())) {
@@ -3440,9 +3501,8 @@ ${when}`;
       const metaBtn = hasMeta ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
       const wfBtn = hasMeta ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
       const moveBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
-      const writeBtns = canWriteThis ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>
-           ${moveBtn}
-           <button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
+      const renameBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>` : "";
+      const deleteBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
       const isFilePinned = canWriteThis && isPinned(filePinItem(f));
       const pinBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
       const markBtn = canWriteThis && !missing && safeKeyword ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
@@ -3461,14 +3521,16 @@ ${when}`;
         <div class="ib-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
         ${starsRow}
-        <div class="ib-actions">
-          <button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>
-          ${metaBtn}
-          ${wfBtn}
-          ${pinBtn}
-          ${markBtn}
-          ${writeBtns}
-        </div>`;
+        <div class="ib-actions">${actionRowHTML([
+        pinBtn,
+        markBtn,
+        `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
+        metaBtn,
+        wfBtn,
+        renameBtn,
+        moveBtn,
+        deleteBtn
+      ])}</div>`;
       gridEl.appendChild(c);
       if (hidden)
         applySafeView(c, f, spoilNames);
@@ -4524,14 +4586,46 @@ var BROWSER_CSS = `
     .ib-star { font-size: 18px; padding: 7px 5px; min-width: 30px; min-height: 32px; }
 }
 .ib-stars.is-ro { color: #ffd866; font-size: 12px; cursor: default; }
+/* The card action row. The gap and the horizontal padding here are two of the
+   four constants INLINE_ACTION_SLOTS is computed from — change one and the
+   budget is wrong, so tests/js/card-actions.test.js reads them back out of
+   this stylesheet rather than trusting the TS literals. */
 .ib-actions { display: flex; gap: 2px; padding: 0 6px 6px; margin-top: auto; }
+/* min-width AND min-height at the family's >=44px D02 floor (the kit hardcodes
+   the same number in modal-shell.ts and hub.ts). flex:1 still lets a button
+   GROW on a wide card; what it may no longer do is shrink below the floor —
+   which is what put eight ~15px buttons, delete among them, on a 150px card.
+   The count is bounded by actionRowHTML so the floor cannot overflow the row. */
 .ib-act {
     flex: 1; background: #2a2a36; color: #b8b8c0; border: 1px solid #33333f; border-radius: 4px;
     padding: 6px 0; font-size: 13px; line-height: 1; cursor: pointer; font-family: inherit;
-    min-height: 34px;
+    min-width: 44px; min-height: 44px;
 }
 .ib-act:hover { background: #3a3a4a; color: #fff; }
 .ib-act-danger:hover { background: #5c2a3c; color: #ff9eb0; }
+/* Overflow. The stash holds the controls the budget pushed out; it is the
+   sheet's source of truth, never rendered. display:none rather than only the
+   hidden attribute, because .ib-act above sets a min-width that would
+   otherwise still occupy the row in a browser that ignores hidden. */
+.ib-more-stash { display: none; }
+.ib-more-card { width: min(420px, calc(100% - 24px)); }
+.ib-more-list {
+    display: flex; flex-direction: column; gap: 2px; max-height: 60vh; overflow-y: auto;
+    border: 1px solid #2a2a32; border-radius: 6px; padding: 4px; background: #17171e;
+}
+/* Full-width rows, comfortably over the floor — the point of the sheet is that
+   a destructive action is a deliberate second tap on a large target instead of
+   a 15px neighbour of ✎ rename. */
+.ib-more-row {
+    display: flex; align-items: center; gap: 10px; text-align: left; width: 100%;
+    background: transparent; color: #cfcfd6; border: 0; border-radius: 4px;
+    padding: 10px 12px; font-size: 14px; cursor: pointer; font-family: inherit;
+    min-width: 44px; min-height: 44px;
+}
+.ib-more-row:hover { background: #2a2a3a; color: #fff; }
+.ib-more-glyph { display: inline-block; min-width: 20px; text-align: center; font-size: 15px; }
+.ib-more-danger { color: #ff9eb0; }
+.ib-more-danger:hover { background: #5c2a3c; color: #fff; }
 .ib-empty { grid-column: 1 / -1; padding: 48px; text-align: center; color: #777; font-style: italic; }
 .ib-count { color: #888; }
 .ib-move-card { width: min(560px, calc(100% - 24px)); }
