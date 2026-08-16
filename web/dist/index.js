@@ -95,6 +95,9 @@ var SORT_OPTIONS = [
   { value: "rating:asc", label: "Lowest rating" }
 ];
 var VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
+function isValidSort(value) {
+  return VALID_SORTS.has(value);
+}
 function sortFiles(files, key, dir) {
   const mul = dir === "asc" ? 1 : -1;
   const nameCmp = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
@@ -2106,20 +2109,10 @@ function markSensitiveHTML(prefix, keyword, marked) {
 // src/browser.ts
 var STYLE_ID4 = "ib-style";
 var SORT_STORAGE_KEY = "comfyui-image-browser:sort";
-var VALID_SORTS2 = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "pixels:desc",
-  "rating:desc",
-  "rating:asc"
-]);
 function loadSavedSort() {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS2.has(raw))
+    if (!raw || !isValidSort(raw))
       return null;
     const [key, dir] = raw.split(":");
     return { key, dir };
@@ -2310,15 +2303,7 @@ function openImageBrowser() {
   const sortEl = document.createElement("select");
   sortEl.className = "ib-control";
   sortEl.title = "Sort";
-  sortEl.innerHTML = `
-    <option value="mtime:desc">Newest</option>
-    <option value="mtime:asc">Oldest</option>
-    <option value="name:asc">Name A→Z</option>
-    <option value="name:desc">Name Z→A</option>
-    <option value="size:desc">Largest file</option>
-    <option value="pixels:desc">Highest resolution</option>
-    <option value="rating:desc">Highest rating</option>
-    <option value="rating:asc">Lowest rating</option>`;
+  sortEl.innerHTML = SORT_OPTIONS.map((o) => `<option value="${o.value}">${escapeHTML(o.label)}</option>`).join("");
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
   const refreshEl = document.createElement("button");
   refreshEl.type = "button";

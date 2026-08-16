@@ -24,6 +24,7 @@ import {
   installLazyMedia,
   installScrollRestore,
   isSensitive,
+  isValidSort,
   makeRevealButton,
   makeRevealSet,
   nextRating,
@@ -37,6 +38,7 @@ import {
   readSafeViewConfig,
   SAFE_VIEW_GLYPH_OFF,
   SAFE_VIEW_GLYPH_ON,
+  SORT_OPTIONS,
   setBlurred,
   setSpoilered,
   sortFiles,
@@ -96,17 +98,11 @@ import {
 } from "./safe-tag.js";
 
 const STYLE_ID = "ib-style";
+// Pack-scoped, deliberately: comfyui-gallery-loader persists under
+// "comfyui-gallery-loader:sort", so the two surfaces keep independent
+// preferences and widening the menu here cannot hand that pack a value it
+// would reject.
 const SORT_STORAGE_KEY = "comfyui-image-browser:sort";
-const VALID_SORTS = new Set([
-  "mtime:desc",
-  "mtime:asc",
-  "name:asc",
-  "name:desc",
-  "size:desc",
-  "pixels:desc",
-  "rating:desc",
-  "rating:asc",
-]);
 
 interface BrowserState {
   type: BrowseType;
@@ -129,7 +125,7 @@ interface SavedSort {
 function loadSavedSort(): SavedSort | null {
   try {
     const raw = localStorage.getItem(SORT_STORAGE_KEY);
-    if (!raw || !VALID_SORTS.has(raw)) return null;
+    if (!raw || !isValidSort(raw)) return null;
     const [key, dir] = raw.split(":");
     return { key: key as string, dir: dir as string };
   } catch {
@@ -201,7 +197,7 @@ const VALID_FILTERS = new Set(["all", "images", "videos"]);
 function loadSavedFilter(): TypeFilter {
   try {
     const raw = localStorage.getItem(FILTER_STORAGE_KEY);
-    // Whitelist on read, like VALID_SORTS: a stale or hand-edited value must
+    // Whitelist on read, like the kit's isValidSort: a stale or hand-edited value must
     // fall back to "all" rather than reach the request as an unknown kind.
     return raw && VALID_FILTERS.has(raw) ? (raw as TypeFilter) : "all";
   } catch {
@@ -454,15 +450,14 @@ export function openImageBrowser(): ModalShellController {
   const sortEl = document.createElement("select");
   sortEl.className = "ib-control";
   sortEl.title = "Sort";
-  sortEl.innerHTML = `
-    <option value="mtime:desc">Newest</option>
-    <option value="mtime:asc">Oldest</option>
-    <option value="name:asc">Name A→Z</option>
-    <option value="name:desc">Name Z→A</option>
-    <option value="size:desc">Largest file</option>
-    <option value="pixels:desc">Highest resolution</option>
-    <option value="rating:desc">Highest rating</option>
-    <option value="rating:asc">Lowest rating</option>`;
+  // Options come from the kit so the menu and the isValidSort whitelist above
+  // cannot disagree, and so a sort order added to the kit reaches this pack
+  // instead of being silently dropped. The hardcoded list this replaced had
+  // drifted: it was missing size:asc and pixels:asc, and labelled pixels:desc
+  // "Highest resolution" where the kit says "Largest resolution".
+  sortEl.innerHTML = SORT_OPTIONS.map(
+    (o) => `<option value="${o.value}">${escHTML(o.label)}</option>`,
+  ).join("");
   sortEl.value = `${state.sortKey}:${state.sortDir}`;
 
   const refreshEl = document.createElement("button");
