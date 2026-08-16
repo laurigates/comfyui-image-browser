@@ -122,6 +122,96 @@ function sortFiles(files, key, dir) {
   }
   return [...files].sort((a, b) => mul * cmp(a, b));
 }
+var IMG_EXTS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".bmp",
+  ".tiff",
+  ".tif",
+  ".avif"
+]);
+var VIDEO_EXTS = new Set([
+  ".mp4",
+  ".webm",
+  ".mov",
+  ".mkv",
+  ".avi",
+  ".m4v",
+  ".mpg",
+  ".mpeg"
+]);
+var SANDBOXED_TYPES = ["input", "output", "temp"];
+function joinAbs(dir, name) {
+  const d = (dir || "/").replace(/\/+$/, "");
+  return d === "" ? `/${name}` : `${d}/${name}`;
+}
+var META_FIELDS = [
+  { key: "positive", label: "Positive" },
+  { key: "negative", label: "Negative" },
+  { key: "model", label: "Model" },
+  { key: "seed", label: "Seed" },
+  { key: "steps", label: "Steps" },
+  { key: "cfg", label: "CFG" },
+  { key: "sampler", label: "Sampler" },
+  { key: "scheduler", label: "Scheduler" }
+];
+function metaRows(summary) {
+  const rows = [];
+  if (!summary || typeof summary !== "object")
+    return rows;
+  const bag = summary;
+  for (const { key, label } of META_FIELDS) {
+    const v = bag[key];
+    if (v === undefined || v === null)
+      continue;
+    const value = String(v);
+    if (!value.trim())
+      continue;
+    rows.push({ key, label, value });
+  }
+  return rows;
+}
+function metaClipboardText(rows) {
+  return rows.map((r) => `${r.label}: ${r.value}`).join(`
+`);
+}
+function createViewStore(namespace) {
+  const viewKey = `${namespace}:view`;
+  const pendingKey = `${namespace}:view-pending`;
+  return {
+    load() {
+      try {
+        if (localStorage.getItem(pendingKey) === "1") {
+          localStorage.removeItem(pendingKey);
+          localStorage.setItem(viewKey, "folder");
+          return { mode: "folder", recovered: true };
+        }
+        return {
+          mode: localStorage.getItem(viewKey) === "flat" ? "flat" : "folder",
+          recovered: false
+        };
+      } catch {
+        return { mode: "folder", recovered: false };
+      }
+    },
+    save(mode) {
+      try {
+        localStorage.setItem(viewKey, mode);
+      } catch {}
+    },
+    markPending(pending) {
+      try {
+        if (pending)
+          localStorage.setItem(pendingKey, "1");
+        else
+          localStorage.removeItem(pendingKey);
+      } catch {}
+    }
+  };
+}
 function registerHubEntry(entry) {
   const list = getKit().hubEntries;
   const i = list.findIndex((e) => e.id === entry.id);
@@ -1259,6 +1349,9 @@ function readSafeViewConfig(host = safeViewSettingHost()) {
 function isSafeViewActive(cfg = readSafeViewConfig()) {
   return cfg.enabled && cfg.keywords.length > 0;
 }
+function sensitiveKeyword(cfg) {
+  return cfg.keywords.length ? cfg.keywords[0] : null;
+}
 function tokenize(input) {
   if (typeof input !== "string" || input === "")
     return [];
@@ -1762,30 +1855,9 @@ var MKDIR_URL = "/image_browser/mkdir";
 var PINS_URL = "/image_browser/pins";
 var RATING_URL = "/image_browser/rating";
 var SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
-var IMG_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".bmp",
-  ".tiff",
-  ".tif",
-  ".avif"
-]);
-var VIDEO_EXTS = new Set([
-  ".mp4",
-  ".webm",
-  ".mov",
-  ".mkv",
-  ".avi",
-  ".m4v",
-  ".mpg",
-  ".mpeg"
-]);
 var META_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm", ".mkv"]);
 var META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);
-var SANDBOXED_TYPES = ["input", "output", "temp"];
+var SANDBOXED_TYPES2 = SANDBOXED_TYPES;
 var BASE_PATHS = null;
 async function fetchBasePaths() {
   if (BASE_PATHS)
@@ -1834,10 +1906,6 @@ async function fetchListing(p) {
   if (!data.ok)
     throw new Error(data.error || "listing failed");
   return data;
-}
-function joinAbs(dir, name) {
-  const d = (dir || "/").replace(/\/+$/, "");
-  return d === "" ? `/${name}` : `${d}/${name}`;
 }
 function thumbVersion(mtime, size) {
   return `${mtime}-${size ?? 0}`;
@@ -1901,36 +1969,6 @@ function embeddedWorkflowJSON(meta) {
       return v;
   }
   return null;
-}
-var META_FIELDS = [
-  { key: "positive", label: "Positive" },
-  { key: "negative", label: "Negative" },
-  { key: "model", label: "Model" },
-  { key: "seed", label: "Seed" },
-  { key: "steps", label: "Steps" },
-  { key: "cfg", label: "CFG" },
-  { key: "sampler", label: "Sampler" },
-  { key: "scheduler", label: "Scheduler" }
-];
-function metaRows(summary) {
-  const rows = [];
-  if (!summary || typeof summary !== "object")
-    return rows;
-  const bag = summary;
-  for (const { key, label } of META_FIELDS) {
-    const v = bag[key];
-    if (v === undefined || v === null)
-      continue;
-    const value = String(v);
-    if (!value.trim())
-      continue;
-    rows.push({ key, label, value });
-  }
-  return rows;
-}
-function metaClipboardText(rows) {
-  return rows.map((r) => `${r.label}: ${r.value}`).join(`
-`);
 }
 async function postJSON(url, body) {
   const r = await fetch(url, {
@@ -2078,9 +2116,6 @@ function pinsToFiles(entries) {
 
 // src/safe-tag.ts
 var TAG_URL = "/image_browser/tag";
-function sensitiveKeyword(cfg) {
-  return cfg.keywords.length ? cfg.keywords[0] : null;
-}
 function hasSensitiveTag(f, keyword) {
   const want = keyword.toLowerCase();
   return (f.tags ?? []).some((t) => t.toLowerCase() === want);
@@ -2125,28 +2160,8 @@ function saveSort(key, dir) {
     localStorage.setItem(SORT_STORAGE_KEY, `${key}:${dir}`);
   } catch {}
 }
-var VIEW_STORAGE_KEY = "comfyui-image-browser:view";
-var VIEW_PENDING_KEY = "comfyui-image-browser:view-pending";
-function loadSavedView() {
-  try {
-    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
-      localStorage.removeItem(VIEW_PENDING_KEY);
-      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
-      return { mode: "folder", recovered: true };
-    }
-    return {
-      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
-      recovered: false
-    };
-  } catch {
-    return { mode: "folder", recovered: false };
-  }
-}
-function saveView(mode) {
-  try {
-    localStorage.setItem(VIEW_STORAGE_KEY, mode);
-  } catch {}
-}
+var VIEW_NAMESPACE = "comfyui-image-browser";
+var viewStore = createViewStore(VIEW_NAMESPACE);
 var FILTER_STORAGE_KEY = "comfyui-image-browser:filter";
 var VALID_FILTERS = new Set(["all", "images", "videos"]);
 function loadSavedFilter() {
@@ -2160,14 +2175,6 @@ function loadSavedFilter() {
 function saveFilter(filter) {
   try {
     localStorage.setItem(FILTER_STORAGE_KEY, filter);
-  } catch {}
-}
-function markFlatPending(pending) {
-  try {
-    if (pending)
-      localStorage.setItem(VIEW_PENDING_KEY, "1");
-    else
-      localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {}
 }
 var CARD_MIN_WIDTH = 150;
@@ -2209,7 +2216,7 @@ function loadSavedDest() {
     if (i < 0)
       return null;
     const type = raw.slice(0, i);
-    if (!SANDBOXED_TYPES.includes(type))
+    if (!SANDBOXED_TYPES2.includes(type))
       return null;
     return { type, subfolder: raw.slice(i + 1) };
   } catch {
@@ -2259,7 +2266,7 @@ async function migrateLocalPins() {
   }
   for (const p of legacy) {
     const type = p?.type;
-    if (!p || typeof p.subfolder !== "string" || !SANDBOXED_TYPES.includes(type))
+    if (!p || typeof p.subfolder !== "string" || !SANDBOXED_TYPES2.includes(type))
       continue;
     try {
       setPinCache((await postPinDelta("add", { kind: "dir", type, subfolder: p.subfolder })).pins);
@@ -2273,7 +2280,7 @@ async function migrateLocalPins() {
 }
 function openImageBrowser() {
   ensureStyleOnce(STYLE_ID4, BROWSER_CSS);
-  const savedView = loadSavedView();
+  const savedView = viewStore.load();
   const state = {
     type: "output",
     subfolder: "",
@@ -2301,7 +2308,7 @@ function openImageBrowser() {
     footerRightHTML: '<span class="ib-count"></span>',
     onClose: () => {
       rememberScroll();
-      markFlatPending(false);
+      viewStore.markPending(false);
       disposeLazyThumbs?.();
       disposeLazyThumbs = null;
       scroller.dispose();
@@ -2488,7 +2495,7 @@ function openImageBrowser() {
   selectedBadge.style.display = "none";
   modal.headerEl.appendChild(selectedBadge);
   function isFlat() {
-    return state.viewMode === "flat" && SANDBOXED_TYPES.includes(state.type);
+    return state.viewMode === "flat" && SANDBOXED_TYPES2.includes(state.type);
   }
   function fileSub(f) {
     if (f.pinSub !== undefined)
@@ -2503,13 +2510,13 @@ function openImageBrowser() {
     return f.pinType ?? state.type;
   }
   function canWriteFile(f) {
-    return SANDBOXED_TYPES.includes(fileType(f));
+    return SANDBOXED_TYPES2.includes(fileType(f));
   }
   function isPinnedView() {
     return state.type === "pinned";
   }
   function canSelectHere() {
-    return SANDBOXED_TYPES.includes(state.type) || isPinnedView();
+    return SANDBOXED_TYPES2.includes(state.type) || isPinnedView();
   }
   function filePinItem(f) {
     return { kind: "file", type: fileType(f), subfolder: fileSub(f), name: f.name };
@@ -2593,11 +2600,11 @@ function openImageBrowser() {
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
   viewToggleEl.addEventListener("click", () => {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!SANDBOXED_TYPES2.includes(state.type))
       return;
     rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
-    saveView(state.viewMode);
+    viewStore.save(state.viewMode);
     loadAndRender();
   });
   filterEl.addEventListener("click", (e) => {
@@ -2621,7 +2628,7 @@ function openImageBrowser() {
     if (!chip)
       return;
     const type = chip.dataset.pinType;
-    if (!SANDBOXED_TYPES.includes(type))
+    if (!SANDBOXED_TYPES2.includes(type))
       return;
     const pin = { kind: "dir", type, subfolder: chip.dataset.pinSub || "" };
     if (t.closest(".ib-pin-x")) {
@@ -2707,9 +2714,9 @@ function openImageBrowser() {
       e.stopPropagation();
       rememberScroll();
       state.viewMode = "folder";
-      saveView("folder");
+      viewStore.save("folder");
       const t = subEl.dataset.pinType;
-      if (t && SANDBOXED_TYPES.includes(t))
+      if (t && SANDBOXED_TYPES2.includes(t))
         state.type = t;
       state.subfolder = subEl.dataset.sub || "";
       loadAndRender();
@@ -3154,7 +3161,7 @@ function openImageBrowser() {
     refreshPinButtons();
   }
   async function toggleFolderPinHere() {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!SANDBOXED_TYPES2.includes(state.type))
       return;
     const item = { kind: "dir", type: state.type, subfolder: state.subfolder };
     const pinned = isPinned(item);
@@ -3247,7 +3254,7 @@ function openImageBrowser() {
     for (const b of tabsEl.querySelectorAll(".ib-tab")) {
       b.classList.toggle("is-active", b.dataset.type === state.type);
     }
-    const canWrite = SANDBOXED_TYPES.includes(state.type);
+    const canWrite = SANDBOXED_TYPES2.includes(state.type);
     selectToggleEl.style.display = canSelectHere() ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
     viewToggleEl.style.display = canWrite ? "" : "none";
@@ -3259,7 +3266,7 @@ function openImageBrowser() {
   }
   function renderPins() {
     const pins = folderPins();
-    const canPin = SANDBOXED_TYPES.includes(state.type);
+    const canPin = SANDBOXED_TYPES2.includes(state.type);
     pinToggleEl.style.display = canPin ? "" : "none";
     const herePinned = canPin && isPinned({ kind: "dir", type: state.type, subfolder: state.subfolder });
     pinToggleEl.classList.toggle("is-active", herePinned);
@@ -3329,7 +3336,7 @@ function openImageBrowser() {
     renderCrumbs();
     modal.setBusy(true);
     modal.setStatus("Loading…");
-    markFlatPending(isFlat());
+    viewStore.markPending(isFlat());
     const safeCfg = readSafeViewConfig();
     renderSafeToggle(safeCfg);
     try {
@@ -3378,7 +3385,7 @@ function openImageBrowser() {
     renderGrid({
       scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey())
     });
-    markFlatPending(false);
+    viewStore.markPending(false);
   }
   function narrowByKind(files, filter) {
     if (filter === "all")
@@ -3413,7 +3420,7 @@ function openImageBrowser() {
     const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
-    const canWrite = SANDBOXED_TYPES.includes(state.type);
+    const canWrite = SANDBOXED_TYPES2.includes(state.type);
     const flat = isFlat();
     const pinnedView = isPinnedView();
     const showUp = !flat && canGoUp();
@@ -3854,7 +3861,7 @@ ${when}`;
     }
   }
   async function onNewFolder() {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!SANDBOXED_TYPES2.includes(state.type))
       return;
     const existing = new Set(state.dirs.map((d) => d.name));
     const name = await promptInShell(modal, {
@@ -3885,7 +3892,7 @@ ${when}`;
     }
   }
   async function onMoveDir(name) {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!SANDBOXED_TYPES2.includes(state.type))
       return;
     const srcSub = state.subfolder ? `${state.subfolder}/${name}` : name;
     const dest = await pickDestination(modal, { type: state.type, subfolder: state.subfolder }, { type: state.type, subfolder: srcSub });
@@ -3914,7 +3921,7 @@ ${when}`;
     }
   }
   async function onDeleteDir(name) {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!SANDBOXED_TYPES2.includes(state.type))
       return;
     try {
       const res = await removeDir(state.type, state.subfolder, name, false);
@@ -3960,7 +3967,7 @@ ${when}`;
     });
   }
   async function doPaste() {
-    if (!SANDBOXED_TYPES.includes(state.type))
+    if (!SANDBOXED_TYPES2.includes(state.type))
       return;
     if (!yanked || yanked.length === 0) {
       notify({ severity: "info", summary: "Nothing to paste", detail: "Yank files first with yy" });
@@ -4318,7 +4325,7 @@ function pickDestination(modal, start, exclude) {
     const inExcluded = (type, sub) => exclude !== undefined && type === exclude.type && (sub === exclude.subfolder || sub.startsWith(`${exclude.subfolder}/`));
     const remembered = loadSavedDest();
     const cur = remembered ?? {
-      type: SANDBOXED_TYPES.includes(start.type) ? start.type : "output",
+      type: SANDBOXED_TYPES2.includes(start.type) ? start.type : "output",
       subfolder: start.subfolder
     };
     const title = document.createElement("div");
@@ -4326,7 +4333,7 @@ function pickDestination(modal, start, exclude) {
     title.textContent = "Move to…";
     const tabs = document.createElement("div");
     tabs.className = "ib-tabs";
-    for (const t of SANDBOXED_TYPES) {
+    for (const t of SANDBOXED_TYPES2) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "ib-tab";
@@ -4452,7 +4459,7 @@ function pickDestination(modal, start, exclude) {
       const pin = e.target.closest(".is-pin");
       if (pin) {
         const t = pin.dataset.pinType;
-        if (!SANDBOXED_TYPES.includes(t))
+        if (!SANDBOXED_TYPES2.includes(t))
           return;
         cur.type = t;
         cur.subfolder = pin.dataset.pinSub || "";
@@ -4860,7 +4867,7 @@ function parseAssetAddress(src) {
   if (!name)
     return null;
   const type = url.searchParams.get("type") || "input";
-  if (!SANDBOXED_TYPES.includes(type))
+  if (!SANDBOXED_TYPES2.includes(type))
     return null;
   return { type, subfolder: url.searchParams.get("subfolder") || "", name, absDir: "" };
 }
@@ -5204,7 +5211,7 @@ function itemsFromExecuted(detail) {
       const type = item?.type;
       if (typeof filename !== "string" || filename === "")
         continue;
-      if (typeof type !== "string" || !SANDBOXED_TYPES.includes(type))
+      if (typeof type !== "string" || !SANDBOXED_TYPES2.includes(type))
         continue;
       const subfolder = typeof item?.subfolder === "string" ? item.subfolder : "";
       const id = `${type}:${subfolder}:${filename}`;

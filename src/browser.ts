@@ -7,26 +7,33 @@
 // committing a value to a node widget.
 
 import type {
+  MetaRow,
   ModalShellController,
   RatingAddress,
   SafeViewConfig,
   SafeViewTarget,
+  ViewMode,
 } from "@laurigates/comfy-modal-kit";
 import {
   applyStars,
   confirmInShell,
   copyTextToClipboard,
   createScrollMemory,
+  createViewStore,
   ensureStyleOnce,
   escapeHTML as escHTML,
   fuzzyScore,
+  IMG_EXTS,
   installBackGuard,
   installLazyMedia,
   installScrollRestore,
   isSensitive,
   isValidSort,
+  joinAbs,
   makeRevealButton,
   makeRevealSet,
+  metaClipboardText,
+  metaRows,
   nextRating,
   notify,
   onSafeViewChange,
@@ -39,11 +46,13 @@ import {
   SAFE_VIEW_GLYPH_OFF,
   SAFE_VIEW_GLYPH_ON,
   SORT_OPTIONS,
+  sensitiveKeyword,
   setBlurred,
   setSpoilered,
   sortFiles,
   starsHTML,
   toggleSafeView,
+  VIDEO_EXTS,
 } from "@laurigates/comfy-modal-kit";
 // Runtime import, left unbundled by `bun build --external '/scripts/*'` and
 // resolved against ComfyUI's served module. Used only by loadWorkflow(), which
@@ -61,17 +70,12 @@ import {
   fetchMetadata,
   fetchPins,
   fullSrcURL,
-  IMG_EXTS,
   type ImageMetadata,
   imageThumbURL,
-  joinAbs,
   type ListingFile,
   META_EXTS,
   META_VIDEO_EXTS,
-  type MetaRow,
   makeDir,
-  metaClipboardText,
-  metaRows,
   moveDir,
   moveFile,
   moveMany,
@@ -86,16 +90,14 @@ import {
   SANDBOXED_TYPES,
   type TypeFilter,
   thumbVersion,
-  VIDEO_EXTS,
   videoSrcURL,
 } from "./api.js";
-import {
-  hasSensitiveTag,
-  markSensitiveHTML,
-  postTag,
-  sensitiveKeyword,
-  TAG_URL,
-} from "./safe-tag.js";
+// The rest of the mark-sensitive control stays per-pack — `tagRequestBody`,
+// `markSensitiveHTML` and `hasSensitiveTag` have deliberately diverged from
+// comfyui-gallery-loader's copies (no `type: "path"` arm here per ADR-0002, and
+// different CSS class names in the markup). Only `sensitiveKeyword` went to the
+// kit, and it is imported from there above.
+import { hasSensitiveTag, markSensitiveHTML, postTag, TAG_URL } from "./safe-tag.js";
 
 const STYLE_ID = "ib-style";
 // Pack-scoped, deliberately: comfyui-gallery-loader persists under
@@ -145,43 +147,19 @@ function saveSort(key: string, dir: string): void {
 // recursively merges the current subfolder's whole subtree into one grid, each
 // card labelled with its relative subpath (for finding recent renders wherever
 // they landed). Persisted so the preference survives reopening the browser.
-type ViewMode = "folder" | "flat";
-const VIEW_STORAGE_KEY = "comfyui-image-browser:view";
-// Breadcrumb set while a flat load is in flight and cleared once the grid has
-// painted. If it is STILL set at open time, the previous flat attempt never
-// finished — the tab died under it — so the persisted preference would reopen
-// straight into the same failure with no way to reach the toggle. Recovering to
-// folder view keeps the preference from becoming a trap.
-const VIEW_PENDING_KEY = "comfyui-image-browser:view-pending";
-
-interface SavedView {
-  mode: ViewMode;
-  recovered: boolean;
-}
-
-function loadSavedView(): SavedView {
-  try {
-    if (localStorage.getItem(VIEW_PENDING_KEY) === "1") {
-      localStorage.removeItem(VIEW_PENDING_KEY);
-      localStorage.setItem(VIEW_STORAGE_KEY, "folder");
-      return { mode: "folder", recovered: true };
-    }
-    return {
-      mode: localStorage.getItem(VIEW_STORAGE_KEY) === "flat" ? "flat" : "folder",
-      recovered: false,
-    };
-  } catch {
-    return { mode: "folder", recovered: false };
-  }
-}
-
-function saveView(mode: ViewMode): void {
-  try {
-    localStorage.setItem(VIEW_STORAGE_KEY, mode);
-  } catch {
-    /* private-mode / disabled storage — non-fatal */
-  }
-}
+//
+// The store — the read, the write, and the crashed-flat-load recovery
+// breadcrumb — is the kit's `createViewStore`; this pack carried a
+// body-identical copy of all three. The NAMESPACE is a parameter, and passing
+// the wrong one is the whole hazard the kit's own comment warns about: the keys
+// below are what this pack has written since flat view shipped, so a namespace
+// that is anything other than `comfyui-image-browser` reads a key nobody ever
+// wrote and silently orphans every user's stored preference while the UI still
+// looks fine. It must NOT be shared with comfyui-gallery-loader either — two
+// surfaces over different roots, and wanting flat view in one and not the other
+// is reasonable. Asserted literally in tests/js/kit-listing.test.js.
+const VIEW_NAMESPACE = "comfyui-image-browser";
+const viewStore = createViewStore(VIEW_NAMESPACE);
 
 // Media-type filter: narrows the listing to images or videos only. Filtered
 // SERVER-side (see api.ts's ListParams.kind) — both listing paths cap at 5000
@@ -208,15 +186,6 @@ function loadSavedFilter(): TypeFilter {
 function saveFilter(filter: TypeFilter): void {
   try {
     localStorage.setItem(FILTER_STORAGE_KEY, filter);
-  } catch {
-    /* private-mode / disabled storage — non-fatal */
-  }
-}
-
-function markFlatPending(pending: boolean): void {
-  try {
-    if (pending) localStorage.setItem(VIEW_PENDING_KEY, "1");
-    else localStorage.removeItem(VIEW_PENDING_KEY);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -436,7 +405,7 @@ interface ThumbDescriptor {
 export function openImageBrowser(): ModalShellController {
   ensureStyleOnce(STYLE_ID, BROWSER_CSS);
 
-  const savedView = loadSavedView();
+  const savedView = viewStore.load();
   const state: BrowserState = {
     type: "output",
     subfolder: "",
@@ -478,7 +447,7 @@ export function openImageBrowser(): ModalShellController {
       rememberScroll();
       // Closing mid-load is a deliberate exit, not a crash — don't leave the
       // breadcrumb armed or the next open falls back to folder view for nothing.
-      markFlatPending(false);
+      viewStore.markPending(false);
       disposeLazyThumbs?.();
       disposeLazyThumbs = null;
       // AFTER rememberScroll() above, which reads the restorer's mirror — the
@@ -1060,7 +1029,7 @@ export function openImageBrowser(): ModalShellController {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     rememberScroll();
     state.viewMode = state.viewMode === "flat" ? "folder" : "flat";
-    saveView(state.viewMode);
+    viewStore.save(state.viewMode);
     // Flat needs a recursive re-fetch; the folder→flat and flat→folder slots
     // are distinct in scrollMemory, so loadAndRender lands each at its own place.
     loadAndRender();
@@ -1167,7 +1136,7 @@ export function openImageBrowser(): ModalShellController {
       e.stopPropagation();
       rememberScroll();
       state.viewMode = "folder";
-      saveView("folder");
+      viewStore.save("folder");
       // In the pinned view the label carries the card's own ROOT as well, since
       // pins span roots; in flat view it is always the current root, and the
       // attribute is absent.
@@ -2058,7 +2027,7 @@ export function openImageBrowser(): ModalShellController {
     // Arm the recovery breadcrumb around the whole flat load+render. It is
     // cleared below once the grid has painted, so only an attempt that never
     // got there (a tab the render killed) leaves it set.
-    markFlatPending(isFlat());
+    viewStore.markPending(isFlat());
     // ONE read per load, handed to every match below — the kit's own doc says
     // to call it once per render pass and not once per card.
     const safeCfg = readSafeViewConfig();
@@ -2155,7 +2124,7 @@ export function openImageBrowser(): ModalShellController {
     renderGrid({
       scrollTo: opts?.preserveScroll ? undefined : scrollMemory.get(locationKey()),
     });
-    markFlatPending(false);
+    viewStore.markPending(false);
   }
 
   // Client-side media narrowing for the pinned view only — see the comment at
@@ -2202,7 +2171,10 @@ export function openImageBrowser(): ModalShellController {
     // The keyword 🙈 writes, resolved ONCE per pass for the same reason. `null`
     // when the user has configured no keywords at all — the control is then not
     // rendered, because there is nothing it could write that the filter would
-    // honour (see sensitiveKeyword).
+    // honour. `sensitiveKeyword` is the KIT's now (it was two hand-written
+    // copies over the same files on disk, so a divergence would have marked a
+    // file here that comfyui-gallery-loader's filter then ignored — that is
+    // laurigates/comfy-modal-kit#33, closed by the extraction).
     const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";

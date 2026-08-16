@@ -12,11 +12,17 @@
 // anything that addresses the file directly, exactly as before.
 //
 // A PORT of `comfyui-gallery-loader/src/safe-tag.ts`, not a shared module: the
-// two packs are separate npm-less repos and the kit is what they share. See the
-// note on `sensitiveKeyword` below for the one function that should not have
-// stayed duplicated, and the issue tracking its promotion into the kit.
-
-import type { SafeViewConfig } from "@laurigates/comfy-modal-kit";
+// two packs are separate npm-less repos and the kit is what they share.
+//
+// WHAT IS LEFT HERE IS THE PART THAT DIVERGED ON PURPOSE. `sensitiveKeyword`
+// was the one function that should not have stayed duplicated — two packs
+// writing the same keyword into the same files on disk — and it now lives in
+// the kit's safe-view.ts (laurigates/comfy-modal-kit#33, adopted at 0.14.0);
+// import it from `@laurigates/comfy-modal-kit`. The three below stay: this
+// pack's `tagRequestBody` has no `type: "path"` arm (ADR-0002 — a tag write is
+// a write, and `/image_browser/tag` rejects `type=path`), its `TagAddress`
+// carries no `absDir`, and `markSensitiveHTML` emits this pack's own class
+// prefix. Unifying any of them would silently reverse a considered decision.
 
 /** This pack's own route. `comfyui-gallery-loader` posts to its own. */
 export const TAG_URL = "/image_browser/tag";
@@ -31,32 +37,6 @@ export interface TagAddress {
 /** The `tags` a listing row carries. Absent on a row from an older backend. */
 export interface TaggedFile {
   tags?: readonly string[];
-}
-
-/**
- * The keyword the control writes: THE FIRST ONE THE USER CONFIGURED.
- *
- * There is deliberately no hidden constant here. The filter matches the user's
- * own keyword list, so writing anything else would produce a file that says
- * "marked" and is not hidden — the one outcome a discretion feature must never
- * have. The first entry is the natural pick: `parseKeywords` preserves the
- * order the user typed, so it is the keyword they named first.
- *
- * Returns null when the list is EMPTY, and the control is then not offered at
- * all. Falling back to the packaged default (`nsfw`) would write a keyword the
- * user's own filter does not contain, which is the same failure one step along.
- *
- * DRIFT RISK, TRACKED: this function now exists as two hand-written copies —
- * here and in `comfyui-gallery-loader/src/safe-tag.ts` — and the two packs
- * write over the SAME FILES ON DISK. If they ever disagree about which keyword
- * 🙈 writes, a tap in one pack marks a file the other pack's filter does not
- * honour. Its home is the kit (`comfy-modal-kit/src/safe-view.ts`), which
- * already owns the keyword parsing this reads; promoting it needs a kit minor
- * plus a bump in both packs, so it is deliberately NOT done in this PR.
- * See laurigates/comfy-modal-kit#33.
- */
-export function sensitiveKeyword(cfg: SafeViewConfig): string | null {
-  return cfg.keywords.length ? (cfg.keywords[0] as string) : null;
 }
 
 /**

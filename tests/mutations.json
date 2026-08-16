@@ -214,9 +214,10 @@
     },
     {
       "label": "\ud83d\ude48 is offered with no configured keyword, writing the packaged default the user's filter does not contain",
-      "file": "src/safe-tag.ts",
-      "before": "  return cfg.keywords.length ? (cfg.keywords[0] as string) : null;",
-      "after": "  return (cfg.keywords[0] as string) ?? \"nsfw\";"
+      "_note": "Re-anchored at kit 0.14.0: `sensitiveKeyword` itself moved into the kit (comfy-modal-kit#33), so its body can no longer be mutated from this repo. The behaviour it guards is still this pack's \u2014 the pack decides whether to RENDER the control \u2014 so the mutation now defaults the call site's null instead of the function's return. Same shipped bug, same test catches it.",
+      "file": "src/browser.ts",
+      "before": "    const safeKeyword = sensitiveKeyword(safeCfg);",
+      "after": "    const safeKeyword = sensitiveKeyword(safeCfg) ?? \"nsfw\";"
     },
     {
       "label": "the pressed state asks \"would the filter match it\" instead of \"does the file carry exactly this keyword\"",

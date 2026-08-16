@@ -1,7 +1,27 @@
 // api.ts — typed wrappers over the /image_browser/* backend endpoints plus the
 // URL builders the grid uses for thumbnails and previews. No DOM here.
 
-import type { PromptVerdict } from "@laurigates/comfy-modal-kit";
+import {
+  IMG_EXTS,
+  joinAbs,
+  SANDBOXED_TYPES as KIT_SANDBOXED_TYPES,
+  type MetaField,
+  type PromptVerdict,
+} from "@laurigates/comfy-modal-kit";
+
+// The listing layer's pure half — the media-extension sets (IMG_EXTS /
+// VIDEO_EXTS), the address join (joinAbs), and the metadata display order and
+// row builders (META_FIELDS / MetaRow / metaRows / metaClipboardText) — now
+// lives in the kit's gallery-file.ts, because comfyui-gallery-loader carried
+// copies of every one of them. Verified comment-stripped against this pack's
+// before the lift: the only differences were `readonly` annotations and the
+// declaration order of the MetaField union, neither of which is a runtime
+// difference, and both extension sets have identical membership.
+//
+// Consumers import them straight from `@laurigates/comfy-modal-kit`, not
+// through this module — a re-export here would be a second name for the same
+// thing and the next drift would hide behind it. This file imports only what it
+// needs itself.
 
 export const EXT_NAME = "comfyui-image-browser";
 
@@ -21,28 +41,6 @@ const MKDIR_URL = "/image_browser/mkdir";
 const PINS_URL = "/image_browser/pins";
 export const RATING_URL = "/image_browser/rating";
 const SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
-
-export const IMG_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".bmp",
-  ".tiff",
-  ".tif",
-  ".avif",
-]);
-export const VIDEO_EXTS = new Set([
-  ".mp4",
-  ".webm",
-  ".mov",
-  ".mkv",
-  ".avi",
-  ".m4v",
-  ".mpg",
-  ".mpeg",
-]);
 
 // Video containers whose embedded metadata the backend can actually read —
 // ISOBMFF (MP4/MOV/M4V) and Matroska (WebM/MKV). Deliberately NARROWER than
@@ -70,7 +68,16 @@ export const META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);
 // a per-card control must therefore gate on the card's own type, not on the
 // location's, which is what browser.ts's fileType()/canWriteFile() exist for.
 export type BrowseType = "input" | "output" | "temp" | "path" | "pinned";
-export const SANDBOXED_TYPES: BrowseType[] = ["input", "output", "temp"];
+
+// The kit owns the three NAMES; this pack owns the NARROWING. The kit types its
+// array `readonly string[]` deliberately — each consuming pack's location union
+// is wider and differs — and `BrowseType` is the narrowing this pack has always
+// had, which is what keeps `SANDBOXED_TYPES.includes(x)` a compile error for
+// anything that is not a browse location rather than for no string at all. The
+// cast is sound because all three members are BrowseType, and
+// tests/js/kit-listing.test.js asserts this IS the kit's array (by identity, not
+// by membership) so a future divergence cannot hide behind the cast.
+export const SANDBOXED_TYPES = KIT_SANDBOXED_TYPES as readonly BrowseType[];
 
 interface BasePaths {
   base_path: string;
@@ -247,11 +254,6 @@ export async function fetchListing(p: ListParams): Promise<ListResponse> {
 
 // ---- Thumbnail / preview URL dispatch ---------------------------------
 
-export function joinAbs(dir: string, name: string): string {
-  const d = (dir || "/").replace(/\/+$/, "");
-  return d === "" ? `/${name}` : `${d}/${name}`;
-}
-
 // All image thumbnails go through the pack's own /thumb endpoint (never core
 // /api/view, which re-encodes on every request with no cache headers). The
 // ?v= cache key (mtime + size from /list) pairs with the backend's long
@@ -313,20 +315,11 @@ export function fullSrcURL(
 // NEVER fabricates: a summary key the backend could not read is simply absent
 // from the response, which is why every field below is optional.
 
-// The recognised generation parameters. Mirrors the backend's summary keys
+// The recognised generation parameters are the kit's `MetaField` (imported and
+// re-exported above). It mirrors the backend's summary keys
 // (image_meta.SUMMARY_WIDGETS + the prompt/model resolvers); a key the parser
-// could not fill is omitted from the response rather than sent empty. Module-local
-// on purpose — callers reach these keys through ImageMetadata / MetaRow and never
-// need to name the union, so exporting it would only add an unused export.
-type MetaField =
-  | "positive"
-  | "negative"
-  | "seed"
-  | "steps"
-  | "cfg"
-  | "sampler"
-  | "scheduler"
-  | "model";
+// could not fill is omitted from the response rather than sent empty, which is
+// why every field below is optional.
 
 export interface ImageMetadata {
   ok: boolean;
@@ -410,53 +403,11 @@ export function hasEmbeddedWorkflow(meta: Pick<ImageMetadata, "raw"> | null | un
   return embeddedWorkflowJSON(meta) !== null;
 }
 
-// Display order for the summary, in one place so the overlay rows and the
-// copy-all clipboard block can never disagree. Prompts first (they are what
-// actually gets copied), then the model, then the numerics.
-export const META_FIELDS: { key: MetaField; label: string }[] = [
-  { key: "positive", label: "Positive" },
-  { key: "negative", label: "Negative" },
-  { key: "model", label: "Model" },
-  { key: "seed", label: "Seed" },
-  { key: "steps", label: "Steps" },
-  { key: "cfg", label: "CFG" },
-  { key: "sampler", label: "Sampler" },
-  { key: "scheduler", label: "Scheduler" },
-];
-
-export interface MetaRow {
-  key: MetaField;
-  label: string;
-  value: string;
-}
-
-// Walk META_FIELDS (not the response's own key order — that is JSON insertion
-// order and varies by writer) and drop anything missing or whitespace-only, so
-// an unknown field never renders as a bare "Negative:" row with a Copy button
-// that copies nothing. Values are String()-coerced defensively: the backend
-// stringifies everything, but a hand-rolled proxy or a future numeric key must
-// not put `[object Object]` — or a throw — in front of the user.
-export function metaRows(
-  summary: Partial<Record<MetaField, unknown>> | null | undefined,
-): MetaRow[] {
-  const rows: MetaRow[] = [];
-  if (!summary || typeof summary !== "object") return rows;
-  const bag = summary as Record<string, unknown>;
-  for (const { key, label } of META_FIELDS) {
-    const v = bag[key];
-    if (v === undefined || v === null) continue;
-    const value = String(v);
-    if (!value.trim()) continue;
-    rows.push({ key, label, value });
-  }
-  return rows;
-}
-
-// The "Copy all" payload. Multi-line prompts stay verbatim (no re-indent, no
-// quoting) so the text can be pasted straight back into a prompt box.
-export function metaClipboardText(rows: MetaRow[]): string {
-  return rows.map((r) => `${r.label}: ${r.value}`).join("\n");
-}
+// META_FIELDS / MetaRow / metaRows / metaClipboardText are the kit's (imported
+// and re-exported at the top of this file). They were byte-identical to
+// comfyui-gallery-loader's copies apart from `readonly` annotations, and the
+// display order is the one thing the overlay rows and the copy-all block must
+// never disagree on — across packs as well as within one.
 
 // ---- Mutations (sandboxed roots only) ---------------------------------
 

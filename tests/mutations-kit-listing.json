@@ -1,0 +1,43 @@
+{
+  "_note": "Mutation table for tests/js/kit-listing.test.js — the kit 0.14.0 listing-helper adoption. Its own file, like mutations-sort.json and mutations-card-actions.json, because each table names the ONE suite it runs: putting these in mutations.json (which runs safe-view.test.js only) reported both as MISSED against a suite that does not import them, which reads exactly like an uncovered assertion. Run: just mutation-check comfyui-image-browser tests/mutations-kit-listing.json — a healthy run exits 1 because the CONTROL is correctly MISSED.",
+  "command": ["bun", "run", "test", "--", "tests/js/kit-listing.test.js"],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/api.ts",
+      "before": "// The three sandboxed ComfyUI roots the browser exposes as tabs, plus the",
+      "after": "// The three sandboxed ComfyUI roots this browser exposes as tabs, plus the"
+    },
+    {
+      "label": "the view store is namespaced to the SIBLING pack (every stored flat-view preference is orphaned, and the UI still looks fine)",
+      "file": "src/browser.ts",
+      "before": "const VIEW_NAMESPACE = \"comfyui-image-browser\";",
+      "after": "const VIEW_NAMESPACE = \"comfyui-gallery-loader\";"
+    },
+    {
+      "label": "the view store is namespaced to a plausible TYPO (nothing reads or writes it, and no sibling key exists to notice)",
+      "file": "src/browser.ts",
+      "before": "const VIEW_NAMESPACE = \"comfyui-image-browser\";",
+      "after": "const VIEW_NAMESPACE = \"comfyui-imagebrowser\";"
+    },
+    {
+      "label": "SANDBOXED_TYPES goes back to a local literal with identical members (only an identity check can see this)",
+      "file": "src/api.ts",
+      "before": "export const SANDBOXED_TYPES = KIT_SANDBOXED_TYPES as readonly BrowseType[];",
+      "after": "export const SANDBOXED_TYPES: readonly BrowseType[] = [\"input\", \"output\", \"temp\"];"
+    },
+    {
+      "label": "META_EXTS stops being derived from the kit's IMG_EXTS (the ⓘ / ⤓ gate silently drops every image)",
+      "file": "src/api.ts",
+      "before": "export const META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);",
+      "after": "export const META_EXTS = new Set([...META_VIDEO_EXTS]);"
+    },
+    {
+      "label": "INERT META_EXTS: it admits everything, so the reader-less containers get dead ⓘ / ⤓ buttons",
+      "file": "src/api.ts",
+      "before": "export const META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);",
+      "after": "export const META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS, \".avi\"]);"
+    }
+  ]
+}
