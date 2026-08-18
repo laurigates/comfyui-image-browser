@@ -233,6 +233,24 @@ describe("the touch floor is declared, not hoped for", () => {
     modal.close();
   });
 
+  it("declares min-width AND min-height >= 44px on the selection checkbox", async () => {
+    // The checkbox shipped at 34x34 — ten pixels under the floor its sibling
+    // .ib-act is held to, on the control that gates multi-select on a phone. A
+    // miss is not inert: it falls through to the card, which opens the file.
+    //
+    // The 44px box carries a 34px VISIBLE dot drawn by ::before, so this
+    // assertion is about the hit target and says nothing about how big the dot
+    // looks. Whether the declared 44 survives the card's flex layout and
+    // `overflow: hidden` is a rendered question, and only
+    // tests/e2e/selection.spec.js can answer it.
+    const modal = await open();
+    const check = card(modal, "a.png").querySelector(".ib-check");
+    expect(check).not.toBeNull();
+    expect(computedPx(check, "minWidth")).toBeGreaterThanOrEqual(44);
+    expect(computedPx(check, "minHeight")).toBeGreaterThanOrEqual(44);
+    modal.close();
+  });
+
   it("keeps flex:1 so a wide card still spreads the buttons", async () => {
     // The floor must not be bought by pinning the width — on a tablet column
     // these should still grow to fill the row.

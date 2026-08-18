@@ -322,7 +322,15 @@ describe("touch multi-select affordances", () => {
     modal.close();
   });
 
-  it("checkbox tap selects the card and reveals the batch action bar", async () => {
+  // NOT a test of the tap GESTURE, despite what this used to be called. It
+  // asserts the selection bookkeeping a click drives — state, the batch bar,
+  // the count, Esc clearing — and that is worth having here. It cannot see the
+  // pointer path: `HTMLElement.click()` dispatches no pointerdown/pointerup,
+  // and jsdom implements no `setPointerCapture` at all, so the pointer-capture
+  // retargeting that broke a real tap for months is invisible in this tier.
+  // Under its old name it read as coverage of the thing that was broken.
+  // The gesture belongs to tests/e2e/selection.spec.js.
+  it("a synthetic click on the checkbox selects the card and reveals the batch action bar", async () => {
     stubListing({ files: TWO_FILES });
     const modal = openShell();
     await openLoaded(modal);

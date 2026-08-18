@@ -2778,11 +2778,13 @@ function openImageBrowser() {
     const idx = Number(card.dataset.idx);
     if (!Number.isFinite(idx))
       return;
-    if (target.closest("[data-check]")) {
+    const checkEl = target.closest("[data-check]");
+    if (checkEl) {
       const f = renderedFiles[idx];
-      dragSel = { on: !(f && isSelected(f)), last: idx, moved: false };
+      dragSel = { on: !(f && isSelected(f)), last: idx, moved: false, captureOn: null };
       try {
-        gridEl.setPointerCapture(e.pointerId);
+        checkEl.setPointerCapture(e.pointerId);
+        dragSel.captureOn = checkEl;
       } catch {}
       return;
     }
@@ -2824,9 +2826,10 @@ function openImageBrowser() {
     if (dragSel) {
       if (dragSel.moved)
         suppressClick = true;
+      const captureOn = dragSel.captureOn;
       dragSel = null;
       try {
-        gridEl.releasePointerCapture(e.pointerId);
+        captureOn?.releasePointerCapture(e.pointerId);
       } catch {}
     }
     cancelLongPress();
@@ -4656,24 +4659,38 @@ var BROWSER_CSS = `
    hover on fine pointers; always visible on touch, in select mode, and on
    already-selected cards. touch-action:none makes a drag starting here a
    range-select instead of a scroll. */
+/* 34px visible dot inside a 44px HIT BOX. The dot is drawn by ::before so the
+   button itself can carry the family's 44px floor (the same one .ib-act is held
+   to) without a filled 44px circle covering a quarter of the thumbnail. A miss
+   here is not inert — it falls through to the card, which opens the file. */
 .ib-check {
-    position: absolute; top: 4px; left: 4px; z-index: 2;
-    width: 34px; height: 34px; padding: 0; border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45);
+    position: absolute; top: 0; left: 0; z-index: 2;
+    width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+    padding: 0; border: 0; background: none; border-radius: 50%;
     color: transparent; font-size: 16px; line-height: 1; cursor: pointer;
     display: none; align-items: center; justify-content: center;
-    touch-action: none;
+    touch-action: none; -webkit-tap-highlight-color: transparent;
+}
+.ib-check::before {
+    content: ""; position: absolute; z-index: -1;
+    width: 34px; height: 34px; box-sizing: border-box; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45);
 }
 .ib-card:hover .ib-check,
 .ib-card.is-selected .ib-check,
 .ib-dialog.is-selecting .ib-check { display: flex; }
 @media (pointer: coarse) { .ib-check { display: flex; } }
-.ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
-.ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
+.ib-check:hover::before { border-color: #ffd866; }
+.ib-check:hover { color: rgba(255, 255, 255, 0.85); }
+.ib-card.is-selected .ib-check::before { background: #ffd866; border-color: #ffd866; }
+.ib-card.is-selected .ib-check { color: #1a1a22; }
 .ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
 .ib-view-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
-/* Keep the selection checkbox over the thumbnail corner, below the subpath row. */
-.ib-card.is-flat .ib-check { top: 30px; }
+/* Keep the selection checkbox over the thumbnail corner, below the subpath row.
+   25px, not 30px: the 44px hit box centres its 34px dot at +5px, so the DOT
+   still lands at 30px — one below .ib-subpath's 26px min-height plus its 4px
+   gutter, which is what this constant is really anchored to. */
+.ib-card.is-flat .ib-check { top: 25px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
 /* Safe View's toolbar toggle. Deliberately NOT the blue "a mode is on" tint the
    flat/select toggles use — this one says "content is being withheld", and

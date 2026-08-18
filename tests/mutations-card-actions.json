@@ -1,5 +1,11 @@
 {
-  "command": ["bun", "run", "test", "--", "tests/js/card-actions.test.js"],
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/card-actions.test.js"
+  ],
   "reporter": "vitest-json",
   "mutations": [
     {
@@ -73,6 +79,18 @@
       "file": "src/browser.ts",
       "before": "const CARD_MIN_WIDTH = 150; // .ib-grid  grid-template-columns: minmax(150px, 1fr)",
       "after": "const CARD_MIN_WIDTH = 220; // .ib-grid  grid-template-columns: minmax(150px, 1fr)"
+    },
+    {
+      "label": "the selection checkbox goes back to 34x34, ten pixels under the family's touch floor",
+      "file": "src/browser.ts",
+      "before": "    width: 44px; height: 44px; min-width: 44px; min-height: 44px;",
+      "after": "    width: 34px; height: 34px; min-width: 34px; min-height: 34px;"
+    },
+    {
+      "label": "the checkbox's min-* floor is dropped, leaving only width/height a later rule could shrink",
+      "file": "src/browser.ts",
+      "before": "    width: 44px; height: 44px; min-width: 44px; min-height: 44px;",
+      "after": "    width: 44px; height: 44px;"
     }
   ]
 }
