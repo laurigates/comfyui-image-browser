@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.29](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.28...comfyui-image-browser-v0.1.29) (2026-08-18)
+
+
+### Bug Fixes
+
+* **select:** tap the checkbox on the checkbox, not on the grid ([#98](https://github.com/laurigates/comfyui-image-browser/issues/98)) ([0afac7d](https://github.com/laurigates/comfyui-image-browser/commit/0afac7da55165ce9c67d7bba2138bfd0066a4a2c))
+
 ## [0.1.28](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.27...comfyui-image-browser-v0.1.28) (2026-08-16)
 
 
