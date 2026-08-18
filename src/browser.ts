@@ -1185,7 +1185,13 @@ export function openImageBrowser(): ModalShellController {
 
   // ---- Touch gestures: long-press → select mode; drag over ☑ → range select
   let suppressClick = false;
-  let dragSel: { on: boolean; last: number; moved: boolean } | null = null;
+  let dragSel: {
+    on: boolean;
+    last: number;
+    moved: boolean;
+    /** The element capture was taken on, so the release targets the same node. */
+    captureOn: Element | null;
+  } | null = null;
   let lpTimer: ReturnType<typeof setTimeout> | null = null;
   let lpX = 0;
   let lpY = 0;
@@ -1210,15 +1216,35 @@ export function openImageBrowser(): ModalShellController {
     if (!card) return;
     const idx = Number(card.dataset.idx);
     if (!Number.isFinite(idx)) return;
-    if (target.closest("[data-check]")) {
+    const checkEl = target.closest("[data-check]") as HTMLElement | null;
+    if (checkEl) {
       // Drag starting on a checkbox sweeps a range; the checkbox has
       // touch-action:none so the gesture selects instead of scrolling.
+      //
+      // CAPTURE ON THE CHECKBOX, NEVER ON `gridEl`. Pointer Events L3
+      // §4.2.12.3: a `click` whose `pointerup` was dispatched while capture was
+      // held is delivered to the CAPTURING ELEMENT, not to the common ancestor
+      // of the down/up targets — and the spec note says this holds even once
+      // `lostpointercapture` has fired, so releasing in `endPointerGesture`
+      // below is too late by construction. Capturing on the grid therefore
+      // retargeted every tap's click to `gridEl`, where the handler's
+      // `target.closest(".ib-card")` is null and it returns long before the
+      // `[data-check]` branch that was meant to toggle. A plain tap did
+      // nothing; only a drag selected, because `pointermove` applies the range
+      // directly. Capturing on the button leaves the click on the button, so
+      // the branch is reachable and one route (`click`) still serves mouse,
+      // touch and keyboard alike.
+      //
+      // Captured events still BUBBLE to `gridEl`, so the `pointermove` and
+      // `endPointerGesture` listeners below are unchanged and a drag that
+      // leaves the card still sweeps.
       const f = renderedFiles[idx];
-      dragSel = { on: !(f && isSelected(f)), last: idx, moved: false };
+      dragSel = { on: !(f && isSelected(f)), last: idx, moved: false, captureOn: null };
       try {
-        gridEl.setPointerCapture(e.pointerId);
+        checkEl.setPointerCapture(e.pointerId);
+        dragSel.captureOn = checkEl;
       } catch {
-        /* jsdom / detached node — capture is an optimization only */
+        /* jsdom implements no pointer capture — the drag path works without it */
       }
       return;
     }
@@ -1267,9 +1293,10 @@ export function openImageBrowser(): ModalShellController {
     if (dragSel) {
       // A swept range already applied — the trailing click must not re-toggle.
       if (dragSel.moved) suppressClick = true;
+      const captureOn = dragSel.captureOn;
       dragSel = null;
       try {
-        gridEl.releasePointerCapture(e.pointerId);
+        captureOn?.releasePointerCapture(e.pointerId);
       } catch {
         /* capture may never have been taken */
       }
@@ -3735,24 +3762,38 @@ const BROWSER_CSS = `
    hover on fine pointers; always visible on touch, in select mode, and on
    already-selected cards. touch-action:none makes a drag starting here a
    range-select instead of a scroll. */
+/* 34px visible dot inside a 44px HIT BOX. The dot is drawn by ::before so the
+   button itself can carry the family's 44px floor (the same one .ib-act is held
+   to) without a filled 44px circle covering a quarter of the thumbnail. A miss
+   here is not inert — it falls through to the card, which opens the file. */
 .ib-check {
-    position: absolute; top: 4px; left: 4px; z-index: 2;
-    width: 34px; height: 34px; padding: 0; border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45);
+    position: absolute; top: 0; left: 0; z-index: 2;
+    width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+    padding: 0; border: 0; background: none; border-radius: 50%;
     color: transparent; font-size: 16px; line-height: 1; cursor: pointer;
     display: none; align-items: center; justify-content: center;
-    touch-action: none;
+    touch-action: none; -webkit-tap-highlight-color: transparent;
+}
+.ib-check::before {
+    content: ""; position: absolute; z-index: -1;
+    width: 34px; height: 34px; box-sizing: border-box; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.7); background: rgba(0, 0, 0, 0.45);
 }
 .ib-card:hover .ib-check,
 .ib-card.is-selected .ib-check,
 .ib-dialog.is-selecting .ib-check { display: flex; }
 @media (pointer: coarse) { .ib-check { display: flex; } }
-.ib-check:hover { border-color: #ffd866; color: rgba(255, 255, 255, 0.85); }
-.ib-card.is-selected .ib-check { background: #ffd866; border-color: #ffd866; color: #1a1a22; }
+.ib-check:hover::before { border-color: #ffd866; }
+.ib-check:hover { color: rgba(255, 255, 255, 0.85); }
+.ib-card.is-selected .ib-check::before { background: #ffd866; border-color: #ffd866; }
+.ib-card.is-selected .ib-check { color: #1a1a22; }
 .ib-select-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
 .ib-view-toggle.is-active { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
-/* Keep the selection checkbox over the thumbnail corner, below the subpath row. */
-.ib-card.is-flat .ib-check { top: 30px; }
+/* Keep the selection checkbox over the thumbnail corner, below the subpath row.
+   25px, not 30px: the 44px hit box centres its 34px dot at +5px, so the DOT
+   still lands at 30px — one below .ib-subpath's 26px min-height plus its 4px
+   gutter, which is what this constant is really anchored to. */
+.ib-card.is-flat .ib-check { top: 25px; }
 .ib-pin-toggle.is-active { background: #52452f; color: #ffd866; border-color: #78683a; }
 /* Safe View's toolbar toggle. Deliberately NOT the blue "a mode is on" tint the
    flat/select toggles use — this one says "content is being withheld", and
