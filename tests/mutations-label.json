@@ -1,0 +1,73 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/label.test.js",
+    "tests/js/label-dom.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/label.ts",
+      "before": "/** A name split for rendering: `head` may be ellipsized, `tail` may not. */",
+      "after": "/** A name split for display: `head` may be ellipsized, `tail` may not. */"
+    },
+    {
+      "label": "INERT (must be MISSED): minTail/maxTail defaults restated as the same numbers",
+      "file": "src/label.ts",
+      "before": "export function splitTail(name: string, minTail = 8, maxTail = 14): SplitName {",
+      "after": "export function splitTail(name: string, minTail = 4 + 4, maxTail = 7 * 2): SplitName {"
+    },
+    {
+      "label": "the counter is stripped from EVERY name, merging two legacy siblings onto one label",
+      "file": "src/label.ts",
+      "before": "  if (!stem || !TIME_PREFIX_RE.test(stem)) return name;",
+      "after": "  if (!stem) return name;"
+    },
+    {
+      "label": "the counter pattern requires a trailing underscore, so kijai's _00074 survives",
+      "file": "src/label.ts",
+      "before": "const COUNTER_RE = /_\\d{2,6}_?$/;",
+      "after": "const COUNTER_RE = /_\\d{2,6}_$/;"
+    },
+    {
+      "label": "the extension is stripped too, hiding .webm-vs-.mp4 on a video card",
+      "file": "src/label.ts",
+      "before": "  return trimmed ? trimmed + suffix : name;",
+      "after": "  return trimmed ? trimmed : name;"
+    },
+    {
+      "label": "splitTail prefers no token boundary, so the tail cuts mid-word",
+      "file": "src/label.ts",
+      "before": "    if (ch === \"_\" || ch === \"-\" || ch === \"/\")\n      return { head: name.slice(0, i), tail: name.slice(i) };",
+      "after": "    if (false)\n      return { head: name.slice(0, i), tail: name.slice(i) };"
+    },
+    {
+      "label": "the tail is allowed to shrink, so a narrow card elides the identifying half",
+      "file": "src/browser.ts",
+      "before": ".ib-name-tail { flex: 0 0 auto; white-space: nowrap; }",
+      "after": ".ib-name-tail { flex: 0 1 auto; white-space: nowrap; }"
+    },
+    {
+      "label": "a query no longer renders the name verbatim, so matched characters vanish",
+      "file": "src/label.ts",
+      "before": "  if (verbatim) return { head: \"\", tail: name };\n  return splitTail(stripCounter(name));",
+      "after": "  return splitTail(stripCounter(name));"
+    },
+    {
+      "label": "a colour is set on .ib-name-head, leaking a Safe-View-hidden name inside its own spoiler block",
+      "file": "src/browser.ts",
+      "before": ".ib-name-head {\n    flex: 0 1 auto; min-width: 0;",
+      "after": ".ib-name-head {\n    color: #d8d8dc;\n    flex: 0 1 auto; min-width: 0;"
+    },
+    {
+      "label": "the sheet's title loses its wrap, so the one touch-reachable full name overflows the card",
+      "file": "src/browser.ts",
+      "before": ".ib-more-card .cmp-ov-title { overflow-wrap: anywhere; }",
+      "after": ".ib-more-card .cmp-ov-title { overflow-wrap: normal; }"
+    }
+  ]
+}
