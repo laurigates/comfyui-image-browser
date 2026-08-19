@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.30](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.29...comfyui-image-browser-v0.1.30) (2026-08-19)
+
+
+### Features
+
+* **labels:** hold the identifying tail back from the ellipsis ([#100](https://github.com/laurigates/comfyui-image-browser/issues/100)) ([7652e2b](https://github.com/laurigates/comfyui-image-browser/commit/7652e2b18a628d5f3f5f810cea3f126f025d73b6))
+
 ## [0.1.29](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.28...comfyui-image-browser-v0.1.29) (2026-08-18)
 
 
