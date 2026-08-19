@@ -137,7 +137,14 @@ function styleText() {
 
 /** Read one declaration out of one rule in the stylesheet source. */
 function cssDecl(selector, prop) {
-  const rule = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`);
+  // ANCHORED at a rule boundary. Unanchored, `.ib-actions` also matches inside
+  // the longer selector `.ib-grid[data-density="list"] .ib-card.is-file
+  // .ib-actions {`, and since that rule is emitted earlier in the sheet the
+  // helper would read ITS body and report the real rule's properties as absent
+  // — a null that looks exactly like "the declaration was deleted". Measured
+  // when the density steps were added.
+  const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rule = new RegExp(`(?:^|[}\n])\\s*${esc}\\s*\\{([^}]*)\\}`);
   const m = rule.exec(styleText());
   if (!m) throw new Error(`no rule for ${selector} in the shipped stylesheet`);
   const d = new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`).exec(m[1]);

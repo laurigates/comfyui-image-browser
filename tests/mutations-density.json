@@ -1,0 +1,96 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/density.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "// ---- Grid density ---------------------------------------------------------",
+      "after": "// ---- Grid density scale ---------------------------------------------------"
+    },
+    {
+      "label": "INERT (must be MISSED): the sync loop's variable renamed, which changes nothing",
+      "file": "src/browser.ts",
+      "before": "    for (const b of densityGroupEl.querySelectorAll(\".ib-density-seg\")) {\n      const on = (b as HTMLElement).dataset.density === state.density;\n      b.classList.toggle(\"is-active\", on);\n      b.setAttribute(\"aria-pressed\", String(on));\n    }",
+      "after": "    for (const btn of densityGroupEl.querySelectorAll(\".ib-density-seg\")) {\n      const on = (btn as HTMLElement).dataset.density === state.density;\n      btn.classList.toggle(\"is-active\", on);\n      btn.setAttribute(\"aria-pressed\", String(on));\n    }"
+    },
+    {
+      "label": "the dense step un-hides the action row, shipping sub-44px buttons on an 84px card (#90 again)",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"dense\"] .ib-actions,\n.ib-grid[data-density=\"dense\"] .ib-stars,",
+      "after": ".ib-grid[data-density=\"dense\"] .ib-stars,"
+    },
+    {
+      "label": "the dense step hides EVERY name, so folder cards become unusable",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"dense\"] .ib-card.is-file .ib-name { display: none; }",
+      "after": ".ib-grid[data-density=\"dense\"] .ib-name { display: none; }"
+    },
+    {
+      "label": "the dense checkbox keeps touch-action:none, so half the card width cannot be scrolled",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"dense\"] .ib-check { touch-action: pan-y; }",
+      "after": ".ib-grid[data-density=\"dense\"] .ib-check { touch-action: none; }"
+    },
+    {
+      "label": "the default step's checkbox is given pan-y too, silently disabling the drag-sweep everywhere",
+      "file": "src/browser.ts",
+      "before": "    touch-action: none; -webkit-tap-highlight-color: transparent;",
+      "after": "    touch-action: pan-y; -webkit-tap-highlight-color: transparent;"
+    },
+    {
+      "label": "list mode leaves the card as a column, so it is one giant image per row instead of a details row",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"list\"] .ib-card.is-file {\n    display: grid;",
+      "after": ".ib-grid[data-density=\"list\"] .ib-card.is-file {\n    display: flex;"
+    },
+    {
+      "label": "list mode drops the explicit grid-area for the post-render children, reserving an implicit row each",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"list\"] .ib-card.is-file .cmk-sv-reveal,\n.ib-grid[data-density=\"list\"] .ib-card.is-file .ib-check { grid-area: thumb; }",
+      "after": ".ib-grid[data-density=\"list\"] .ib-card.is-file .cmk-sv-reveal { grid-area: thumb; }"
+    },
+    {
+      "label": "the saved density is read without a whitelist, so a hand-edited value reaches the DOM",
+      "file": "src/browser.ts",
+      "before": "    return raw && VALID_DENSITIES.has(raw) ? (raw as GridDensity) : \"grid\";",
+      "after": "    return (raw as GridDensity) || \"grid\";"
+    },
+    {
+      "label": "the density change refetches the listing, costing a round trip for a pure re-layout",
+      "file": "src/browser.ts",
+      "before": "    // Unlike the type filter this needs NO refetch — the listing is unchanged.\n    renderGrid();",
+      "after": "    // Unlike the type filter this needs NO refetch — the listing is unchanged.\n    loadAndRender();"
+    },
+    {
+      "label": "the pill's active state is synced from renderTabs, so it goes stale until the next navigation",
+      "file": "src/browser.ts",
+      "before": "    const q = state.query;\n    syncDensitySegs();",
+      "after": "    const q = state.query;"
+    },
+    {
+      "label": "the toolbar segments drop below the family's 44px floor",
+      "file": "src/browser.ts",
+      "before": "    min-width: 44px; min-height: 44px; padding: 0;\n    font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;",
+      "after": "    min-width: 32px; min-height: 32px; padding: 0;\n    font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;"
+    },
+    {
+      "label": "the base .ib-grid rule is edited to serve the default step (the budget's premise)",
+      "file": "src/browser.ts",
+      "before": "    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));\n    gap: 10px; padding: 4px;",
+      "after": "    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));\n    gap: 10px; padding: 4px;"
+    },
+    {
+      "label": "the dense grid stretches cards to the tallest sibling in the row, so a folder row renders mostly empty boxes",
+      "file": "src/browser.ts",
+      "before": "    align-items: start;\n}\n.ib-grid[data-density=\"dense\"] .ib-actions,",
+      "after": "    align-items: stretch;\n}\n.ib-grid[data-density=\"dense\"] .ib-actions,"
+    }
+  ]
+}
