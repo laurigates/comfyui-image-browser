@@ -2114,6 +2114,37 @@ function pinsToFiles(entries) {
   return out;
 }
 
+// src/label.ts
+var COUNTER_RE = /_\d{2,6}_?$/;
+var TIME_PREFIX_RE = /^\d{6}_/;
+var EXT_RE = /\.[A-Za-z0-9]{1,5}$/;
+function stripCounter(name) {
+  const ext = EXT_RE.exec(name);
+  const suffix = ext ? ext[0] : "";
+  const stem = suffix ? name.slice(0, -suffix.length) : name;
+  if (!stem || !TIME_PREFIX_RE.test(stem))
+    return name;
+  const trimmed = stem.replace(COUNTER_RE, "");
+  return trimmed ? trimmed + suffix : name;
+}
+function splitTail(name, minTail = 8, maxTail = 14) {
+  if (name.length <= maxTail)
+    return { head: "", tail: name };
+  const from = name.length - maxTail;
+  for (let i = from;i <= name.length - minTail; i++) {
+    const ch = name[i];
+    if (ch === "_" || ch === "-" || ch === "/")
+      return { head: name.slice(0, i), tail: name.slice(i) };
+  }
+  const cut = name.length - minTail;
+  return { head: name.slice(0, cut), tail: name.slice(cut) };
+}
+function labelParts(name, verbatim) {
+  if (verbatim)
+    return { head: "", tail: name };
+  return splitTail(stripCounter(name));
+}
+
 // src/safe-tag.ts
 var TAG_URL = "/image_browser/tag";
 function hasSensitiveTag(f, keyword) {
@@ -3418,6 +3449,11 @@ function openImageBrowser() {
   }
   function renderGrid(opts) {
     const q = state.query;
+    const nameSpans = (name) => {
+      const { head, tail } = labelParts(name, !!q);
+      const tailSpan = `<span class="ib-name-tail">${escapeHTML(tail)}</span>`;
+      return head ? `<span class="ib-name-head">${escapeHTML(head)}</span>${tailSpan}` : tailSpan;
+    };
     const targetScrollTop = opts?.scrollTo ?? scroller.current();
     const safeCfg = readSafeViewConfig();
     const safeKeyword = sensitiveKeyword(safeCfg);
@@ -3441,7 +3477,7 @@ function openImageBrowser() {
         c.className = "ib-card is-dir";
         c.dataset.name = d.name;
         const dirBtns = canWrite ? `<button type="button" class="ib-dir-move" data-action="movedir" title="Move folder">⇄</button>` + `<button type="button" class="ib-dir-del" data-action="rmdir" title="Delete folder">\uD83D\uDDD1</button>` : "";
-        c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escapeHTML(d.name)}">${escapeHTML(d.name)}</div>${dirBtns}`;
+        c.innerHTML = `<div class="ib-thumb ib-thumb-icon">\uD83D\uDCC1</div><div class="ib-name" title="${escapeHTML(d.name)}">${nameSpans(d.name)}</div>${dirBtns}`;
         gridEl.appendChild(c);
         if (isSensitive({ name: d.name }, safeCfg)) {
           c.classList.add("is-safe-hidden");
@@ -3518,17 +3554,17 @@ ${when}`;
       const markBtn = canWriteThis && !missing && safeKeyword ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
       const starsRow = canWriteThis ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
       const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="${spoilNames ? "Select hidden item" : `Select ${escapeHTML(f.name)}`}">✓</button>` : "";
-      const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${escapeHTML(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${escapeHTML(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
+      const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${nameSpans(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${nameSpans(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
       c.innerHTML = missing ? `
         ${subLabel}
         <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escapeHTML(f.name)}">${escapeHTML(f.name)}</div>
+        <div class="ib-name" title="${escapeHTML(f.name)}">${nameSpans(f.name)}</div>
         <div class="ib-meta">missing</div>
         <div class="ib-actions">${pinBtn}</div>` : `
         ${subLabel}
         ${checkBtn}
         <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escapeHTML(titleText)}">${escapeHTML(f.name)}</div>
+        <div class="ib-name" title="${escapeHTML(titleText)}">${nameSpans(f.name)}</div>
         ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
         ${starsRow}
         <div class="ib-actions">${actionRowHTML([
@@ -4567,15 +4603,31 @@ var BROWSER_CSS = `
 .ib-thumb img, .ib-thumb video {
     width: 100%; height: 100%; object-fit: cover; display: block; background: #000;
 }
+/* Two spans, so the browser elides the HEAD at whatever the real track width is
+   and the TAIL — the part that identifies the file — never elides. At a wide
+   track the head does not overflow and the whole name renders unmarked. See
+   src/label.ts for why this is not a computed character budget. */
 .ib-name {
-    padding: 6px 8px; font-size: 11.5px; color: #d8d8dc; white-space: nowrap;
-    text-overflow: ellipsis; overflow: hidden;
+    padding: 6px 8px; font-size: 11.5px; color: #d8d8dc;
+    display: flex; min-width: 0; overflow: hidden;
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
+.ib-name-head {
+    flex: 0 1 auto; min-width: 0;
+    white-space: nowrap; text-overflow: ellipsis; overflow: hidden;
+}
+.ib-name-tail { flex: 0 0 auto; white-space: nowrap; }
+/* NEITHER SPAN MAY SET ITS OWN color. Safe View's spoiler paints
+   color:transparent on the CONTAINER and the spans inherit it; a colour here
+   would leak a hidden name into the clear inside its own block. An explicit
+   .cmk-sv-spoiler span rule was tried and
+   removed — the mutation table showed it changed nothing, because inheritance
+   already does the work. tests/mutations-label.json mutates a colour ONTO
+   .ib-name-head instead, which is the failure that can actually happen. */
 .ib-meta { padding: 0 8px 4px; font-size: 10.5px; color: #888; }
 /* Flat-view folder label above the thumbnail — a tap jumps to that folder. */
 .ib-subpath {
-    display: block; width: 100%; text-align: left; box-sizing: border-box;
+    display: flex; width: 100%; text-align: left; box-sizing: border-box;
     padding: 5px 8px; font-size: 10px; line-height: 1.3; min-height: 26px;
     color: #8a9bb5; background: transparent; border: 0;
     border-bottom: 1px solid #2a2a32;
@@ -4619,6 +4671,12 @@ var BROWSER_CSS = `
    otherwise still occupy the row in a browser that ignores hidden. */
 .ib-more-stash { display: none; }
 .ib-more-card { width: min(420px, calc(100% - 24px)); }
+/* The sheet's title is the one TOUCH-reachable place the untouched filename
+   appears (the card's title attribute needs a hover). The kit's .cmp-ov-title
+   sets no wrapping, and a ComfyUI output name is one unbroken token except for
+   its hyphens — so a name joined only by underscores would overflow the card
+   rather than wrap, and the full-name surface would truncate too. */
+.ib-more-card .cmp-ov-title { overflow-wrap: anywhere; }
 .ib-more-list {
     display: flex; flex-direction: column; gap: 2px; max-height: 60vh; overflow-y: auto;
     border: 1px solid #2a2a32; border-radius: 6px; padding: 4px; background: #17171e;
