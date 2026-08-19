@@ -43,6 +43,18 @@ manage without leaving ComfyUI.
   narrows the grid to one kind. It filters on the server, so in a big output
   folder "Videos" shows the newest clips rather than only the clips that happen
   to fall inside the listing limit. The choice is remembered.
+- **Resize the grid** — a segmented **⊞ / ▦ / ☰** control next to the media
+  filter. **⊞** puts four columns on a phone with the thumbnail alone, which is
+  what makes selecting a lot of files at once practical; **▦** is the default
+  card; **☰** is a one-per-row details list — thumbnail on the left, name,
+  dimensions, rating and actions beside it. Remembered **per device**, because a
+  phone and a desktop want different column counts from the same install.
+- **Readable file names.** Output names share a long prefix (`hhmmss_sampler_
+  scheduler_seed_…`) and differ at the *end*, so an ordinary end-ellipsis hides
+  the only part that identifies the file. The card holds the tail back from the
+  ellipsis and truncates the middle instead, so you see the time and the
+  descriptor rather than twenty identical prefixes. The whole name is on the
+  **⋯** sheet, and searching shows names unshaped so you can see what matched.
 - **Thumbnails** for images (WebP previews) and videos (poster frames), lazily
   loaded as you scroll. Tap a card to open the full-size file in a new tab.
 - **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab
