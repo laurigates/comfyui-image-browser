@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.31](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.30...comfyui-image-browser-v0.1.31) (2026-08-19)
+
+
+### Documentation
+
+* describe the density scale and the label shaping ([#103](https://github.com/laurigates/comfyui-image-browser/issues/103)) ([7c5c41a](https://github.com/laurigates/comfyui-image-browser/commit/7c5c41ab41d86ffeb39a0963c632c612621b8f82))
+
 ## [0.1.30](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.29...comfyui-image-browser-v0.1.30) (2026-08-19)
 
 
