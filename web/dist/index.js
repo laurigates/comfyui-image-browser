@@ -2208,6 +2208,26 @@ function saveFilter(filter) {
     localStorage.setItem(FILTER_STORAGE_KEY, filter);
   } catch {}
 }
+var DENSITY_STORAGE_KEY = "comfyui-image-browser:density";
+var VALID_DENSITIES = new Set(["dense", "grid", "list"]);
+var DENSITY_ROOT_MARGIN = {
+  dense: "150px",
+  grid: "300px",
+  list: "600px"
+};
+function loadSavedDensity() {
+  try {
+    const raw = localStorage.getItem(DENSITY_STORAGE_KEY);
+    return raw && VALID_DENSITIES.has(raw) ? raw : "grid";
+  } catch {
+    return "grid";
+  }
+}
+function saveDensity(d) {
+  try {
+    localStorage.setItem(DENSITY_STORAGE_KEY, d);
+  } catch {}
+}
 var CARD_MIN_WIDTH = 150;
 var ACTIONS_PADDING_X = 12;
 var ACTIONS_GAP = 2;
@@ -2322,7 +2342,8 @@ function openImageBrowser() {
     sortDir: "desc",
     query: "",
     viewMode: savedView.mode,
-    typeFilter: loadSavedFilter()
+    typeFilter: loadSavedFilter(),
+    density: loadSavedDensity()
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -2429,6 +2450,23 @@ function openImageBrowser() {
     filterGroupEl.appendChild(b);
   }
   filterEl.appendChild(filterGroupEl);
+  const densityGroupEl = document.createElement("div");
+  densityGroupEl.className = "ib-density-group";
+  for (const [value, glyph, title] of [
+    ["dense", "⊞", "Small cards — more per screen"],
+    ["grid", "▦", "Medium cards"],
+    ["list", "☰", "One per row, with details"]
+  ]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ib-density-seg";
+    b.dataset.density = value;
+    b.title = title;
+    b.setAttribute("aria-label", title);
+    b.textContent = glyph;
+    densityGroupEl.appendChild(b);
+  }
+  filterEl.appendChild(densityGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
   modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, scanPillEl, sortEl, refreshEl, filterEl, pinsEl);
@@ -2649,6 +2687,17 @@ function openImageBrowser() {
     state.typeFilter = next;
     saveFilter(next);
     loadAndRender();
+  });
+  filterEl.addEventListener("click", (e) => {
+    const seg = e.target.closest("[data-density]");
+    if (!seg)
+      return;
+    const next = seg.dataset.density;
+    if (next === state.density)
+      return;
+    state.density = next;
+    saveDensity(next);
+    renderGrid();
   });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
   pinToggleEl.addEventListener("click", () => void toggleFolderPinHere());
@@ -3447,8 +3496,16 @@ function openImageBrowser() {
     }
     return { kind: "icon", text: "\uD83D\uDCC4" };
   }
+  function syncDensitySegs() {
+    for (const b of densityGroupEl.querySelectorAll(".ib-density-seg")) {
+      const on = b.dataset.density === state.density;
+      b.classList.toggle("is-active", on);
+      b.setAttribute("aria-pressed", String(on));
+    }
+  }
   function renderGrid(opts) {
     const q = state.query;
+    syncDensitySegs();
     const nameSpans = (name) => {
       const { head, tail } = labelParts(name, !!q);
       const tailSpan = `<span class="ib-name-tail">${escapeHTML(tail)}</span>`;
@@ -3459,6 +3516,7 @@ function openImageBrowser() {
     const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
+    gridEl.dataset.density = state.density;
     const canWrite = SANDBOXED_TYPES2.includes(state.type);
     const flat = isFlat();
     const pinnedView = isPinnedView();
@@ -3614,7 +3672,10 @@ ${when}`;
   let disposeLazyThumbs = null;
   function installLazyThumbs(rootEl) {
     disposeLazyThumbs?.();
-    disposeLazyThumbs = installLazyMedia(rootEl, { root: scrollHost, rootMargin: "300px" });
+    disposeLazyThumbs = installLazyMedia(rootEl, {
+      root: scrollHost,
+      rootMargin: DENSITY_ROOT_MARGIN[state.density]
+    });
   }
   function reportError(summary, e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -3643,14 +3704,15 @@ ${when}`;
     const cards = fileCards();
     if (cards.length < 2)
       return 1;
-    const top = cards[0]?.offsetTop ?? 0;
-    let n = 0;
+    const byTop = new Map;
+    let widest = 1;
     for (const c of cards) {
-      if (c.offsetTop !== top)
-        break;
-      n++;
+      const n = (byTop.get(c.offsetTop) ?? 0) + 1;
+      byTop.set(c.offsetTop, n);
+      if (n > widest)
+        widest = n;
     }
-    return Math.max(1, n);
+    return widest;
   }
   function applyFocus() {
     for (const [i, c] of fileCards().entries()) {
@@ -4561,7 +4623,22 @@ var BROWSER_CSS = `
    would stretch its border across the whole toolbar instead of hugging the
    three segments. order:10 places it below the crumbs row (order:9 on phones)
    and above the pins row (order:11). */
-.ib-filter { order: 10; flex-basis: 100%; display: flex; }
+/* The type filter and the density pill share this row; space-between puts one
+   at each end. */
+.ib-filter { order: 10; flex-basis: 100%; display: flex; justify-content: space-between; gap: 8px; }
+.ib-density-group {
+    display: flex; gap: 2px; align-items: center;
+    background: #1a1a22; border: 1px solid #2a2a32; border-radius: 4px; padding: 2px;
+}
+/* 44px in both axes — the family floor, same as .ib-act and .ib-check. A
+   toolbar control is exactly as mis-tappable as a card control. */
+.ib-density-seg {
+    background: transparent; color: #8a8a92; border: 0; border-radius: 3px;
+    min-width: 44px; min-height: 44px; padding: 0;
+    font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ib-density-seg:hover { background: #2a2a36; color: #e0e0e4; }
+.ib-density-seg.is-active { background: #2f3a52; color: #9ec6ff; }
 .ib-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1; min-width: 0; }
 @media (max-width: 700px) {
     /* Narrow screens: crumbs get their own full-width toolbar row. Squeezed to
@@ -4584,6 +4661,78 @@ var BROWSER_CSS = `
     display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px; padding: 4px;
 }
+/* ---- Density steps -------------------------------------------------------
+   The rule above is the DEFAULT step and is deliberately left untouched:
+   card-actions.test.js reads its grid-template-columns back verbatim and
+   asserts the INLINE_ACTION_SLOTS arithmetic against a hardcoded 150px card.
+   Everything below is additive and scoped to an attribute. */
+
+/* DENSE — thumb and checkbox only. The action row is not shrunk, it is REMOVED:
+   floor((84 - 12 + 2) / (44 + 2)) = 1, i.e. a card whose only control would be
+   the ⋯ that costs a slot itself. Per-item actions at this step go through the
+   checkbox into the batch bar, or through the lightbox. Hiding the row is also
+   what keeps INLINE_ACTION_SLOTS a constant — a test asserts these are display:
+   none so a future edit that un-hides them at 84px trips rather than shipping
+   sub-44px destructive buttons (#90 again). */
+.ib-grid[data-density="dense"] {
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 6px;
+    /* Cards take their natural height. Without this a file card sharing a row
+       with a (two-column, still-named) folder card is stretched to the folder's
+       height — measured at 209px against the 87px the thumb actually needs, so
+       the first row rendered as mostly empty boxes. */
+    align-items: start;
+}
+.ib-grid[data-density="dense"] .ib-actions,
+.ib-grid[data-density="dense"] .ib-stars,
+.ib-grid[data-density="dense"] .ib-meta,
+.ib-grid[data-density="dense"] .ib-card.is-file .ib-name { display: none; }
+/* A FOLDER keeps its name and spans two columns. Directories are half of the
+   truncation complaint this density scale sits next to, and a nameless folder
+   is not a smaller folder card, it is an unusable one. */
+.ib-grid[data-density="dense"] .ib-card.is-dir { grid-column: span 2; }
+/* Vertical scroll must survive a finger that starts on a checkbox. .ib-check is
+   touch-action:none so a drag sweeps a range, and at 44px on an ~84px tile that
+   is half the card width — scoped to this step, so the default is untouched.
+   pan-y gives the browser the vertical axis back; a horizontal-first drag still
+   sweeps, which is the natural direction across a grid row. */
+.ib-grid[data-density="dense"] .ib-check { touch-action: pan-y; }
+
+/* LIST — one ITEM per row, not one image. A single-column grid of the DEFAULT
+   card would be a ~390px-tall square showing one file, which openFull already
+   does better; the point of the step is the details beside the thumb. Pure CSS
+   over the existing markup, so there is no second card template to keep in
+   sync. */
+.ib-grid[data-density="list"] { grid-template-columns: 1fr; }
+.ib-grid[data-density="list"] .ib-card.is-file {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-areas:
+        "sub   sub"
+        "thumb name"
+        "thumb meta"
+        "thumb stars"
+        "thumb acts";
+    align-items: start;
+    column-gap: 8px;
+}
+.ib-grid[data-density="list"] .ib-card.is-file .ib-subpath { grid-area: sub; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-thumb { grid-area: thumb; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-name { grid-area: name; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-meta { grid-area: meta; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-stars { grid-area: stars; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-actions { grid-area: acts; }
+/* Two children are appended AFTER the template and would otherwise auto-place
+   into a new implicit row: the reveal button applySafeView adds, and the
+   selection checkbox. Both are absolutely positioned over the thumb, which
+   works because .ib-card is already position:relative — the explicit grid-area
+   is what stops the grid reserving a row for them. */
+.ib-grid[data-density="list"] .ib-card.is-file .cmk-sv-reveal,
+.ib-grid[data-density="list"] .ib-card.is-file .ib-check { grid-area: thumb; }
+/* The row is far wider than 150px, so the name has room to wrap rather than
+   elide — the one place the two-span split is not needed. */
+.ib-grid[data-density="list"] .ib-name { display: block; white-space: normal; }
+.ib-grid[data-density="list"] .ib-name-head { white-space: normal; overflow: visible; }
 .ib-card {
     background: #21212a; border: 1px solid #2a2a32; border-radius: 6px; overflow: hidden;
     cursor: pointer; display: flex; flex-direction: column;

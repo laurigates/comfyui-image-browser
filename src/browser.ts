@@ -118,6 +118,7 @@ interface BrowserState {
   query: string;
   viewMode: ViewMode;
   typeFilter: TypeFilter;
+  density: GridDensity;
 }
 
 interface SavedSort {
@@ -187,6 +188,69 @@ function loadSavedFilter(): TypeFilter {
 function saveFilter(filter: TypeFilter): void {
   try {
     localStorage.setItem(FILTER_STORAGE_KEY, filter);
+  } catch {
+    /* private-mode / disabled storage — non-fatal */
+  }
+}
+
+// ---- Grid density ---------------------------------------------------------
+//
+// Three steps, applied as `data-density` on the grid so the CSS can key off it.
+//
+// THE DEFAULT STEP DELIBERATELY REUSES THE UNTOUCHED BASE `.ib-grid` RULE. The
+// stylesheet's `repeat(auto-fill, minmax(150px, 1fr))` is read back verbatim by
+// tests/js/card-actions.test.js, which also asserts the INLINE_ACTION_SLOTS
+// arithmetic two-sided against a hardcoded 150. Leaving "grid" on the base rule
+// means none of that has to be reworked, and CARD_MIN_WIDTH stays a true
+// statement about every card that renders an action row — because "dense" is the
+// only step that changes the track, and it renders no action row at all.
+//
+//   dense  84px track / 6px gap   4 columns at 390px   thumb + checkbox only
+//   grid   the base rule          2 columns at 390px   today's card, unchanged
+//   list   1fr                    one ITEM per row     64px thumb, details beside
+//
+// 84 at a 6px gap is the computed pair, not a round number: 4x84 + 3x6 = 354,
+// inside the 382px of grid content a 390px viewport leaves, with slack for a
+// 375px SE. (88px at the existing 10px gap is 382 exactly — zero slack, and it
+// drops to three columns on the smaller phone.)
+export type GridDensity = "dense" | "grid" | "list";
+const DENSITY_STORAGE_KEY = "comfyui-image-browser:density";
+const VALID_DENSITIES = new Set<string>(["dense", "grid", "list"]);
+
+// Per-density lazy-load lookahead. Dense puts ~4x the cards in one viewport, so
+// the fixed 300px would queue four times the requests ahead of the fold; list
+// puts one item per row, so it needs more.
+const DENSITY_ROOT_MARGIN: Record<GridDensity, string> = {
+  dense: "150px",
+  grid: "300px",
+  list: "600px",
+};
+
+/**
+ * Read the saved density.
+ *
+ * Whitelisted on read and try/catch'd on both sides, exactly like
+ * loadSavedFilter above — a stale or hand-edited value falls back to the
+ * default rather than reaching the DOM as an unknown attribute.
+ *
+ * PER-DEVICE ON PURPOSE, and this is the one preference where that is a feature
+ * rather than a limitation: a phone and a desktop want different column counts
+ * from the same install. Do not read the comment at the pins migration below
+ * ("localStorage cannot span a phone and a desktop") as an argument to move this
+ * server-side — for pins that span IS the point, and here it is the opposite.
+ */
+function loadSavedDensity(): GridDensity {
+  try {
+    const raw = localStorage.getItem(DENSITY_STORAGE_KEY);
+    return raw && VALID_DENSITIES.has(raw) ? (raw as GridDensity) : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+function saveDensity(d: GridDensity): void {
+  try {
+    localStorage.setItem(DENSITY_STORAGE_KEY, d);
   } catch {
     /* private-mode / disabled storage — non-fatal */
   }
@@ -418,6 +482,7 @@ export function openImageBrowser(): ModalShellController {
     query: "",
     viewMode: savedView.mode,
     typeFilter: loadSavedFilter(),
+    density: loadSavedDensity(),
   };
   const savedSort = loadSavedSort();
   if (savedSort) {
@@ -610,6 +675,35 @@ export function openImageBrowser(): ModalShellController {
     filterGroupEl.appendChild(b);
   }
   filterEl.appendChild(filterGroupEl);
+
+  // Grid density — a second pill on the SAME full-width row as the type filter,
+  // pushed to its far end. Deliberately not a new toolbar row: at a phone width
+  // the toolbar already wraps to three rows (four with pins), and it leaves the
+  // grid ~264px of an 844px viewport — less than one card's height. A fourth row
+  // would spend the thing this control exists to give back.
+  //
+  // A 3-segment control rather than a slider or a pinch: pinch races the grid's
+  // own pointerdown/move/up (drag-select) and long-press, and has no state
+  // readout; a slider makes the card width a real number, so INLINE_ACTION_SLOTS
+  // would have to be recomputed per width and the 44px floor would hold only at
+  // some of them. Three discrete steps keep the budget a constant.
+  const densityGroupEl = document.createElement("div");
+  densityGroupEl.className = "ib-density-group";
+  for (const [value, glyph, title] of [
+    ["dense", "\u229E", "Small cards — more per screen"],
+    ["grid", "\u25A6", "Medium cards"],
+    ["list", "\u2630", "One per row, with details"],
+  ] as [GridDensity, string, string][]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ib-density-seg";
+    b.dataset.density = value;
+    b.title = title;
+    b.setAttribute("aria-label", title);
+    b.textContent = glyph;
+    densityGroupEl.appendChild(b);
+  }
+  filterEl.appendChild(densityGroupEl);
 
   // One-tap navigation chips for the pinned folders; hidden while empty.
   const pinsEl = document.createElement("div");
@@ -1048,6 +1142,21 @@ export function openImageBrowser(): ModalShellController {
     // No SANDBOXED_TYPES guard, unlike the flat toggle above: the filter is
     // valid on the browse…/path tab too.
     loadAndRender();
+  });
+  filterEl.addEventListener("click", (e) => {
+    const seg = (e.target as HTMLElement).closest("[data-density]") as HTMLElement | null;
+    if (!seg) return;
+    const next = seg.dataset.density as GridDensity;
+    if (next === state.density) return;
+    state.density = next;
+    saveDensity(next);
+    // renderGrid(), never a bare attribute flip on the live grid: the lazy-thumb
+    // IntersectionObserver is disposed and reinstalled as the last statement of
+    // renderGrid, and a CSS-only change would strand it computing against the
+    // old layout with the old rootMargin. renderGrid with no argument also
+    // captures and restores the live scroll offset, so the view stays put.
+    // Unlike the type filter this needs NO refetch — the listing is unchanged.
+    renderGrid();
   });
   selectToggleEl.addEventListener("click", () => setSelectMode(!selectMode));
   pinToggleEl.addEventListener("click", () => void toggleFolderPinHere());
@@ -2186,8 +2295,28 @@ export function openImageBrowser(): ModalShellController {
     return { kind: "icon", text: "📄" };
   }
 
+  /**
+   * Paint the density pill's active segment.
+   *
+   * Called from renderGrid rather than renderTabs, and that is the whole point:
+   * renderTabs runs only on a LOAD, while a density change deliberately does
+   * not refetch — so a sync living there would leave the pill showing the
+   * previous step until the next navigation.
+   *
+   * aria-pressed alongside the class: this is a mode control, so the state has
+   * to reach an assistive reader and not only the stylesheet.
+   */
+  function syncDensitySegs(): void {
+    for (const b of densityGroupEl.querySelectorAll(".ib-density-seg")) {
+      const on = (b as HTMLElement).dataset.density === state.density;
+      b.classList.toggle("is-active", on);
+      b.setAttribute("aria-pressed", String(on));
+    }
+  }
+
   function renderGrid(opts?: { scrollTo?: number }): void {
     const q = state.query;
+    syncDensitySegs();
     /**
      * One card label as head + tail spans.
      *
@@ -2224,6 +2353,9 @@ export function openImageBrowser(): ModalShellController {
     const safeKeyword = sensitiveKeyword(safeCfg);
     renderSafeToggle(safeCfg);
     gridEl.innerHTML = "";
+    // The step the CSS keys off. Set on every pass rather than only on change,
+    // so a grid rebuilt for any reason cannot come back at the wrong density.
+    gridEl.dataset.density = state.density;
     // LOCATION-level write flag — it governs the ".." / folder cards, which
     // belong to the directory being shown. Per-CARD controls must NOT use it:
     // in the pinned view state.type is "pinned" (not a sandboxed root) while
@@ -2527,7 +2659,12 @@ export function openImageBrowser(): ModalShellController {
 
   function installLazyThumbs(rootEl: HTMLElement): void {
     disposeLazyThumbs?.();
-    disposeLazyThumbs = installLazyMedia(rootEl, { root: scrollHost, rootMargin: "300px" });
+    // The root MUST stay scrollHost — see the hard rule in CLAUDE.md. Only the
+    // lookahead varies with density.
+    disposeLazyThumbs = installLazyMedia(rootEl, {
+      root: scrollHost,
+      rootMargin: DENSITY_ROOT_MARGIN[state.density],
+    });
   }
 
   function reportError(summary: string, e: unknown): void {
@@ -2567,13 +2704,22 @@ export function openImageBrowser(): ModalShellController {
   function gridColumns(): number {
     const cards = fileCards();
     if (cards.length < 2) return 1;
-    const top = cards[0]?.offsetTop ?? 0;
-    let n = 0;
+    // The WIDEST row, not the first one. A listing renders DIRECTORY cards
+    // before file cards, so the first row of file cards is a partial row
+    // whenever the folder has subfolders — measured in the e2e fixture, whose
+    // three directory cards leave exactly one file in the first file row of a
+    // two-column grid. Reading that row made gridColumns() return 1, so j/k
+    // stepped by one card and behaved identically to l/h. The last row is
+    // partial for the same reason, which is why this takes a maximum rather
+    // than a mode.
+    const byTop = new Map<number, number>();
+    let widest = 1;
     for (const c of cards) {
-      if (c.offsetTop !== top) break;
-      n++;
+      const n = (byTop.get(c.offsetTop) ?? 0) + 1;
+      byTop.set(c.offsetTop, n);
+      if (n > widest) widest = n;
     }
-    return Math.max(1, n);
+    return widest;
   }
 
   function applyFocus(): void {
@@ -3647,7 +3793,22 @@ const BROWSER_CSS = `
    would stretch its border across the whole toolbar instead of hugging the
    three segments. order:10 places it below the crumbs row (order:9 on phones)
    and above the pins row (order:11). */
-.ib-filter { order: 10; flex-basis: 100%; display: flex; }
+/* The type filter and the density pill share this row; space-between puts one
+   at each end. */
+.ib-filter { order: 10; flex-basis: 100%; display: flex; justify-content: space-between; gap: 8px; }
+.ib-density-group {
+    display: flex; gap: 2px; align-items: center;
+    background: #1a1a22; border: 1px solid #2a2a32; border-radius: 4px; padding: 2px;
+}
+/* 44px in both axes — the family floor, same as .ib-act and .ib-check. A
+   toolbar control is exactly as mis-tappable as a card control. */
+.ib-density-seg {
+    background: transparent; color: #8a8a92; border: 0; border-radius: 3px;
+    min-width: 44px; min-height: 44px; padding: 0;
+    font-size: 15px; line-height: 1; cursor: pointer; font-family: inherit;
+}
+.ib-density-seg:hover { background: #2a2a36; color: #e0e0e4; }
+.ib-density-seg.is-active { background: #2f3a52; color: #9ec6ff; }
 .ib-crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1; min-width: 0; }
 @media (max-width: 700px) {
     /* Narrow screens: crumbs get their own full-width toolbar row. Squeezed to
@@ -3670,6 +3831,78 @@ const BROWSER_CSS = `
     display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px; padding: 4px;
 }
+/* ---- Density steps -------------------------------------------------------
+   The rule above is the DEFAULT step and is deliberately left untouched:
+   card-actions.test.js reads its grid-template-columns back verbatim and
+   asserts the INLINE_ACTION_SLOTS arithmetic against a hardcoded 150px card.
+   Everything below is additive and scoped to an attribute. */
+
+/* DENSE — thumb and checkbox only. The action row is not shrunk, it is REMOVED:
+   floor((84 - 12 + 2) / (44 + 2)) = 1, i.e. a card whose only control would be
+   the ⋯ that costs a slot itself. Per-item actions at this step go through the
+   checkbox into the batch bar, or through the lightbox. Hiding the row is also
+   what keeps INLINE_ACTION_SLOTS a constant — a test asserts these are display:
+   none so a future edit that un-hides them at 84px trips rather than shipping
+   sub-44px destructive buttons (#90 again). */
+.ib-grid[data-density="dense"] {
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 6px;
+    /* Cards take their natural height. Without this a file card sharing a row
+       with a (two-column, still-named) folder card is stretched to the folder's
+       height — measured at 209px against the 87px the thumb actually needs, so
+       the first row rendered as mostly empty boxes. */
+    align-items: start;
+}
+.ib-grid[data-density="dense"] .ib-actions,
+.ib-grid[data-density="dense"] .ib-stars,
+.ib-grid[data-density="dense"] .ib-meta,
+.ib-grid[data-density="dense"] .ib-card.is-file .ib-name { display: none; }
+/* A FOLDER keeps its name and spans two columns. Directories are half of the
+   truncation complaint this density scale sits next to, and a nameless folder
+   is not a smaller folder card, it is an unusable one. */
+.ib-grid[data-density="dense"] .ib-card.is-dir { grid-column: span 2; }
+/* Vertical scroll must survive a finger that starts on a checkbox. .ib-check is
+   touch-action:none so a drag sweeps a range, and at 44px on an ~84px tile that
+   is half the card width — scoped to this step, so the default is untouched.
+   pan-y gives the browser the vertical axis back; a horizontal-first drag still
+   sweeps, which is the natural direction across a grid row. */
+.ib-grid[data-density="dense"] .ib-check { touch-action: pan-y; }
+
+/* LIST — one ITEM per row, not one image. A single-column grid of the DEFAULT
+   card would be a ~390px-tall square showing one file, which openFull already
+   does better; the point of the step is the details beside the thumb. Pure CSS
+   over the existing markup, so there is no second card template to keep in
+   sync. */
+.ib-grid[data-density="list"] { grid-template-columns: 1fr; }
+.ib-grid[data-density="list"] .ib-card.is-file {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-areas:
+        "sub   sub"
+        "thumb name"
+        "thumb meta"
+        "thumb stars"
+        "thumb acts";
+    align-items: start;
+    column-gap: 8px;
+}
+.ib-grid[data-density="list"] .ib-card.is-file .ib-subpath { grid-area: sub; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-thumb { grid-area: thumb; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-name { grid-area: name; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-meta { grid-area: meta; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-stars { grid-area: stars; }
+.ib-grid[data-density="list"] .ib-card.is-file .ib-actions { grid-area: acts; }
+/* Two children are appended AFTER the template and would otherwise auto-place
+   into a new implicit row: the reveal button applySafeView adds, and the
+   selection checkbox. Both are absolutely positioned over the thumb, which
+   works because .ib-card is already position:relative — the explicit grid-area
+   is what stops the grid reserving a row for them. */
+.ib-grid[data-density="list"] .ib-card.is-file .cmk-sv-reveal,
+.ib-grid[data-density="list"] .ib-card.is-file .ib-check { grid-area: thumb; }
+/* The row is far wider than 150px, so the name has room to wrap rather than
+   elide — the one place the two-span split is not needed. */
+.ib-grid[data-density="list"] .ib-name { display: block; white-space: normal; }
+.ib-grid[data-density="list"] .ib-name-head { white-space: normal; overflow: visible; }
 .ib-card {
     background: #21212a; border: 1px solid #2a2a32; border-radius: 6px; overflow: hidden;
     cursor: pointer; display: flex; flex-direction: column;
