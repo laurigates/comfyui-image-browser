@@ -391,6 +391,17 @@ class TestPinsEndpoints:
 
     def _post(self, body):
         class _Req:
+            # A valid same-origin JSON header set, so this suite exercises the
+            # mutation guard's POSITIVE arm rather than routing around it — see
+            # VALID_POST_HEADERS in tests/test_helpers.py. The negative arms are
+            # in tests/test_guard.py.
+            headers = {  # noqa: RUF012 - a plain per-request header mapping
+                "Content-Type": "application/json",
+                "Sec-Fetch-Site": "same-origin",
+                "Origin": "http://127.0.0.1:8188",
+                "Host": "127.0.0.1:8188",
+            }
+
             async def json(self):
                 return body
 

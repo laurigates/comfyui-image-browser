@@ -130,11 +130,31 @@ class TestCountDirContents:
         assert ib._count_dir_contents(str(inner)) == (0, 1)
 
 
-class _FakeRequest:
-    """Minimal stand-in for aiohttp.web.Request — /rmdir only reads .json()."""
+# The header set a real same-origin POST from the served frontend carries.
+# Deliberately the DEFAULT for _FakeRequest below, which makes every existing
+# endpoint test in this file the mutation guard's POSITIVE arm: a guard
+# hard-wired to deny (the failure mode a "no header -> 403" suite cannot see,
+# and which would break the whole pack) turns this file red wholesale. The
+# negative arms — each header wrong, one at a time — live in tests/test_guard.py
+# so they sit next to the enumeration that proves the guard is applied.
+VALID_POST_HEADERS = {
+    "Content-Type": "application/json",
+    "Sec-Fetch-Site": "same-origin",
+    "Origin": "http://127.0.0.1:8188",
+    "Host": "127.0.0.1:8188",
+}
 
-    def __init__(self, body):
+
+class _FakeRequest:
+    """Minimal stand-in for aiohttp.web.Request — POST handlers read .json().
+
+    Since the mutation guard was added they also read .headers, so this carries
+    a valid same-origin JSON header set unless a test overrides it.
+    """
+
+    def __init__(self, body, headers=None):
         self._body = body
+        self.headers = dict(VALID_POST_HEADERS if headers is None else headers)
 
     async def json(self):
         return self._body

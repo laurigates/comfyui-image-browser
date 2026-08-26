@@ -1,0 +1,54 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/path-reads.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "  // Tooltip for an icon tile that stands in for media the browser cannot show,",
+      "after": "  // Tooltip for an icon tile standing in for media the browser cannot show,"
+    },
+    {
+      "label": "the locked tile is dropped, so a type=path video mounts a <video> whose source 403s (the silent failure)",
+      "file": "src/browser.ts",
+      "before": "      if (type === \"path\" && !pathReadsAllowed()) {\n        return { kind: \"icon\", text: \"🔒\", title: PATH_READS_DISABLED_MSG };",
+      "after": "      if (false) {\n        return { kind: \"icon\", text: \"🔒\", title: PATH_READS_DISABLED_MSG };"
+    },
+    {
+      "label": "INERT locked tile: EVERY video card is locked, so sandboxed-root previews break too",
+      "file": "src/browser.ts",
+      "before": "      if (type === \"path\" && !pathReadsAllowed()) {",
+      "after": "      if (true) {"
+    },
+    {
+      "label": "the locked tile loses its title, leaving a mute glyph the user cannot act on",
+      "file": "src/browser.ts",
+      "before": "        return { kind: \"icon\", text: \"🔒\", title: PATH_READS_DISABLED_MSG };",
+      "after": "        return { kind: \"icon\", text: \"🔒\" };"
+    },
+    {
+      "label": "openFull stops checking the opt-in, so it opens a tab onto a 403 JSON body",
+      "file": "src/browser.ts",
+      "before": "    if (fileType(f) === \"path\" && !pathReadsAllowed()) {",
+      "after": "    if (false) {"
+    },
+    {
+      "label": "pathReadsAllowed widens to truthiness, so an older backend's ABSENT key stops reading as off",
+      "file": "src/api.ts",
+      "before": "  return BASE_PATHS?.allow_path_reads === true;",
+      "after": "  return BASE_PATHS?.allow_path_reads !== false;"
+    },
+    {
+      "label": "the message stops naming the settings path (the refusal becomes unactionable)",
+      "file": "src/api.ts",
+      "before": "  \"Reading files by absolute path is off. Turn on Settings \\u2192 Touch Tools \\u2192 \" +",
+      "after": "  \"Reading files by absolute path is off. \" +"
+    }
+  ]
+}

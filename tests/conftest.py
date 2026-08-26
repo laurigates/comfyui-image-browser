@@ -58,18 +58,26 @@ _server = _ensure_stub("server")
 class _NoopRoutes:
     """Decorator-shaped no-op for @PromptServer.instance.routes.{get,post}(path).
 
-    Records registered (method, path) pairs so tests can assert a route is
-    wired without invoking the handler against a real aiohttp Request — the
-    stubbed server has no real routes table to introspect.
+    Records registered (method, path, handler) triples so tests can assert a
+    route is wired without invoking the handler against a real aiohttp Request
+    — the stubbed server has no real routes table to introspect.
+
+    The append is INSIDE ``deco``, deliberately. It used to sit in
+    ``_register``, which runs when the decorator FACTORY is called — i.e.
+    before the decorated function exists — so the recorded row could only ever
+    carry (method, path) and the handler was discarded. That made
+    ``tests/test_guard.py``'s enumeration ("every registered POST carries the
+    mutation guard") unwritable: there was nothing to inspect. Recording inside
+    ``deco`` records the object the route table would actually hold, which for
+    a guarded endpoint is the wrapper, not the bare handler.
     """
 
     def __init__(self):
         self.registered: list[SimpleNamespace] = []
 
     def _register(self, method, path):
-        self.registered.append(SimpleNamespace(method=method, path=path))
-
         def deco(fn):
+            self.registered.append(SimpleNamespace(method=method, path=path, handler=fn))
             return fn
 
         return deco

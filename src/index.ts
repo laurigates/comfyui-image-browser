@@ -110,6 +110,32 @@ app.registerExtension({
     {
       // FROZEN id; distinct third category element; explicit sortOrder — see
       // the note on ImageBrowser.SidebarStars above.
+      //
+      // This one is a SECURITY setting, and its default is the whole point.
+      // /image_browser/file streams raw bytes from any absolute host path, and
+      // ComfyUI ships no authentication — so off by default makes that reach a
+      // choice the machine's owner makes deliberately, rather than a capability
+      // every install exposes whether or not anyone browses by path. The
+      // backend reads this id back out of the user's own settings on every
+      // request and trusts nothing the caller sends; see image_browser.py's
+      // module docstring, section 2.
+      //
+      // Off, type=path video previews and full-size opens do not work, and the
+      // grid says so on the card rather than mounting a <video> that fails
+      // silently. Thumbnails, listings and metadata on the browse… tab are
+      // unaffected: none of them returns a file's bytes.
+      id: "ImageBrowser.AllowAbsolutePathReads",
+      category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
+      sortOrder: 80,
+      name: "Allow absolute-path file reads",
+      tooltip:
+        "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. Images still get thumbnails and metadata on the browse… tab either way.",
+      type: "boolean",
+      defaultValue: false,
+    },
+    {
+      // FROZEN id; distinct third category element; explicit sortOrder — see
+      // the note on ImageBrowser.SidebarStars above.
       id: "ImageBrowser.LightboxActions",
       category: ["Touch Tools", "Image Browser", "Lightbox actions"],
       sortOrder: 90,

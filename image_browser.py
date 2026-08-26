@@ -15,7 +15,7 @@ Endpoint surface (all under /image_browser/):
     GET  /list?type=&subfolder=&path=&…     directory listing (dirs + files)
     GET  /thumb?path= | ?type=&subfolder=&name=   cached WebP thumbnail
     GET  /metadata?path= | ?type=&subfolder=&name=  embedded generation metadata
-    GET  /file?path=                        stream a file at an absolute path
+    GET  /file?path=                        stream a file at an absolute path (OPT-IN)
     POST /delete       {type, subfolder, name}                      delete a file
     POST /delete_many  {items:[{type,subfolder,name}, …]}           batch delete
     POST /rename       {type, subfolder, name, new_name}            rename in place
@@ -29,21 +29,77 @@ Endpoint surface (all under /image_browser/):
     GET  /pins                                    pinned folders + media, resolved
     POST /pins         {op:add|remove|prune, item?}                 one pin delta
 
-Security posture:
+Threat model and security posture
+=================================
 
-  * Reads (list/thumb/file) accept the sandboxed types (input/output/temp) AND
-    arbitrary absolute paths (``type=path``) — the same reach as gallery-loader.
-    Arbitrary-path reads are gated on the extension whitelist below.
-  * Writes (delete/rename/move/rating) are restricted to the **sandboxed**
-    roots (input/output/temp) only — ``type=path`` is rejected. Every write also
-    re-asserts a bare (traversal-free) filename, the extension whitelist, and
-    containment within the resolved root. Arbitrary-path mutation is out of
-    scope for v1 by design.
+ComfyUI serves this pack's endpoints from its own single HTTP server, which
+ships **no authentication**. The realistic attacker is therefore not someone
+who has already reached the port — it is a **web page in the user's browser**
+that has not. Every gate below is written against that attacker.
+
+1. Cross-origin writes (the CSRF class).
+   ``aiohttp``'s server-side ``BaseRequest.json()`` is literally
+   ``body = await self.text(); return loads(body)`` — it never inspects
+   ``Content-Type``. So a page on any origin could reach every POST handler
+   here with a plain ``<form enctype="text/plain">``, which is a CORS-*simple*
+   request and is sent with **no preflight**. Verified by execution against
+   aiohttp 3.11.13: a JSON body was accepted under ``text/plain``,
+   ``multipart/form-data`` and ``application/x-www-form-urlencoded`` alike.
+
+   Both mutation gates live in ``_guard_mutation`` and are applied to **every**
+   POST route in this file, immediately below its ``@routes.post`` line so the
+   wrapper is what gets registered:
+
+     * ``Content-Type: application/json`` is REQUIRED (415 otherwise). A form
+       cannot set that header, so the endpoints stop being CORS-simple and a
+       cross-origin call now needs a preflight the server never grants.
+     * The request must not be cross-site: ``Sec-Fetch-Site: cross-site`` is
+       refused, and when that browser-set header is absent an ``Origin`` whose
+       host differs from ``Host`` is refused (403).
+
+   Deliberately NOT a CSRF token. Per Fetch, ``Origin`` is sent on every
+   non-GET/HEAD request, so a browser cannot reach these handlers without one
+   of the two headers above; a token would buy no additional browser defence
+   while forking the shared rating helper and breaking any cached bundle.
+   A request carrying neither header (curl, a script, ComfyUI's own API
+   clients) is allowed through: this is a browser-CSRF gate, not authentication.
+
+2. Arbitrary file reads.
+   ``GET /file`` streams raw bytes from an absolute host path. That reach is
+   **off by default** and only exists when the user switches on the ComfyUI
+   setting ``ImageBrowser.AllowAbsolutePathReads`` (Settings -> Touch Tools ->
+   Image Browser). The setting is read server-side from the user's own
+   ``comfy.settings.json`` through ComfyUI's user manager — it can not be
+   turned on by a request parameter or a header. Off, ``/file`` answers 403
+   before it touches the filesystem, so it is not even an existence oracle.
+
+   ``/list``, ``/thumb`` and ``/metadata`` still accept ``type=path``: that is
+   the pack's declared feature (browse any folder), and none of them returns a
+   file's bytes — ``/thumb`` re-encodes to a bounded WebP, ``/metadata``
+   returns parsed fields, ``/list`` returns names and sizes. ``/file`` is the
+   only endpoint that hands back the file itself, which is why it is the one
+   behind a switch.
+
+3. Path traversal and symlink escape on the mutation path.
+   Writes (delete/rename/move/move_dir/rmdir/mkdir/rating/tag) are restricted
+   to the sandboxed roots (input/output/temp); ``type=path`` is rejected. Each
+   re-asserts a bare traversal-free filename, the extension whitelist, and
+   **two independent containment checks**: the lexical one (which rejects
+   ``..`` before any syscall) and a ``realpath`` one (which rejects a target
+   that resolves outside its base through a symlink). The realpath gate is on
+   the MUTATION resolvers only — a symlinked output subfolder is a supported
+   layout and must keep listing.
+
+4. Unbounded destructive work.
+   Batch mutations are capped (``MAX_MUTATION_BATCH``) and a recursive folder
+   delete is refused above ``MAX_RMDIR_ENTRIES``, counted with an early exit so
+   a pathological tree cannot stall the event loop before the cap can refuse.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import mimetypes
 import os
@@ -81,6 +137,30 @@ VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg"}
 STREAMABLE_EXTS = IMG_EXTS | VIDEO_EXTS
 
 SANDBOXED_TYPES = ("input", "output", "temp")
+
+# The ComfyUI setting that opts INTO arbitrary absolute-path byte reads through
+# GET /file. Registered by the frontend (src/index.ts) with defaultValue false
+# and read back server-side; see the module docstring, section 2. The id is
+# FROZEN — persistence is keyed on it end to end, so renaming it would silently
+# reset the user's choice back to the safe default (which is at least the safe
+# direction, but it would look like the switch stopped working).
+SETTING_ALLOW_PATH_READS = "ImageBrowser.AllowAbsolutePathReads"
+
+# Upper bound on the items a batch MUTATION (delete_many / move_many) may carry.
+# The read-side batches were already capped (MAX_WARM_BATCH=64,
+# MAX_RATING_BATCH=200); until this existed a single request could hand the
+# server an unbounded list of files to delete. Same value as the rating cap:
+# large enough for "select the whole page and bin it", small enough that one
+# request cannot walk a library.
+MAX_MUTATION_BATCH = 200
+
+# Upper bound on the entries a RECURSIVE folder delete may destroy in one call.
+# Above it /rmdir refuses with 413 rather than rmtree-ing the subtree, so the
+# unbounded-destruction primitive has a ceiling. Counted through
+# `_count_dir_contents(..., limit=...)`, which short-circuits at the cap — an
+# uncapped os.walk of a pathological tree would stall the event loop BEFORE the
+# cap could refuse, which would defeat the point of having one.
+MAX_RMDIR_ENTRIES = 10_000
 
 # Upper bound on files a recursive ("flat") listing RETURNS. The walk itself
 # always covers the whole subtree (see FLAT_WALK_CAP) and the cap is applied
@@ -389,6 +469,37 @@ def _is_bare_name(name: Any) -> bool:
     )
 
 
+def _contained_after_realpath(target: str, base: str) -> bool:
+    """Second, INDEPENDENT containment check for a mutation target.
+
+    The lexical ``commonpath`` check every caller already runs rejects ``..``
+    before any syscall, which is the cheap gate and stays. This one resolves
+    symlinks and answers the question the lexical check structurally cannot:
+    does ``target`` still land inside ``base`` once the filesystem has had its
+    say? An entry inside the sandbox that links out (``output/evil -> /etc``)
+    is lexically contained and really is not.
+
+    ``base`` is resolved too, so a symlinked SUBFOLDER the user navigated into
+    (``output/renders -> /mnt/nas/renders``, the layout this workspace uses)
+    still passes: both sides resolve into the same real tree. That is why this
+    lives on the mutation resolvers and NOT in ``_resolve_listing_base``, which
+    /list, /thumb, /metadata and pin resolution all share — putting it there
+    would stop such a folder listing at all.
+
+    A target that does not exist yet (mkdir, a rename destination) resolves
+    through its existing parent chain, which is exactly the containment
+    question worth asking about it.
+    """
+    try:
+        real_base = os.path.realpath(base)
+        real_target = os.path.realpath(target)
+        return os.path.commonpath([real_target, real_base]) == real_base
+    except ValueError:
+        # commonpath raises on paths with no common prefix at all (different
+        # drives on Windows). No common prefix is not containment.
+        return False
+
+
 def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[str | None, str]:
     """Resolve a mutation target to an absolute path inside a sandboxed root.
 
@@ -407,6 +518,8 @@ def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[
     assert base is not None
     target = os.path.abspath(os.path.join(base, name))
     if os.path.commonpath([target, base]) != base:
+        return None, "name escapes root"
+    if not _contained_after_realpath(target, base):
         return None, "name escapes root"
     return target, ""
 
@@ -430,20 +543,32 @@ def _resolve_sandboxed_dir(type_name: str, subfolder: str, name: str) -> tuple[s
     target = os.path.abspath(os.path.join(base, name))
     if os.path.commonpath([target, base]) != base:
         return None, "name escapes root"
+    if not _contained_after_realpath(target, base):
+        return None, "name escapes root"
     return target, ""
 
 
-def _count_dir_contents(target: str) -> tuple[int, int]:
+def _count_dir_contents(target: str, limit: int | None = None) -> tuple[int, int]:
     """Return (files, dirs) nested anywhere under ``target`` (target excluded).
 
     Symlinks are not followed, so a link inside the tree counts as one file
     and its destination is never traversed.
+
+    With ``limit`` set the walk SHORT-CIRCUITS as soon as the running total
+    passes it, and the returned counts are then a lower bound whose sum is
+    already ``> limit`` — enough to refuse, and no longer exact. That early
+    exit is the point: this is a synchronous os.walk on the event loop, called
+    before /rmdir decides anything, so an uncapped walk of a pathological tree
+    would stall the server before the cap could refuse it. Without ``limit``
+    (the default, and what the pin/count callers use) the counts are exact.
     """
     n_files = 0
     n_dirs = 0
     for _root, dirnames, filenames in os.walk(target, followlinks=False):
         n_dirs += len(dirnames)
         n_files += len(filenames)
+        if limit is not None and n_files + n_dirs > limit:
+            break
     return n_files, n_dirs
 
 
@@ -458,13 +583,213 @@ def _err(message: str, status: int) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Request guards — see the module docstring, section 1
+# ---------------------------------------------------------------------------
+
+
+def _request_mime(request: web.Request) -> str:
+    """The request's Content-Type with any parameters stripped, lowercased.
+
+    Parsed here rather than read off ``request.content_type`` so the gate is
+    one visible expression over one header, and so it can be exercised against
+    a plain mapping in tests.
+    """
+    raw = request.headers.get("Content-Type") or ""
+    return raw.split(";", 1)[0].strip().lower()
+
+
+def _authority_host(authority: str) -> str | None:
+    """Lowercased hostname of an authority ('h:8188', '[::1]:8188', 'h'), or None.
+
+    Hand-parsed rather than handed to the stdlib URL parser, on purpose: the
+    registry security scanner treats a reference to that module in shipped
+    Python as a network operation and flags the version on ANY finding, which
+    is the class of finding this whole change exists to clear. The pack's own
+    publish-hygiene test enforces the same rule (tests/test_publish_hygiene.py)
+    and is what caught the first draft of this helper.
+
+    The grammar here is tiny and closed — an ``Origin`` is
+    ``scheme "://" host [":" port]`` with no path, query or userinfo (RFC 6454),
+    and a ``Host`` header is ``host [":" port]`` — so the parse is a bracket
+    check and a split. ``tests/test_guard.py`` pins it DIFFERENTIALLY against the
+    stdlib parser over a table of real and malformed values — the tests are not
+    shipped, so they may import it — because a hand-rolled parser is only
+    trustworthy next to the reference it replaces.
+    """
+    authority = authority.strip()
+    if not authority:
+        return None
+    # An Origin carries no userinfo, but a malformed value might; take the host
+    # side rather than reading 'user@evil.example' as a hostname.
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[1]
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end == -1:
+            return None
+        return authority[1:end].lower() or None
+    if ":" in authority:
+        authority = authority.split(":", 1)[0]
+    return authority.lower() or None
+
+
+def _origin_host(origin: str) -> str | None:
+    """Hostname of an ``Origin`` header value, or None when it has none.
+
+    ``Origin: null`` — a sandboxed iframe, some redirect chains — is an OPAQUE
+    origin and returns None, which the caller treats as a refusal. That is the
+    right direction: an opaque origin is precisely one that must not be assumed
+    to be ours.
+
+    The draft this replaces read the host by rewriting the scheme to '//' and
+    handing the result to a helper that ALSO prepends '//' — '////host', whose
+    hostname is None for every well-formed Origin, so it would have 403'd every
+    legitimate POST. Hence the differential test.
+    """
+    value = origin.strip()
+    if not value or value.lower() == "null":
+        return None
+    scheme, sep, rest = value.partition("://")
+    if not sep or not scheme:
+        return None
+    return _authority_host(rest.split("/", 1)[0])
+
+
+def _host_header_host(host: str) -> str | None:
+    """Hostname of a ``Host`` header value ('127.0.0.1:8188' -> '127.0.0.1')."""
+    return _authority_host(host)
+
+
+def _reject_cross_site(request: web.Request) -> web.Response | None:
+    """403 a request a browser has told us came from another site, else None.
+
+    Three tiers, most authoritative first:
+
+      1. ``Sec-Fetch-Site`` is set by the browser and cannot be forged by page
+         script (it is a forbidden header name). ``cross-site`` is refused;
+         ``same-origin`` / ``same-site`` / ``none`` are accepted and end the
+         check. Accepting ``same-site`` is deliberate and matches ComfyUI core,
+         which also refuses only ``cross-site``: narrowing it here would break
+         split-subdomain reverse-proxy setups that core allows.
+      2. No ``Sec-Fetch-Site`` (an older browser): fall back to comparing the
+         ``Origin`` host against the ``Host`` host. This is stricter than core,
+         which runs that comparison only when Host is a loopback address.
+      3. Neither header: allowed. Per Fetch, a browser sends ``Origin`` on
+         every non-GET/HEAD request, so this case is not reachable from a page
+         — it is curl, a script, or an API client, and refusing those would
+         break legitimate automation without closing anything.
+    """
+    sec_fetch_site = request.headers.get("Sec-Fetch-Site")
+    if sec_fetch_site:
+        if sec_fetch_site.lower() == "cross-site":
+            return _err("cross-site request refused", 403)
+        return None
+
+    origin = request.headers.get("Origin")
+    host = request.headers.get("Host")
+    if not origin or not host:
+        return None
+    origin_host = _origin_host(origin)
+    host_host = _host_header_host(host)
+    if origin_host is None or host_host is None:
+        return _err("cross-origin request refused", 403)
+    if origin_host.lower() != host_host.lower():
+        return _err("cross-origin request refused", 403)
+    return None
+
+
+def _reject_non_json(request: web.Request) -> web.Response | None:
+    """415 a mutation whose body is not declared as JSON, else None.
+
+    This is the gate that actually closes the CSRF class. A cross-origin
+    ``<form>`` can only send text/plain, multipart/form-data or
+    application/x-www-form-urlencoded, and none of those reaches a handler once
+    application/json is required — the request needs a preflight, which this
+    server does not answer with the custom-header permission it would need.
+    """
+    if _request_mime(request) != "application/json":
+        return _err("Content-Type: application/json required", 415)
+    return None
+
+
+def _guard_mutation(handler):
+    """Apply both mutation gates to one POST handler.
+
+    Written as a DECORATOR, never as aiohttp middleware:
+    ``PromptServer.instance.app`` is ComfyUI's single global Application, so
+    appending to ``app.middlewares`` would gate every core route in the
+    process — this pack must not decide whether /prompt runs.
+
+    Place it directly BELOW the ``@routes.post`` line so the wrapper is what
+    gets registered; above it the route table would hold the bare handler and
+    the guard would never run. ``tests/test_guard.py`` enumerates the
+    registered POST routes and fails if any one of them lacks the marker
+    attribute set here, so a new endpoint cannot be added without a gate — an
+    exception list would rot, an enumeration cannot.
+    """
+
+    @functools.wraps(handler)
+    async def guarded(request: web.Request) -> web.Response:
+        refusal = _reject_cross_site(request)
+        if refusal is not None:
+            return refusal
+        refusal = _reject_non_json(request)
+        if refusal is not None:
+            return refusal
+        return await handler(request)
+
+    guarded.image_browser_guarded = True
+    return guarded
+
+
+# ---------------------------------------------------------------------------
+# Arbitrary-path read opt-in — see the module docstring, section 2
+# ---------------------------------------------------------------------------
+
+
+def _user_settings(request: web.Request) -> dict[str, Any]:
+    """This request's ComfyUI user settings, or {} when they cannot be read.
+
+    Routed through ComfyUI's own user manager so a --multi-user install
+    resolves the calling user's profile exactly as core does, rather than this
+    pack re-deriving a path. Any failure degrades to {} — which reads as "the
+    opt-in is off", the safe direction.
+
+    Read per request and NOT cached: the file is a few kilobytes, and a cache
+    would keep serving the old answer after the user flips the switch, which is
+    the one moment they are watching for it to take effect.
+    """
+    try:
+        return PromptServer.instance.user_manager.settings.get_settings(request) or {}
+    except Exception:
+        log.debug("could not read user settings; treating the path-read opt-in as off")
+        return {}
+
+
+def _absolute_path_reads_enabled(request: web.Request) -> bool:
+    """True only when the user has explicitly switched the opt-in on.
+
+    ``is True`` rather than a truthiness test on purpose: a corrupted or
+    hand-edited settings file holding the string "false" must not enable a
+    security-relevant reach.
+    """
+    return _user_settings(request).get(SETTING_ALLOW_PATH_READS) is True
+
+
+# ---------------------------------------------------------------------------
 # Read endpoints
 # ---------------------------------------------------------------------------
 
 
 @PromptServer.instance.routes.get("/image_browser/base")
 async def image_browser_base(request: web.Request) -> web.Response:
-    """Expose ComfyUI's well-known directories so the frontend hard-codes none."""
+    """Expose ComfyUI's well-known directories so the frontend hard-codes none.
+
+    Also reports whether the arbitrary-path read opt-in is on, so the grid can
+    say WHY a type=path video will not play instead of rendering a dead
+    <video> element. This is a courtesy for the UI only — /file re-reads the
+    setting itself and never trusts anything the client sends.
+    """
     return web.json_response(
         {
             "ok": True,
@@ -473,6 +798,7 @@ async def image_browser_base(request: web.Request) -> web.Response:
             "output_dir": folder_paths.get_output_directory(),
             "temp_dir": folder_paths.get_temp_directory(),
             "user_dir": folder_paths.get_user_directory(),
+            "allow_path_reads": _absolute_path_reads_enabled(request),
         }
     )
 
@@ -896,20 +1222,38 @@ async def image_browser_list(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.get("/image_browser/file")
 async def image_browser_file(request: web.Request) -> web.Response:
-    """Stream a file at an absolute path (whitelisted extensions only).
+    """Stream a file at an absolute path — OFF unless the user opts in.
 
-    Used to preview videos in type=path listings — core /api/view only serves
-    files under input/output/temp.
+    Previews videos and opens originals in ``type=path`` listings, which core
+    /api/view cannot serve because it only reaches input/output/temp. That also
+    makes this the one endpoint in the pack that hands back a host file's raw
+    bytes, so it is the one behind a switch: see the module docstring,
+    section 2. With the switch off it answers 403 and touches no disk.
+
+    The three checks are ordered opt-in -> extension -> existence, and that
+    order is load-bearing. Testing existence first would answer 404 for a path
+    that is absent and 403 for one that is present-but-not-media, turning the
+    endpoint into an existence oracle for every file on the host — a caller
+    could enumerate /etc or a home directory without ever reading a byte.
+    Gating on the extension first collapses both answers for anything outside
+    the whitelist to the same 403.
     """
     q = request.rel_url.query
     abs_path = q.get("path", "")
     if not abs_path:
         return _err("missing path", 400)
+    if not _absolute_path_reads_enabled(request):
+        return _err(
+            "absolute-path file reads are disabled. Enable Settings -> Touch Tools -> "
+            "Image Browser -> 'Allow absolute-path file reads' to preview files outside "
+            "input/output/temp.",
+            403,
+        )
     path = os.path.abspath(os.path.expanduser(abs_path))
-    if not os.path.isfile(path):
-        return _err("file not found", 404)
     if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:
         return _err("unsupported file type", 403)
+    if not os.path.isfile(path):
+        return _err("file not found", 404)
     mime, _ = mimetypes.guess_type(path)
     return web.FileResponse(
         path,
@@ -1052,6 +1396,7 @@ async def _read_json(request: web.Request) -> tuple[dict[str, Any] | None, web.R
 
 
 @PromptServer.instance.routes.post("/image_browser/delete")
+@_guard_mutation
 async def image_browser_delete(request: web.Request) -> web.Response:
     body, err_resp = await _read_json(request)
     if err_resp:
@@ -1075,6 +1420,7 @@ async def image_browser_delete(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/rename")
+@_guard_mutation
 async def image_browser_rename(request: web.Request) -> web.Response:
     body, err_resp = await _read_json(request)
     if err_resp:
@@ -1105,6 +1451,7 @@ async def image_browser_rename(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/move")
+@_guard_mutation
 async def image_browser_move(request: web.Request) -> web.Response:
     body, err_resp = await _read_json(request)
     if err_resp:
@@ -1180,6 +1527,7 @@ def _merge_move_dir(src: str, dst: str) -> list[str]:
 
 
 @PromptServer.instance.routes.post("/image_browser/move_dir")
+@_guard_mutation
 async def image_browser_move_dir(request: web.Request) -> web.Response:
     """Move a folder (with its whole subtree) between sandboxed roots/subfolders.
 
@@ -1280,6 +1628,10 @@ def _validate_batch_items(
         return None, web.json_response(
             {"ok": False, "error": "items must be a non-empty list"}, status=400
         )
+    if len(items) > MAX_MUTATION_BATCH:
+        return None, web.json_response(
+            {"ok": False, "error": f"too many items (max {MAX_MUTATION_BATCH})"}, status=400
+        )
     for item in items:
         if not isinstance(item, dict):
             return None, web.json_response(
@@ -1289,6 +1641,7 @@ def _validate_batch_items(
 
 
 @PromptServer.instance.routes.post("/image_browser/delete_many")
+@_guard_mutation
 async def image_browser_delete_many(request: web.Request) -> web.Response:
     """Delete multiple files in one request (batch delete).
 
@@ -1331,6 +1684,7 @@ async def image_browser_delete_many(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/move_many")
+@_guard_mutation
 async def image_browser_move_many(request: web.Request) -> web.Response:
     """Move multiple files into one destination folder in one request.
 
@@ -1391,6 +1745,7 @@ async def image_browser_move_many(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/rmdir")
+@_guard_mutation
 async def image_browser_rmdir(request: web.Request) -> web.Response:
     """Delete a folder inside a sandboxed root.
 
@@ -1421,8 +1776,30 @@ async def image_browser_rmdir(request: web.Request) -> web.Response:
     if not os.path.isdir(target):
         return web.json_response({"ok": False, "error": "folder not found"}, status=404)
 
-    n_files, n_dirs = _count_dir_contents(target)
+    # Counted with the cap so the walk stops as soon as the answer is "too
+    # many" — see _count_dir_contents. Above the cap the counts are a lower
+    # bound, which is all the refusal needs.
+    n_files, n_dirs = _count_dir_contents(target, limit=MAX_RMDIR_ENTRIES)
     recursive = body.get("recursive") is True
+    if n_files + n_dirs > MAX_RMDIR_ENTRIES:
+        # 413, NOT 409. The frontend discriminates the "folder is not empty"
+        # confirm on (status === 409 && typeof data.files === "number") and
+        # answers it by re-posting with recursive:true — so a 409 here would
+        # be read as "confirm and retry", the retry would be refused the same
+        # way, and the user would sit in a confirm/refuse loop with no exit. A
+        # distinct status falls through to the client's generic error path,
+        # which surfaces this message once.
+        return web.json_response(
+            {
+                "ok": False,
+                "error": (
+                    f"folder holds more than {MAX_RMDIR_ENTRIES} entries — "
+                    "delete it from a file manager"
+                ),
+                "code": "too_large",
+            },
+            status=413,
+        )
     if (n_files or n_dirs) and not recursive:
         return web.json_response(
             {"ok": False, "error": "folder is not empty", "files": n_files, "dirs": n_dirs},
@@ -1440,6 +1817,7 @@ async def image_browser_rmdir(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/mkdir")
+@_guard_mutation
 async def image_browser_mkdir(request: web.Request) -> web.Response:
     """Create a folder inside a sandboxed root.
 
@@ -1493,6 +1871,7 @@ def _parse_rating(value: Any) -> int | None:
 
 
 @PromptServer.instance.routes.post("/image_browser/rating")
+@_guard_mutation
 async def image_browser_rating(request: web.Request) -> web.Response:
     """Persist a 0..5 star rating into a file's XMP (or a sidecar).
 
@@ -1528,6 +1907,7 @@ async def image_browser_rating(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/tag")
+@_guard_mutation
 async def image_browser_tag(request: web.Request) -> web.Response:
     """Add or remove ONE ``dc:subject`` keyword on a file's XMP (or sidecar).
 
@@ -1600,6 +1980,7 @@ MAX_RATING_BATCH = 200
 
 
 @PromptServer.instance.routes.post("/image_browser/ratings")
+@_guard_mutation
 async def image_browser_ratings(request: web.Request) -> web.Response:
     """Read 0..5 ratings for many files in one request (batch READ).
 
@@ -1655,6 +2036,7 @@ async def image_browser_ratings(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/safeview_warm")
+@_guard_mutation
 async def image_browser_safeview_warm(request: web.Request) -> web.Response:
     """Scan and cache the prompt text of the files a render just produced.
 
@@ -1804,6 +2186,7 @@ async def image_browser_pins_get(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/image_browser/pins")
+@_guard_mutation
 async def image_browser_pins_post(request: web.Request) -> web.Response:
     """Apply ONE delta: ``{op: "add"|"remove"|"prune", item?}``.
 

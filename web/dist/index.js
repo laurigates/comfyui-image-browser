@@ -1858,7 +1858,11 @@ var SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
 var META_VIDEO_EXTS = new Set([".mp4", ".m4v", ".mov", ".webm", ".mkv"]);
 var META_EXTS = new Set([...IMG_EXTS, ...META_VIDEO_EXTS]);
 var SANDBOXED_TYPES2 = SANDBOXED_TYPES;
+var PATH_READS_DISABLED_MSG = "Reading files by absolute path is off. Turn on Settings → Touch Tools → " + "Image Browser → “Allow absolute-path file reads” to preview and open " + "files outside input/output/temp.";
 var BASE_PATHS = null;
+function pathReadsAllowed() {
+  return BASE_PATHS?.allow_path_reads === true;
+}
 async function fetchBasePaths() {
   if (BASE_PATHS)
     return BASE_PATHS;
@@ -3007,6 +3011,14 @@ function openImageBrowser() {
       revealed.reveal(fileType(f), fileSub(f), f.name);
       renderGrid();
     }
+    if (fileType(f) === "path" && !pathReadsAllowed()) {
+      notify({
+        severity: "warn",
+        summary: "Absolute-path reads are off",
+        detail: PATH_READS_DISABLED_MSG
+      });
+      return;
+    }
     const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
@@ -3489,6 +3501,9 @@ function openImageBrowser() {
       };
     }
     if (VIDEO_EXTS.has(ext)) {
+      if (type === "path" && !pathReadsAllowed()) {
+        return { kind: "icon", text: "\uD83D\uDD12", title: PATH_READS_DISABLED_MSG };
+      }
       return {
         kind: "video",
         src: videoSrcURL(type, sub, f.name, state.absPath)
@@ -3600,7 +3615,7 @@ function openImageBrowser() {
 ${dims}
 ${when}` : `${f.name}
 ${when}`;
-      const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon">${t.text}</div>`;
+      const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon"${t.title ? ` title="${escapeHTML(t.title)}"` : ""}>${t.text}</div>`;
       const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
       const metaBtn = hasMeta ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
       const wfBtn = hasMeta ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
@@ -5678,6 +5693,15 @@ app3.registerExtension({
           uninstallSidebarStars = null;
         }
       }
+    },
+    {
+      id: "ImageBrowser.AllowAbsolutePathReads",
+      category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
+      sortOrder: 80,
+      name: "Allow absolute-path file reads",
+      tooltip: "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. Images still get thumbnails and metadata on the browse… tab either way.",
+      type: "boolean",
+      defaultValue: false
     },
     {
       id: "ImageBrowser.LightboxActions",

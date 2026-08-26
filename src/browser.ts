@@ -79,8 +79,10 @@ import {
   moveDir,
   moveFile,
   moveMany,
+  PATH_READS_DISABLED_MSG,
   type PinEntry,
   type PinItem,
+  pathReadsAllowed,
   pinKeyOf,
   pinsToFiles,
   postPinDelta,
@@ -461,6 +463,10 @@ interface ThumbDescriptor {
   kind: "img" | "video" | "icon";
   src?: string;
   text?: string;
+  // Tooltip for an icon tile that stands in for media the browser cannot show,
+  // so the substitution carries its reason with it rather than being a mute
+  // glyph the user has to guess at.
+  title?: string;
 }
 
 // ============================================================
@@ -1572,6 +1578,17 @@ export function openImageBrowser(): ModalShellController {
       revealed.reveal(fileType(f), fileSub(f), f.name);
       renderGrid();
     }
+    // Opening an absolute-path file also goes through /image_browser/file, so
+    // with the opt-in off this would open a new tab onto a 403 JSON body. Say
+    // why here rather than in a tab the user has to read and close.
+    if (fileType(f) === "path" && !pathReadsAllowed()) {
+      notify({
+        severity: "warn",
+        summary: "Absolute-path reads are off",
+        detail: PATH_READS_DISABLED_MSG,
+      });
+      return;
+    }
     const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
   }
@@ -2287,6 +2304,14 @@ export function openImageBrowser(): ModalShellController {
       };
     }
     if (VIDEO_EXTS.has(ext)) {
+      // A type=path video plays through /image_browser/file, which is OFF
+      // unless the user opted in. Mounting a <video> whose source 403s renders
+      // a permanently blank tile with nothing to click and no explanation, so
+      // say so on the card instead. Sandboxed roots are unaffected: they play
+      // through core /api/view, which the opt-in does not touch.
+      if (type === "path" && !pathReadsAllowed()) {
+        return { kind: "icon", text: "🔒", title: PATH_READS_DISABLED_MSG };
+      }
       return {
         kind: "video",
         src: videoSrcURL(type, sub, f.name, state.absPath),
@@ -2468,7 +2493,9 @@ export function openImageBrowser(): ModalShellController {
           ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">`
           : t.kind === "video"
             ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
-            : `<div class="ib-thumb-icon">${t.text}</div>`;
+            : `<div class="ib-thumb-icon"${
+                t.title ? ` title="${escHTML(t.title)}"` : ""
+              }>${t.text}</div>`;
       // The ⓘ metadata button is the ONE card control deliberately outside the
       // canWrite mirror: /metadata is a READ and accepts type=path, so it belongs
       // on the browse…/path tab too. Don't "fix" this into canWrite. It is gated

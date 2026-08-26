@@ -276,10 +276,45 @@ rather than breaking it. Navigation is driven through the viewer's own keyboard
 contract rather than by clicking its buttons, whose labels and icons move
 between versions.
 
-Management actions are intentionally **disabled in the arbitrary-path
-(`browse…`) tab** — that mode is browse-only. The backend rejects writes outside
-the Input/Output/Temp roots, so an arbitrary path can never be mutated by URL
-crafting. See the security posture in `docs/blueprint/adrs/0002-*`.
+## Security
+
+ComfyUI ships no authentication, so this pack is written against the attacker
+that has *not* reached the port: a web page in your browser that has not. The
+full threat model is at the top of `image_browser.py`; the four gates are:
+
+**Writes need a same-origin JSON request.** Every POST endpoint requires
+`Content-Type: application/json` and refuses a request the browser reports as
+cross-site. Without the first, a page on any origin could reach these handlers
+with a plain `<form>`: aiohttp's server-side `request.json()` never inspects
+`Content-Type`, and a form post is a CORS-*simple* request that needs no
+preflight. Requiring JSON is what takes that away. There is deliberately no CSRF
+token — per Fetch, `Origin` is sent on every non-GET request, so a token buys no
+additional browser defence while breaking any cached copy of the frontend
+bundle.
+
+**Reading files by absolute path is OFF by default.** `GET
+/image_browser/file` is the one endpoint that returns a host file's raw bytes.
+It answers 403 — before touching the disk, so it is not even an existence
+oracle — unless you switch on **Settings → Touch Tools → Image Browser →
+"Allow absolute-path file reads"**. With it off, the `browse…` tab still lists
+folders, shows thumbnails and reads metadata (none of those returns a file's
+bytes); what stops working is video preview and full-size open outside
+Input/Output/Temp, and the grid says so on the card rather than showing a blank
+player. The setting is read from your own ComfyUI settings server-side and
+cannot be flipped by a request parameter or a header.
+
+**Writes are sandboxed and doubly contained.** Management actions are
+intentionally **disabled in the arbitrary-path (`browse…`) tab** — that mode is
+browse-only. The backend rejects writes outside the Input/Output/Temp roots, so
+an arbitrary path can never be mutated by URL crafting, and each target is
+checked both lexically (no `..`) and after `realpath` (no escaping through a
+symlink inside the sandbox). A symlinked *subfolder* you navigated into stays
+writable; an entry that links out does not. See the security posture in
+`docs/blueprint/adrs/0002-*`.
+
+**Destructive work is bounded.** Batch delete/move are capped at 200 items, and
+a recursive folder delete is refused above 10 000 entries — counted with an
+early exit, so a huge tree cannot stall the server before the cap can refuse it.
 
 ## Compatibility
 

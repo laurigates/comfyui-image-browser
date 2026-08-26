@@ -1,0 +1,126 @@
+{
+  "command": [
+    "uv",
+    "run",
+    "pytest",
+    "-q",
+    "tests/test_guard.py"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a section comment reworded, which no test can see",
+      "file": "image_browser.py",
+      "before": "# ---------------------------------------------------------------------------\n# Request guards — see the module docstring, section 1",
+      "after": "# ---------------------------------------------------------------------------\n# Request guards - see the module docstring, section 1"
+    },
+    {
+      "label": "the Content-Type gate is dropped, so a cross-origin text/plain form reaches every POST",
+      "file": "image_browser.py",
+      "before": "    if _request_mime(request) != \"application/json\":",
+      "after": "    if False:"
+    },
+    {
+      "label": "the Content-Type gate accepts anything NON-json (inert: the paired positive)",
+      "file": "image_browser.py",
+      "before": "    if _request_mime(request) != \"application/json\":",
+      "after": "    if _request_mime(request) == \"application/json\":"
+    },
+    {
+      "label": "cross-site is no longer refused (the Sec-Fetch-Site tier goes inert)",
+      "file": "image_browser.py",
+      "before": "        if sec_fetch_site.lower() == \"cross-site\":",
+      "after": "        if sec_fetch_site.lower() == \"nonesuch\":"
+    },
+    {
+      "label": "the origin/host compare is dropped, so an older browser's cross-origin POST lands",
+      "file": "image_browser.py",
+      "before": "    if origin_host.lower() != host_host.lower():",
+      "after": "    if origin_host.lower() == host_host.lower() and False:"
+    },
+    {
+      "label": "the draft's origin parse returns: '//'-rewritten then '//'-prefixed, hostname None for every real Origin",
+      "file": "image_browser.py",
+      "before": "    return _authority_host(rest.split(\"/\", 1)[0])",
+      "after": "    return _authority_host(\"//\" + rest.split(\"/\", 1)[0])"
+    },
+    {
+      "label": "the guard marker is never set, so a new unguarded POST would pass the enumeration",
+      "file": "image_browser.py",
+      "before": "    guarded.image_browser_guarded = True",
+      "after": "    guarded.image_browser_guarded = False"
+    },
+    {
+      "label": "one endpoint loses its guard (/delete), which is what an exception list would allow to rot",
+      "file": "image_browser.py",
+      "before": "@PromptServer.instance.routes.post(\"/image_browser/delete\")\n@_guard_mutation",
+      "after": "@PromptServer.instance.routes.post(\"/image_browser/delete\")"
+    },
+    {
+      "label": "the opt-in widens to truthiness, so a settings file holding the string \"false\" enables path reads",
+      "file": "image_browser.py",
+      "before": "    return _user_settings(request).get(SETTING_ALLOW_PATH_READS) is True",
+      "after": "    return bool(_user_settings(request).get(SETTING_ALLOW_PATH_READS))"
+    },
+    {
+      "label": "/file stops consulting the opt-in at all (the ban's primary category returns)",
+      "file": "image_browser.py",
+      "before": "    if not _absolute_path_reads_enabled(request):",
+      "after": "    if False:"
+    },
+    {
+      "label": "/file goes back to isfile-then-extension, restoring the existence oracle",
+      "file": "image_browser.py",
+      "before": "    if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:\n        return _err(\"unsupported file type\", 403)\n    if not os.path.isfile(path):\n        return _err(\"file not found\", 404)",
+      "after": "    if not os.path.isfile(path):\n        return _err(\"file not found\", 404)\n    if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:\n        return _err(\"unsupported file type\", 403)"
+    },
+    {
+      "label": "the realpath containment answer is inverted to always-contained (the gate goes inert)",
+      "file": "image_browser.py",
+      "before": "        return os.path.commonpath([real_target, real_base]) == real_base",
+      "after": "        return True"
+    },
+    {
+      "label": "the realpath gate compares against the LEXICAL base, so a symlinked subfolder stops being writable",
+      "file": "image_browser.py",
+      "before": "        real_base = os.path.realpath(base)",
+      "after": "        real_base = base"
+    },
+    {
+      "label": "the file resolver drops the realpath gate (a symlink out of the sandbox becomes deletable)",
+      "file": "image_browser.py",
+      "before": "    if not _contained_after_realpath(target, base):\n        return None, \"name escapes root\"\n    return target, \"\"\n\n\ndef _resolve_sandboxed_dir(",
+      "after": "    return target, \"\"\n\n\ndef _resolve_sandboxed_dir("
+    },
+    {
+      "label": "the batch mutation cap is dropped (one request can hand the server an unbounded delete list)",
+      "file": "image_browser.py",
+      "before": "    if len(items) > MAX_MUTATION_BATCH:",
+      "after": "    if False:"
+    },
+    {
+      "label": "the counting walk loses its early exit, so a huge tree is walked in full before the cap can refuse",
+      "file": "image_browser.py",
+      "before": "        if limit is not None and n_files + n_dirs > limit:\n            break",
+      "after": "        if False:\n            break"
+    },
+    {
+      "label": "the rmdir ceiling is dropped (recursive rmtree is unbounded again)",
+      "file": "image_browser.py",
+      "before": "    if n_files + n_dirs > MAX_RMDIR_ENTRIES:",
+      "after": "    if False:"
+    },
+    {
+      "label": "the too-large refusal answers 409 with counts, which the frontend reads as confirm-and-retry -> loop",
+      "file": "image_browser.py",
+      "before": "                \"code\": \"too_large\",\n            },\n            status=413,",
+      "after": "                \"code\": \"too_large\",\n                \"files\": n_files,\n                \"dirs\": n_dirs,\n            },\n            status=409,"
+    },
+    {
+      "label": "rmdir counts without the cap, so the ceiling is decided after a full walk",
+      "file": "image_browser.py",
+      "before": "    n_files, n_dirs = _count_dir_contents(target, limit=MAX_RMDIR_ENTRIES)",
+      "after": "    n_files, n_dirs = _count_dir_contents(target)"
+    }
+  ]
+}

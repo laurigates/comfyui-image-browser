@@ -85,6 +85,14 @@ interface BasePaths {
   output_dir: string;
   temp_dir: string;
   user_dir?: string;
+  // Whether the backend will serve /image_browser/file at all — the
+  // ImageBrowser.AllowAbsolutePathReads opt-in, which is OFF by default. Read
+  // for the UI ONLY, so the grid can say why a type=path video will not play
+  // instead of mounting a <video> that fails silently; /file re-reads the
+  // setting server-side on every request and trusts nothing sent to it.
+  // Optional because a pack running against an older backend gets no key, and
+  // the safe reading of "absent" is the same as "off".
+  allow_path_reads?: boolean;
   ok?: boolean;
   error?: string;
 }
@@ -194,7 +202,27 @@ interface ListParams {
   safePrompt?: boolean;
 }
 
+// Shown wherever an absolute-path read is refused. One string so the toast,
+// the locked tile's tooltip and the tests cannot drift into three wordings —
+// and it names the exact settings path, because "disabled" with no route to
+// enabling it is the silent failure this replaces.
+export const PATH_READS_DISABLED_MSG =
+  "Reading files by absolute path is off. Turn on Settings \u2192 Touch Tools \u2192 " +
+  "Image Browser \u2192 \u201cAllow absolute-path file reads\u201d to preview and open " +
+  "files outside input/output/temp.";
+
 let BASE_PATHS: BasePaths | null = null;
+
+/**
+ * Whether the backend will serve an absolute-path read right now.
+ *
+ * Defaults to FALSE for every un-fetched, failed or older-backend case: this
+ * decides whether the UI offers a control, and offering one that 403s is worse
+ * than saying up front that it is switched off.
+ */
+export function pathReadsAllowed(): boolean {
+  return BASE_PATHS?.allow_path_reads === true;
+}
 
 export async function fetchBasePaths(): Promise<BasePaths> {
   if (BASE_PATHS) return BASE_PATHS;
