@@ -2222,6 +2222,8 @@ var DENSITY_ROOT_MARGIN = {
   grid: "300px",
   list: "600px"
 };
+var SYNC_CARD_BUDGET = 240;
+var CHUNK_CARDS = 240;
 function loadSavedDensity() {
   try {
     const raw = localStorage.getItem(DENSITY_STORAGE_KEY);
@@ -2369,8 +2371,8 @@ function openImageBrowser() {
     onClose: () => {
       rememberScroll();
       viewStore.markPending(false);
-      disposeLazyThumbs?.();
-      disposeLazyThumbs = null;
+      disposeLazyThumbs();
+      cancelChunkJob();
       scroller.dispose();
       window.removeEventListener("keydown", onWindowKey, true);
       disposeBackGuard?.();
@@ -3531,6 +3533,8 @@ function openImageBrowser() {
     }
   }
   function renderGrid(opts) {
+    cancelChunkJob();
+    disposeLazyThumbs();
     const q = state.query;
     syncDensitySegs();
     const nameSpans = (name) => {
@@ -3598,75 +3602,13 @@ function openImageBrowser() {
       focusIndex = 0;
     else if (focusIndex >= files.length)
       focusIndex = files.length - 1;
+    const ctx = { flat, pinnedView, safeCfg, safeKeyword, nameSpans };
     let visible = 0;
-    for (let fi = 0;fi < files.length; fi++) {
-      const f = files[fi];
-      if (!f)
-        continue;
-      const c = document.createElement("div");
-      c.className = "ib-card is-file";
-      const canWriteThis = canWriteFile(f);
-      const hidden = isCardHidden(f, safeCfg);
-      const spoilNames = hidden && safeCfg.blurNames;
-      const missing = f.pinExists === false;
-      if (flat || pinnedView)
-        c.classList.add("is-flat");
-      if (missing)
-        c.classList.add("is-missing");
-      if (fi === focusIndex)
-        c.classList.add("is-focused");
-      if (isSelected(f))
-        c.classList.add("is-selected");
-      c.dataset.name = f.name;
-      c.dataset.ext = (f.ext || "").toLowerCase();
-      c.dataset.idx = String(fi);
-      const t = thumbForFile(f);
-      const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
-      const when = new Date(f.mtime * 1000).toLocaleString();
-      const titleText = dims ? `${f.name}
-${dims}
-${when}` : `${f.name}
-${when}`;
-      const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon"${t.title ? ` title="${escapeHTML(t.title)}"` : ""}>${t.text}</div>`;
-      const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
-      const metaBtn = hasMeta ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
-      const wfBtn = hasMeta ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
-      const moveBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
-      const renameBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>` : "";
-      const deleteBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
-      const isFilePinned = canWriteThis && isPinned(filePinItem(f));
-      const pinBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
-      const markBtn = canWriteThis && !missing && safeKeyword ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
-      const starsRow = canWriteThis ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
-      const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="${spoilNames ? "Select hidden item" : `Select ${escapeHTML(f.name)}`}">✓</button>` : "";
-      const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${nameSpans(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${nameSpans(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
-      c.innerHTML = missing ? `
-        ${subLabel}
-        <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escapeHTML(f.name)}">${nameSpans(f.name)}</div>
-        <div class="ib-meta">missing</div>
-        <div class="ib-actions">${pinBtn}</div>` : `
-        ${subLabel}
-        ${checkBtn}
-        <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escapeHTML(titleText)}">${nameSpans(f.name)}</div>
-        ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
-        ${starsRow}
-        <div class="ib-actions">${actionRowHTML([
-        pinBtn,
-        markBtn,
-        `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
-        metaBtn,
-        wfBtn,
-        renameBtn,
-        moveBtn,
-        deleteBtn
-      ])}</div>`;
-      gridEl.appendChild(c);
-      if (hidden)
-        applySafeView(c, f, spoilNames);
-      visible++;
-    }
+    for (const f of files)
+      if (f)
+        visible++;
+    const syncCount = Math.min(files.length, SYNC_CARD_BUDGET);
+    appendCards(files, 0, syncCount, ctx, 0);
     if (!visible && !state.dirs.length && !showUp) {
       const el = document.createElement("div");
       el.className = "ib-empty";
@@ -3675,7 +3617,158 @@ ${when}`;
     }
     setCount(visible, state.files.length);
     scroller.restore(targetScrollTop);
-    installLazyThumbs(gridEl);
+    observeThumbChunk(0);
+    if (syncCount < files.length) {
+      const job = {
+        files,
+        ctx,
+        next: syncCount,
+        seq: 1,
+        scrollTarget: targetScrollTop,
+        lastAsserted: scroller.current(),
+        raf: null
+      };
+      chunkJob = job;
+      if (typeof requestAnimationFrame === "function") {
+        scheduleChunk(job);
+      } else {
+        while (job.next < files.length)
+          buildChunk(job);
+        chunkJob = null;
+      }
+    }
+  }
+  function buildFileCard(f, fi, ctx) {
+    const { flat, pinnedView, safeCfg, safeKeyword, nameSpans } = ctx;
+    const c = document.createElement("div");
+    c.className = "ib-card is-file";
+    const canWriteThis = canWriteFile(f);
+    const hidden = isCardHidden(f, safeCfg);
+    const spoilNames = hidden && safeCfg.blurNames;
+    const missing = f.pinExists === false;
+    if (flat || pinnedView)
+      c.classList.add("is-flat");
+    if (missing)
+      c.classList.add("is-missing");
+    if (fi === focusIndex)
+      c.classList.add("is-focused");
+    if (isSelected(f))
+      c.classList.add("is-selected");
+    c.dataset.name = f.name;
+    c.dataset.ext = (f.ext || "").toLowerCase();
+    c.dataset.idx = String(fi);
+    const t = thumbForFile(f);
+    const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
+    const when = new Date(f.mtime * 1000).toLocaleString();
+    const titleText = dims ? `${f.name}
+${dims}
+${when}` : `${f.name}
+${when}`;
+    const thumbInner = t.kind === "img" ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">` : t.kind === "video" ? `<video muted playsinline preload="none" data-src="${t.src}"></video>` : `<div class="ib-thumb-icon"${t.title ? ` title="${escapeHTML(t.title)}"` : ""}>${t.text}</div>`;
+    const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
+    const metaBtn = hasMeta ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>` : "";
+    const wfBtn = hasMeta ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>` : "";
+    const moveBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>` : "";
+    const renameBtn = canWriteThis ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>` : "";
+    const deleteBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">\uD83D\uDDD1</button>` : "";
+    const isFilePinned = canWriteThis && isPinned(filePinItem(f));
+    const pinBtn = canWriteThis ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">\uD83D\uDCCC</button>` : "";
+    const markBtn = canWriteThis && !missing && safeKeyword ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword)) : "";
+    const starsRow = canWriteThis ? starsHTML("ib", ratingOf(f)) : ratingOf(f) ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>` : "";
+    const checkBtn = canWriteThis ? `<button type="button" class="ib-check" data-check aria-label="${spoilNames ? "Select hidden item" : `Select ${escapeHTML(f.name)}`}">✓</button>` : "";
+    const subLabel = pinnedView ? `<button type="button" class="ib-subpath" data-pin-type="${escapeHTML(fileType(f))}" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(pinLabel(filePinItem(f)))}">${nameSpans(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>` : flat ? f.subpath ? `<button type="button" class="ib-subpath" data-sub="${escapeHTML(fileSub(f))}" title="Go to ${escapeHTML(f.subpath)}">${nameSpans(f.subpath)}</button>` : `<div class="ib-subpath is-root" title="Top level">/</div>` : "";
+    c.innerHTML = missing ? `
+      ${subLabel}
+      <div class="ib-thumb">${thumbInner}</div>
+      <div class="ib-name" title="${escapeHTML(f.name)}">${nameSpans(f.name)}</div>
+      <div class="ib-meta">missing</div>
+      <div class="ib-actions">${pinBtn}</div>` : `
+      ${subLabel}
+      ${checkBtn}
+      <div class="ib-thumb">${thumbInner}</div>
+      <div class="ib-name" title="${escapeHTML(titleText)}">${nameSpans(f.name)}</div>
+      ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
+      ${starsRow}
+      <div class="ib-actions">${actionRowHTML([
+      pinBtn,
+      markBtn,
+      `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
+      metaBtn,
+      wfBtn,
+      renameBtn,
+      moveBtn,
+      deleteBtn
+    ])}</div>`;
+    if (hidden)
+      applySafeView(c, f, spoilNames);
+    return c;
+  }
+  let chunkJob = null;
+  function cancelChunkJob() {
+    const job = chunkJob;
+    chunkJob = null;
+    if (job && job.raf !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(job.raf);
+    }
+  }
+  function appendCards(files, from, to, ctx, seq) {
+    for (let fi = from;fi < to; fi++) {
+      const f = files[fi];
+      if (!f)
+        continue;
+      const c = buildFileCard(f, fi, ctx);
+      c.dataset.chunk = String(seq);
+      gridEl.appendChild(c);
+    }
+  }
+  function buildChunk(job) {
+    const to = Math.min(job.files.length, job.next + CHUNK_CARDS);
+    appendCards(job.files, job.next, to, job.ctx, job.seq);
+    observeThumbChunk(job.seq);
+    job.next = to;
+    job.seq++;
+    reassertChunkScroll(job);
+  }
+  function scheduleChunk(job) {
+    job.raf = requestAnimationFrame(() => {
+      job.raf = null;
+      if (chunkJob !== job)
+        return;
+      runChunk(job);
+    });
+  }
+  function runChunk(job) {
+    buildChunk(job);
+    if (job.next < job.files.length)
+      scheduleChunk(job);
+    else
+      chunkJob = null;
+  }
+  function reassertChunkScroll(job) {
+    if (job.scrollTarget <= 0)
+      return;
+    const now = scroller.current();
+    if (now !== job.lastAsserted)
+      return;
+    if (now >= job.scrollTarget)
+      return;
+    scroller.restore(job.scrollTarget);
+    job.lastAsserted = scroller.current();
+  }
+  function ensureCardsBuilt(index) {
+    const job = chunkJob;
+    if (!job || index < job.next)
+      return;
+    if (job.raf !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(job.raf);
+    }
+    job.raf = null;
+    while (job.next <= index && job.next < job.files.length)
+      buildChunk(job);
+    if (job.next < job.files.length)
+      scheduleChunk(job);
+    else
+      chunkJob = null;
   }
   function applySafeView(card, f, spoilNames) {
     card.classList.add("is-safe-hidden");
@@ -3696,13 +3789,18 @@ ${when}`;
       }
     }));
   }
-  let disposeLazyThumbs = null;
-  function installLazyThumbs(rootEl) {
-    disposeLazyThumbs?.();
-    disposeLazyThumbs = installLazyMedia(rootEl, {
+  let lazyThumbDisposers = [];
+  function disposeLazyThumbs() {
+    for (const dispose of lazyThumbDisposers)
+      dispose();
+    lazyThumbDisposers = [];
+  }
+  function observeThumbChunk(seq) {
+    lazyThumbDisposers.push(installLazyMedia(gridEl, {
       root: scrollHost,
-      rootMargin: DENSITY_ROOT_MARGIN[state.density]
-    });
+      rootMargin: DENSITY_ROOT_MARGIN[state.density],
+      selector: `[data-chunk="${seq}"] img[data-src], [data-chunk="${seq}"] video[data-src]`
+    }));
   }
   function reportError(summary, e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -3742,6 +3840,7 @@ ${when}`;
     return widest;
   }
   function applyFocus() {
+    ensureCardsBuilt(focusIndex);
     for (const [i, c] of fileCards().entries()) {
       c.classList.toggle("is-focused", i === focusIndex);
     }

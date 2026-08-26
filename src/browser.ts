@@ -229,6 +229,23 @@ const DENSITY_ROOT_MARGIN: Record<GridDensity, string> = {
   list: "600px",
 };
 
+// Chunked grid construction. Flat view lists up to FLAT_LIST_CAP (5000) files,
+// and building every card in one synchronous pass measured 1.5 s to painted
+// grid and 89,856 DOM nodes on a real 8136-file install — a single blocking
+// main-thread pass on a pack whose whole point is being usable from a phone.
+//
+// SYNC_CARD_BUDGET cards are painted before renderGrid returns; the rest are
+// appended CHUNK_CARDS at a time, one chunk per animation frame. 240 is chosen
+// to overfill the tallest plausible first screen: the dense step is a 84px
+// track, so a 1440px-tall desktop viewport at ~16 columns holds ~272 cards but
+// only ~120 of them above the fold on a phone. Overfilling matters because the
+// listing is sorted newest-first — the cards a session actually wants are the
+// first few dozen — and because the lazy-thumb observer's rootMargin looks
+// ahead of the fold, so a budget that stopped AT the fold would leave the
+// observer nothing to promote until the next frame landed.
+export const SYNC_CARD_BUDGET = 240;
+export const CHUNK_CARDS = 240;
+
 /**
  * Read the saved density.
  *
@@ -528,8 +545,11 @@ export function openImageBrowser(): ModalShellController {
       // Closing mid-load is a deliberate exit, not a crash — don't leave the
       // breadcrumb armed or the next open falls back to folder view for nothing.
       viewStore.markPending(false);
-      disposeLazyThumbs?.();
-      disposeLazyThumbs = null;
+      disposeLazyThumbs();
+      // Nothing scheduled may outlive the modal — the rAF tail is scheduled
+      // work exactly like the observer, and a chunk landing after close would
+      // build cards into a detached grid.
+      cancelChunkJob();
       // AFTER rememberScroll() above, which reads the restorer's mirror — the
       // one read that still works now the shell has detached the dialog. Drops
       // the restorer's own listeners and cancels a re-assert loop that may still
@@ -2361,6 +2381,13 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function renderGrid(opts?: { scrollTo?: number }): void {
+    // FIRST, before anything reads or writes the grid. The previous render may
+    // still have a tail scheduled, and a chunk of the OLD listing appending
+    // into the new grid is the failure mode chunking introduces — see
+    // cancelChunkJob. Disposing the observers here rather than at the end is
+    // the same rule: the cards they watch are about to stop existing.
+    cancelChunkJob();
+    disposeLazyThumbs();
     const q = state.query;
     syncDensitySegs();
     /**
@@ -2476,166 +2503,25 @@ export function openImageBrowser(): ModalShellController {
     else if (focusIndex < 0) focusIndex = 0;
     else if (focusIndex >= files.length) focusIndex = files.length - 1;
 
+    // The per-pass values every card is built against. Bundled and passed
+    // explicitly rather than closed over, because a chunked render's tail
+    // OUTLIVES this call: a chunk landing three frames later must build
+    // against the listing and the Safe View config of ITS pass.
+    //
+    // `focusIndex` and the selection are deliberately NOT in here. Those do
+    // genuinely move while the tail lands, so a late card reads them live off
+    // the closure and comes up already focused or already ticked.
+    const ctx: CardContext = { flat, pinnedView, safeCfg, safeKeyword, nameSpans };
+
+    // Counted from the LISTING, not from the cards appended: most cards do not
+    // exist yet when the count is painted. Identical to the old per-append
+    // tally, which only ever skipped a hole in a dense array.
     let visible = 0;
-    for (let fi = 0; fi < files.length; fi++) {
-      const f = files[fi];
-      if (!f) continue;
-      const c = document.createElement("div");
-      c.className = "ib-card is-file";
-      // Per-card write gate — the card's OWN root, not the location's.
-      const canWriteThis = canWriteFile(f);
-      // Safe View's verdict for this card, decided BEFORE the markup is built:
-      // the checkbox's accessible name carries the filename, and an
-      // accessible name is not something a CSS spoiler can block. Computing it
-      // here is what lets that one string be swapped rather than patched.
-      const hidden = isCardHidden(f, safeCfg);
-      // Names are only blocked when the user asked for it; the thumbnail blur
-      // is not optional, since the image is the thing being hidden.
-      const spoilNames = hidden && safeCfg.blurNames;
-      // A pin whose target is gone. Dimmed and stripped back to its unpin
-      // affordance: every other control would address a file that isn't there.
-      const missing = f.pinExists === false;
-      // Flat cards carry a subpath row above the thumb — the marker lets CSS
-      // drop the selection checkbox below it so the two don't overlap. Pinned
-      // cards carry the same row (their full address), so they share the class.
-      if (flat || pinnedView) c.classList.add("is-flat");
-      if (missing) c.classList.add("is-missing");
-      if (fi === focusIndex) c.classList.add("is-focused");
-      if (isSelected(f)) c.classList.add("is-selected");
-      c.dataset.name = f.name;
-      c.dataset.ext = (f.ext || "").toLowerCase();
-      c.dataset.idx = String(fi);
-      const t = thumbForFile(f);
-      const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
-      const when = new Date(f.mtime * 1000).toLocaleString();
-      const titleText = dims ? `${f.name}\n${dims}\n${when}` : `${f.name}\n${when}`;
-      const thumbInner =
-        t.kind === "img"
-          ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">`
-          : t.kind === "video"
-            ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
-            : `<div class="ib-thumb-icon"${
-                t.title ? ` title="${escHTML(t.title)}"` : ""
-              }>${t.text}</div>`;
-      // The ⓘ metadata button is the ONE card control deliberately outside the
-      // canWrite mirror: /metadata is a READ and accepts type=path, so it belongs
-      // on the browse…/path tab too. Don't "fix" this into canWrite. It is gated
-      // on META_EXTS instead — same ext source thumbForFile uses — which mirrors
-      // the endpoint's own gate: every image, plus the video containers the
-      // backend can parse. A .avi has no reader and would 400, so it gets no ⓘ.
-      const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
-      const metaBtn = hasMeta
-        ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>`
-        : "";
-      // Load-workflow rides the same gate as ⓘ (both are READS through /metadata,
-      // which accepts type=path), so it appears on the browse…/path tab too and
-      // stays outside the canWrite mirror. It is offered for every readable file
-      // rather than only for those known to carry a graph: knowing that requires
-      // the per-file metadata read, and doing that for every card in a listing
-      // would cost one request per thumbnail. The click path reads it and says so.
-      const wfBtn = hasMeta
-        ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>`
-        : "";
-      // Move is only offered for the sandboxed roots (backend rejects path writes).
-      const moveBtn = canWriteThis
-        ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>`
-        : "";
-      const renameBtn = canWriteThis
-        ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>`
-        : "";
-      const deleteBtn = canWriteThis
-        ? `<button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">🗑</button>`
-        : "";
-      // Pin/unpin this file. Same perimeter as the writes — a pin addresses a
-      // sandboxed root only — so the browse…/path tab gets none, and the state
-      // is read SYNCHRONOUSLY off the module cache (a GET per card is not an
-      // option). Filled while pinned.
-      const isFilePinned = canWriteThis && isPinned(filePinItem(f));
-      const pinBtn = canWriteThis
-        ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">📌</button>`
-        : "";
-      // 🙈 writes the user's first Safe View keyword into the file's dc:subject.
-      // A WRITE, so it rides the per-card canWrite mirror exactly like ✎/⇄/🗑
-      // and never appears on the browse…/path tab — /image_browser/tag rejects
-      // type=path, and a control that 400s is worse than no control. Offered
-      // only when there IS a keyword to write, and never on a missing pin
-      // (the write would address a file that is not there).
-      const markBtn =
-        canWriteThis && !missing && safeKeyword
-          ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword))
-          : "";
-      // Rating writes are sandboxed like the other mutations, so path mode
-      // gets a read-only star display (when rated) instead of dead buttons.
-      const starsRow = canWriteThis
-        ? starsHTML("ib", ratingOf(f))
-        : ratingOf(f)
-          ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>`
-          : "";
-      // The selection checkbox is the touch affordance for multi-select: it
-      // has touch-action:none, so a drag starting on it sweeps a range
-      // instead of scrolling. Only where writes are allowed.
-      // The accessible name is the THIRD channel the filename escapes through,
-      // after the visible text and the `title` tooltip — and the only one CSS
-      // cannot touch. A spoiler that paints a block while a screen reader (or
-      // anything else surfacing accessible names) still announces
-      // "Select holiday_nsfw_01.png" has hidden nothing.
-      const checkBtn = canWriteThis
-        ? `<button type="button" class="ib-check" data-check aria-label="${
-            spoilNames ? "Select hidden item" : `Select ${escHTML(f.name)}`
-          }">✓</button>`
-        : "";
-      // Flat view: show the file's folder above the thumbnail. It's a button —
-      // tapping it drops back to folder view at that directory. Top-level files
-      // (subpath "") get a muted "/" so the row height stays consistent.
-      //
-      // The pinned view reuses the same row for the FULL address (root
-      // included), because pins span roots and a bare subfolder would not say
-      // which one — so its label also carries data-pin-type, and tapping it
-      // switches root as well as folder.
-      const subLabel = pinnedView
-        ? `<button type="button" class="ib-subpath" data-pin-type="${escHTML(fileType(f))}" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(pinLabel(filePinItem(f)))}">${nameSpans(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>`
-        : flat
-          ? f.subpath
-            ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${nameSpans(f.subpath)}</button>`
-            : `<div class="ib-subpath is-root" title="Top level">/</div>`
-          : "";
-      c.innerHTML = missing
-        ? `
-        ${subLabel}
-        <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escHTML(f.name)}">${nameSpans(f.name)}</div>
-        <div class="ib-meta">missing</div>
-        <div class="ib-actions">${pinBtn}</div>`
-        : `
-        ${subLabel}
-        ${checkBtn}
-        <div class="ib-thumb">${thumbInner}</div>
-        <div class="ib-name" title="${escHTML(titleText)}">${nameSpans(f.name)}</div>
-        ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
-        ${starsRow}
-        <div class="ib-actions">${actionRowHTML([
-          // PRIORITY ORDER — see actionRowHTML. The two STATEFUL controls come
-          // first, because their state is the reason they are on the card at
-          // all: 📌 renders filled while pinned and 🙈 pressed while marked,
-          // and a control whose state you cannot see without opening a sheet
-          // has stopped being an indicator. ↗ open follows them rather than
-          // leading, because a tap anywhere on the card already calls
-          // openFull() (the grid click handler's fall-through) — so it is the
-          // one control whose demotion costs the user nothing. Destructive
-          // last, which is the whole point of #90.
-          pinBtn,
-          markBtn,
-          `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
-          metaBtn,
-          wfBtn,
-          renameBtn,
-          moveBtn,
-          deleteBtn,
-        ])}</div>`;
-      gridEl.appendChild(c);
-      if (hidden) applySafeView(c, f, spoilNames);
-      visible++;
-    }
+    for (const f of files) if (f) visible++;
+
+    // The first screenful, synchronously — everything past it is deferred.
+    const syncCount = Math.min(files.length, SYNC_CARD_BUDGET);
+    appendCards(files, 0, syncCount, ctx, 0);
 
     if (!visible && !state.dirs.length && !showUp) {
       const el = document.createElement("div");
@@ -2655,7 +2541,340 @@ export function openImageBrowser(): ModalShellController {
     // pre-restore viewport would have queued the top-of-list band for fetching
     // before that. In flat view that is thousands of wrong /thumb requests.
     scroller.restore(targetScrollTop);
-    installLazyThumbs(gridEl);
+    observeThumbChunk(0);
+
+    // The tail, one chunk per frame. Cancelled by the next renderGrid and by
+    // onClose — see cancelChunkJob for why that takes two guards, not one.
+    if (syncCount < files.length) {
+      const job: ChunkJob = {
+        files,
+        ctx,
+        next: syncCount,
+        seq: 1,
+        scrollTarget: targetScrollTop,
+        lastAsserted: scroller.current(),
+        raf: null,
+      };
+      chunkJob = job;
+      if (typeof requestAnimationFrame === "function") {
+        scheduleChunk(job);
+      } else {
+        // No rAF (a non-visual jsdom, an embedder without one): build the rest
+        // NOW rather than never. That is the pre-chunking behaviour — slow,
+        // but a whole grid. A listing silently missing its tail would be worse.
+        while (job.next < files.length) buildChunk(job);
+        chunkJob = null;
+      }
+    }
+  }
+
+  /**
+   * Build ONE file card. Extracted from renderGrid's loop so the chunked
+   * tail can call it a frame at a time — see ChunkJob.
+   *
+   * `fi` is the index into the WHOLE listing, not into the chunk: it becomes
+   * `data-idx`, which every click handler reads back as `renderedFiles[idx]`.
+   */
+  function buildFileCard(f: ListingFile, fi: number, ctx: CardContext): HTMLElement {
+    const { flat, pinnedView, safeCfg, safeKeyword, nameSpans } = ctx;
+    const c = document.createElement("div");
+    c.className = "ib-card is-file";
+    // Per-card write gate — the card's OWN root, not the location's.
+    const canWriteThis = canWriteFile(f);
+    // Safe View's verdict for this card, decided BEFORE the markup is built:
+    // the checkbox's accessible name carries the filename, and an
+    // accessible name is not something a CSS spoiler can block. Computing it
+    // here is what lets that one string be swapped rather than patched.
+    const hidden = isCardHidden(f, safeCfg);
+    // Names are only blocked when the user asked for it; the thumbnail blur
+    // is not optional, since the image is the thing being hidden.
+    const spoilNames = hidden && safeCfg.blurNames;
+    // A pin whose target is gone. Dimmed and stripped back to its unpin
+    // affordance: every other control would address a file that isn't there.
+    const missing = f.pinExists === false;
+    // Flat cards carry a subpath row above the thumb — the marker lets CSS
+    // drop the selection checkbox below it so the two don't overlap. Pinned
+    // cards carry the same row (their full address), so they share the class.
+    if (flat || pinnedView) c.classList.add("is-flat");
+    if (missing) c.classList.add("is-missing");
+    if (fi === focusIndex) c.classList.add("is-focused");
+    if (isSelected(f)) c.classList.add("is-selected");
+    c.dataset.name = f.name;
+    c.dataset.ext = (f.ext || "").toLowerCase();
+    c.dataset.idx = String(fi);
+    const t = thumbForFile(f);
+    const dims = f.width && f.height ? `${f.width}×${f.height}` : "";
+    const when = new Date(f.mtime * 1000).toLocaleString();
+    const titleText = dims ? `${f.name}\n${dims}\n${when}` : `${f.name}\n${when}`;
+    const thumbInner =
+      t.kind === "img"
+        ? `<img loading="lazy" decoding="async" data-src="${t.src}" alt="">`
+        : t.kind === "video"
+          ? `<video muted playsinline preload="none" data-src="${t.src}"></video>`
+          : `<div class="ib-thumb-icon"${
+              t.title ? ` title="${escHTML(t.title)}"` : ""
+            }>${t.text}</div>`;
+    // The ⓘ metadata button is the ONE card control deliberately outside the
+    // canWrite mirror: /metadata is a READ and accepts type=path, so it belongs
+    // on the browse…/path tab too. Don't "fix" this into canWrite. It is gated
+    // on META_EXTS instead — same ext source thumbForFile uses — which mirrors
+    // the endpoint's own gate: every image, plus the video containers the
+    // backend can parse. A .avi has no reader and would 400, so it gets no ⓘ.
+    const hasMeta = META_EXTS.has((f.ext || "").toLowerCase());
+    const metaBtn = hasMeta
+      ? `<button type="button" class="ib-act" data-action="meta" title="Metadata (i)">ⓘ</button>`
+      : "";
+    // Load-workflow rides the same gate as ⓘ (both are READS through /metadata,
+    // which accepts type=path), so it appears on the browse…/path tab too and
+    // stays outside the canWrite mirror. It is offered for every readable file
+    // rather than only for those known to carry a graph: knowing that requires
+    // the per-file metadata read, and doing that for every card in a listing
+    // would cost one request per thumbnail. The click path reads it and says so.
+    const wfBtn = hasMeta
+      ? `<button type="button" class="ib-act" data-action="workflow" title="Load workflow (w)">⤓</button>`
+      : "";
+    // Move is only offered for the sandboxed roots (backend rejects path writes).
+    const moveBtn = canWriteThis
+      ? `<button type="button" class="ib-act" data-action="move" title="Move">⇄</button>`
+      : "";
+    const renameBtn = canWriteThis
+      ? `<button type="button" class="ib-act" data-action="rename" title="Rename">✎</button>`
+      : "";
+    const deleteBtn = canWriteThis
+      ? `<button type="button" class="ib-act ib-act-danger" data-action="delete" title="Delete">🗑</button>`
+      : "";
+    // Pin/unpin this file. Same perimeter as the writes — a pin addresses a
+    // sandboxed root only — so the browse…/path tab gets none, and the state
+    // is read SYNCHRONOUSLY off the module cache (a GET per card is not an
+    // option). Filled while pinned.
+    const isFilePinned = canWriteThis && isPinned(filePinItem(f));
+    const pinBtn = canWriteThis
+      ? `<button type="button" class="ib-act ib-act-pin${isFilePinned ? " is-pinned" : ""}" data-action="pin" title="${isFilePinned ? "Unpin this file" : "Pin this file"}">📌</button>`
+      : "";
+    // 🙈 writes the user's first Safe View keyword into the file's dc:subject.
+    // A WRITE, so it rides the per-card canWrite mirror exactly like ✎/⇄/🗑
+    // and never appears on the browse…/path tab — /image_browser/tag rejects
+    // type=path, and a control that 400s is worse than no control. Offered
+    // only when there IS a keyword to write, and never on a missing pin
+    // (the write would address a file that is not there).
+    const markBtn =
+      canWriteThis && !missing && safeKeyword
+        ? markSensitiveHTML("ib", safeKeyword, hasSensitiveTag(f, safeKeyword))
+        : "";
+    // Rating writes are sandboxed like the other mutations, so path mode
+    // gets a read-only star display (when rated) instead of dead buttons.
+    const starsRow = canWriteThis
+      ? starsHTML("ib", ratingOf(f))
+      : ratingOf(f)
+        ? `<div class="ib-stars is-ro" data-rating="${ratingOf(f)}">${"★".repeat(ratingOf(f))}</div>`
+        : "";
+    // The selection checkbox is the touch affordance for multi-select: it
+    // has touch-action:none, so a drag starting on it sweeps a range
+    // instead of scrolling. Only where writes are allowed.
+    // The accessible name is the THIRD channel the filename escapes through,
+    // after the visible text and the `title` tooltip — and the only one CSS
+    // cannot touch. A spoiler that paints a block while a screen reader (or
+    // anything else surfacing accessible names) still announces
+    // "Select holiday_nsfw_01.png" has hidden nothing.
+    const checkBtn = canWriteThis
+      ? `<button type="button" class="ib-check" data-check aria-label="${
+          spoilNames ? "Select hidden item" : `Select ${escHTML(f.name)}`
+        }">✓</button>`
+      : "";
+    // Flat view: show the file's folder above the thumbnail. It's a button —
+    // tapping it drops back to folder view at that directory. Top-level files
+    // (subpath "") get a muted "/" so the row height stays consistent.
+    //
+    // The pinned view reuses the same row for the FULL address (root
+    // included), because pins span roots and a bare subfolder would not say
+    // which one — so its label also carries data-pin-type, and tapping it
+    // switches root as well as folder.
+    const subLabel = pinnedView
+      ? `<button type="button" class="ib-subpath" data-pin-type="${escHTML(fileType(f))}" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(pinLabel(filePinItem(f)))}">${nameSpans(`${fileType(f)}/${fileSub(f) ? `${fileSub(f)}/` : ""}`)}</button>`
+      : flat
+        ? f.subpath
+          ? `<button type="button" class="ib-subpath" data-sub="${escHTML(fileSub(f))}" title="Go to ${escHTML(f.subpath)}">${nameSpans(f.subpath)}</button>`
+          : `<div class="ib-subpath is-root" title="Top level">/</div>`
+        : "";
+    c.innerHTML = missing
+      ? `
+      ${subLabel}
+      <div class="ib-thumb">${thumbInner}</div>
+      <div class="ib-name" title="${escHTML(f.name)}">${nameSpans(f.name)}</div>
+      <div class="ib-meta">missing</div>
+      <div class="ib-actions">${pinBtn}</div>`
+      : `
+      ${subLabel}
+      ${checkBtn}
+      <div class="ib-thumb">${thumbInner}</div>
+      <div class="ib-name" title="${escHTML(titleText)}">${nameSpans(f.name)}</div>
+      ${dims ? `<div class="ib-meta">${dims}</div>` : ""}
+      ${starsRow}
+      <div class="ib-actions">${actionRowHTML([
+        // PRIORITY ORDER — see actionRowHTML. The two STATEFUL controls come
+        // first, because their state is the reason they are on the card at
+        // all: 📌 renders filled while pinned and 🙈 pressed while marked,
+        // and a control whose state you cannot see without opening a sheet
+        // has stopped being an indicator. ↗ open follows them rather than
+        // leading, because a tap anywhere on the card already calls
+        // openFull() (the grid click handler's fall-through) — so it is the
+        // one control whose demotion costs the user nothing. Destructive
+        // last, which is the whole point of #90.
+        pinBtn,
+        markBtn,
+        `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
+        metaBtn,
+        wfBtn,
+        renameBtn,
+        moveBtn,
+        deleteBtn,
+      ])}</div>`;
+    if (hidden) applySafeView(c, f, spoilNames);
+    return c;
+  }
+
+  /**
+   * The per-pass values a card is built against — see the `ctx` in renderGrid
+   * for why these travel with the job rather than being read off the closure.
+   */
+  interface CardContext {
+    flat: boolean;
+    pinnedView: boolean;
+    safeCfg: ReturnType<typeof readSafeViewConfig>;
+    safeKeyword: ReturnType<typeof sensitiveKeyword>;
+    nameSpans: (name: string) => string;
+  }
+
+  /** The deferred tail of one render. At most one exists at a time. */
+  interface ChunkJob {
+    files: ListingFile[];
+    ctx: CardContext;
+    /** Index of the next file to build. Everything below it is in the DOM. */
+    next: number;
+    /** Which chunk lands next — the `data-chunk` its observer is scoped to. */
+    seq: number;
+    /** The offset this render was asked to land on, re-armed as chunks land. */
+    scrollTarget: number;
+    /** What we last put on the scroller, so a USER scroll is distinguishable. */
+    lastAsserted: number;
+    raf: number | null;
+  }
+
+  let chunkJob: ChunkJob | null = null;
+
+  /**
+   * Drop the in-flight tail, if any.
+   *
+   * Called FIRST in renderGrid — before the grid is emptied — and from onClose.
+   * A stale chunk appending into a grid that has since been rebuilt is the one
+   * bug chunking introduces, and stopping it takes TWO guards, both live:
+   *
+   *  1. this `cancelAnimationFrame`, so a frame that has not run yet never runs;
+   *  2. the `chunkJob !== job` check inside the frame callback, for a callback
+   *     the engine has ALREADY dispatched into the batch it is running — which
+   *     is what a re-render triggered from inside another rAF callback, or from
+   *     a click handled in the same frame, produces.
+   *
+   * Guard 1 alone leaves that race open. Guard 2 alone leaves the main thread
+   * woken every frame for a job that will do nothing. Neither substitutes for
+   * the other, so neither may be removed as redundant.
+   */
+  function cancelChunkJob(): void {
+    const job = chunkJob;
+    chunkJob = null;
+    if (job && job.raf !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(job.raf);
+    }
+  }
+
+  /** Append `files[from..to)` as cards tagged `data-chunk="<seq>"`. */
+  function appendCards(
+    files: ListingFile[],
+    from: number,
+    to: number,
+    ctx: CardContext,
+    seq: number,
+  ): void {
+    for (let fi = from; fi < to; fi++) {
+      const f = files[fi];
+      if (!f) continue;
+      const c = buildFileCard(f, fi, ctx);
+      // The observer's handle on this chunk. Set BEFORE the append so the card
+      // is already addressable when observeThumbChunk queries for it.
+      c.dataset.chunk = String(seq);
+      gridEl.appendChild(c);
+    }
+  }
+
+  /** Build ONE chunk into the DOM and observe it. Schedules nothing. */
+  function buildChunk(job: ChunkJob): void {
+    const to = Math.min(job.files.length, job.next + CHUNK_CARDS);
+    appendCards(job.files, job.next, to, job.ctx, job.seq);
+    observeThumbChunk(job.seq);
+    job.next = to;
+    job.seq++;
+    reassertChunkScroll(job);
+  }
+
+  function scheduleChunk(job: ChunkJob): void {
+    job.raf = requestAnimationFrame(() => {
+      job.raf = null;
+      // GUARD 2 — see cancelChunkJob. Not redundant with the cancel there.
+      if (chunkJob !== job) return;
+      runChunk(job);
+    });
+  }
+
+  function runChunk(job: ChunkJob): void {
+    buildChunk(job);
+    if (job.next < job.files.length) scheduleChunk(job);
+    else chunkJob = null;
+  }
+
+  /**
+   * Re-assert this render's scroll target as the tail lands.
+   *
+   * A restore issued against the first screenful clamps to whatever that SHORT
+   * grid can reach, and the kit's restorer defends its target for a bounded 12
+   * frames — fewer than a 5000-card tail takes. So every chunk re-arms it, and
+   * every chunk also asks whether it still should:
+   *
+   *  - a target at or below 0 was finished by the first synchronous assignment
+   *    (the restorer's own contract), and re-arming it would drag a new search
+   *    or sort off the top it is supposed to stay at;
+   *  - an offset that no longer matches what we last asserted is the USER's,
+   *    and their scroll wins for the remainder of this render.
+   */
+  function reassertChunkScroll(job: ChunkJob): void {
+    if (job.scrollTarget <= 0) return;
+    const now = scroller.current();
+    if (now !== job.lastAsserted) return;
+    if (now >= job.scrollTarget) return;
+    scroller.restore(job.scrollTarget);
+    job.lastAsserted = scroller.current();
+  }
+
+  /**
+   * Bring the tail forward far enough that card `index` exists.
+   *
+   * Keyboard focus addresses `renderedFiles[i]`, which is the whole listing
+   * from the first frame — so `G` (last file) while a tail is in flight sets a
+   * focusIndex that no card carries, and the ring lands nowhere. Clamping the
+   * keyboard to what has been painted was the alternative, and it would make
+   * `G` mean different things at different moments. Instead the jump pays the
+   * construction cost it asked for, synchronously, and only in a session that
+   * actually asks for it.
+   */
+  function ensureCardsBuilt(index: number): void {
+    const job = chunkJob;
+    if (!job || index < job.next) return;
+    if (job.raf !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(job.raf);
+    }
+    job.raf = null;
+    while (job.next <= index && job.next < job.files.length) buildChunk(job);
+    if (job.next < job.files.length) scheduleChunk(job);
+    else chunkJob = null;
   }
 
   /**
@@ -2701,18 +2920,41 @@ export function openImageBrowser(): ModalShellController {
   // rectangle its whole bounding box and every card in the listing reports as
   // intersecting on the first callback — thousands of simultaneous /thumb
   // requests in flat view. The kit takes the root as a required parameter for
-  // exactly this reason. Disposed on every re-install and in onClose; nothing
+  // exactly this reason. Disposed on every re-render and in onClose; nothing
   // scheduled may outlive the modal.
-  let disposeLazyThumbs: (() => void) | null = null;
+  //
+  // A LIST, not the single handle this used to be: a chunked render installs
+  // one observer per chunk, so dropping any one of them leaks an observer still
+  // holding every card it was watching.
+  let lazyThumbDisposers: (() => void)[] = [];
 
-  function installLazyThumbs(rootEl: HTMLElement): void {
-    disposeLazyThumbs?.();
-    // The root MUST stay scrollHost — see the hard rule in CLAUDE.md. Only the
-    // lookahead varies with density.
-    disposeLazyThumbs = installLazyMedia(rootEl, {
-      root: scrollHost,
-      rootMargin: DENSITY_ROOT_MARGIN[state.density],
-    });
+  function disposeLazyThumbs(): void {
+    for (const dispose of lazyThumbDisposers) dispose();
+    lazyThumbDisposers = [];
+  }
+
+  /**
+   * Observe chunk `seq`'s thumbnails, and only that chunk's.
+   *
+   * Scoping by `data-chunk` rather than re-observing the whole grid is what
+   * keeps the tail linear: re-installing over the grid on every chunk would
+   * re-walk every card appended so far, so a 5000-card listing at 240 a frame
+   * would query ~52,000 elements to observe 5000. The already-promoted cards
+   * would be skipped (the kit strips `data-src` when it loads one), but the
+   * ones still pending from earlier chunks would end up observed by two live
+   * observers at once, each holding a reference to them.
+   *
+   * The root MUST stay scrollHost — see the hard rule in CLAUDE.md. Only the
+   * lookahead varies with density.
+   */
+  function observeThumbChunk(seq: number): void {
+    lazyThumbDisposers.push(
+      installLazyMedia(gridEl, {
+        root: scrollHost,
+        rootMargin: DENSITY_ROOT_MARGIN[state.density],
+        selector: `[data-chunk="${seq}"] img[data-src], [data-chunk="${seq}"] video[data-src]`,
+      }),
+    );
   }
 
   function reportError(summary: string, e: unknown): void {
@@ -2771,6 +3013,11 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function applyFocus(): void {
+    // The focus target may be past the end of a chunked render's painted tail
+    // (`G` on a 5000-file flat listing, one frame after it opened). Build up to
+    // it first, or the ring is toggled on a card that does not exist yet and
+    // lands nowhere. No-op once the tail is complete, which is the usual case.
+    ensureCardsBuilt(focusIndex);
     for (const [i, c] of fileCards().entries()) {
       c.classList.toggle("is-focused", i === focusIndex);
     }

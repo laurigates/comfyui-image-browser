@@ -1,0 +1,66 @@
+{
+  "command": ["bun", "run", "test", "--", "tests/js/chunked-render.test.js"],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "    // The first screenful, synchronously — everything past it is deferred.",
+      "after": "    // The first screenful, synchronously. The rest is deferred."
+    },
+    {
+      "label": "the tail is not deferred at all — every card is built in one synchronous pass, as before the fix",
+      "file": "src/browser.ts",
+      "before": "    const syncCount = Math.min(files.length, SYNC_CARD_BUDGET);",
+      "after": "    const syncCount = files.length;"
+    },
+    {
+      "label": "the whole tail lands on the FIRST frame instead of one chunk per frame",
+      "file": "src/browser.ts",
+      "before": "    const to = Math.min(job.files.length, job.next + CHUNK_CARDS);",
+      "after": "    const to = job.files.length;"
+    },
+    {
+      "label": "GUARD 1 gone: a re-render leaves the pending frame scheduled",
+      "file": "src/browser.ts",
+      "before": "    if (job && job.raf !== null && typeof cancelAnimationFrame === \"function\") {\n      cancelAnimationFrame(job.raf);\n    }\n  }\n\n  /** Append `files[from..to)` as cards tagged `data-chunk=\"<seq>\"`. */",
+      "after": "    if (job && job.raf !== null && typeof cancelAnimationFrame === \"function\") {\n      // mutated: the cancel is dropped\n    }\n  }\n\n  /** Append `files[from..to)` as cards tagged `data-chunk=\"<seq>\"`. */"
+    },
+    {
+      "label": "GUARD 2 gone: a frame callback already dispatched appends its stale chunk into the re-rendered grid",
+      "file": "src/browser.ts",
+      "before": "      // GUARD 2 — see cancelChunkJob. Not redundant with the cancel there.\n      if (chunkJob !== job) return;",
+      "after": "      // GUARD 2 — see cancelChunkJob. Not redundant with the cancel there."
+    },
+    {
+      "label": "renderGrid stops cancelling the tail, so the previous listing keeps appending into the new grid",
+      "file": "src/browser.ts",
+      "before": "    cancelChunkJob();\n    disposeLazyThumbs();\n    const q = state.query;",
+      "after": "    disposeLazyThumbs();\n    const q = state.query;"
+    },
+    {
+      "label": "the chunk observer is scoped to the whole grid again, so every chunk re-observes every card before it",
+      "file": "src/browser.ts",
+      "before": "        selector: `[data-chunk=\"${seq}\"] img[data-src], [data-chunk=\"${seq}\"] video[data-src]`,",
+      "after": "        selector: `img[data-src], video[data-src]`,"
+    },
+    {
+      "label": "only the LAST chunk observer is disposed, leaking every earlier one",
+      "file": "src/browser.ts",
+      "before": "    for (const dispose of lazyThumbDisposers) dispose();\n    lazyThumbDisposers = [];",
+      "after": "    lazyThumbDisposers[lazyThumbDisposers.length - 1]?.();\n    lazyThumbDisposers = [];"
+    },
+    {
+      "label": "keyboard focus no longer builds the tail it needs, so G lands on a card that does not exist",
+      "file": "src/browser.ts",
+      "before": "    ensureCardsBuilt(focusIndex);",
+      "after": "    ensureCardsBuilt(-1);"
+    },
+    {
+      "label": "a deferred card gets its index within the CHUNK rather than within the listing, so data-idx addresses the wrong file",
+      "file": "src/browser.ts",
+      "before": "      const c = buildFileCard(f, fi, ctx);",
+      "after": "      const c = buildFileCard(f, fi - from, ctx);"
+    }
+  ]
+}
