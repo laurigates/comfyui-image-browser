@@ -86,6 +86,30 @@ const grid = (modal) => modal.bodyEl.querySelector(".ib-grid");
 const seg = (modal, d) => modal.dialog.querySelector(`.ib-density-seg[data-density="${d}"]`);
 const fileCard = (modal) => modal.bodyEl.querySelector(".ib-card.is-file");
 const dirCard = (modal) => modal.bodyEl.querySelector(".ib-card.is-dir");
+const upCard = (modal) => modal.bodyEl.querySelector(".ib-card.is-up");
+const thumbOf = (card) => card.querySelector(".ib-thumb");
+
+/** Switch density and wait for the grid attribute to carry it. */
+async function setDensity(modal, d) {
+  seg(modal, d).click();
+  await vi.waitFor(() => {
+    if (grid(modal).dataset.density !== d) throw new Error(`not ${d} yet`);
+  });
+}
+
+/**
+ * Descend into the fixture's one subfolder so a `..` card exists.
+ *
+ * `state.subfolder` is client-side — canGoUp() reads it, and the stub's
+ * response never carries one — so the only way to render `.ib-card.is-up` is
+ * to actually tap a folder card.
+ */
+async function descend(modal) {
+  dirCard(modal).click();
+  await vi.waitFor(() => {
+    if (!upCard(modal)) throw new Error("no `..` card yet");
+  });
+}
 
 /** Raw text of the pack's injected stylesheet. */
 function styleText() {
@@ -263,6 +287,121 @@ describe("the list step", () => {
     const name = fileCard(modal).querySelector(".ib-name");
     expect(getComputedStyle(name).display).toBe("block");
     expect(getComputedStyle(name).whiteSpace).toBe("normal");
+    modal.close();
+  });
+});
+
+describe("the folder card's icon block is bounded, not square (#106)", () => {
+  // WHY THIS IS A DECLARATION TEST AND NOT A SIZE TEST: jsdom has no layout, so
+  // "a folder card is 119px tall at the default step" is only assertable in
+  // tests/e2e/density.spec.js. What IS assertable here is the cascade jsdom
+  // resolves from the injected stylesheet — which is exactly where the bug
+  // lived: .ib-thumb declared aspect-ratio 1/1 with no override for .is-dir /
+  // .is-up, so the icon block tracked the TRACK and every compaction step made
+  // a folder card bigger.
+  //
+  // Every assertion below is paired with its opposite on the FILE card in the
+  // same test. A one-sided "the folder thumb is not square" passes against an
+  // implementation that dropped the square everywhere — which would ship
+  // stretched thumbnails on every file card.
+
+  it("drops the square for a folder while keeping it for a file", async () => {
+    const modal = await open();
+    const dirThumb = getComputedStyle(thumbOf(dirCard(modal)));
+    const fileThumb = getComputedStyle(thumbOf(fileCard(modal)));
+    expect(dirThumb.aspectRatio).toBe("auto");
+    expect(dirThumb.height).toBe("88px");
+    // The other direction: a photo still gets its square, sized by the track.
+    expect(fileThumb.aspectRatio).toBe("1 / 1");
+    expect(fileThumb.height).toBe("auto");
+    modal.close();
+  });
+
+  it("caps the icon block at 44px at the dense step, leaving the file thumb square", async () => {
+    // 209px folder against an 87px file tile was the sharpest reading in #106 —
+    // 2.4x, at the step whose entire job is fitting more on screen.
+    const modal = await open();
+    await setDensity(modal, "dense");
+    expect(getComputedStyle(thumbOf(dirCard(modal))).height).toBe("44px");
+    expect(getComputedStyle(thumbOf(fileCard(modal))).aspectRatio).toBe("1 / 1");
+    modal.close();
+  });
+
+  it("caps the icon block at 64px at the list step, matching the file thumb's column", async () => {
+    const modal = await open();
+    await setDensity(modal, "list");
+    expect(getComputedStyle(thumbOf(dirCard(modal))).height).toBe("64px");
+    // The file thumb is 64px because the 64px column plus the square says so —
+    // it must NOT have acquired a stated height, or the two would drift.
+    expect(getComputedStyle(thumbOf(fileCard(modal))).height).toBe("auto");
+    modal.close();
+  });
+
+  it("stops a folder being stretched to the height of a file card beside it", async () => {
+    // The grid stretches items by default, which is how the `..` card measured
+    // 313px — the height of the file card sharing its row — rather than the
+    // ~207px it needed. Two-sided: a file card must still stretch, since that
+    // is what keeps a row of thumbnails aligned.
+    const modal = await open();
+    expect(getComputedStyle(dirCard(modal)).alignSelf).toBe("start");
+    expect(getComputedStyle(fileCard(modal)).alignSelf).toBe("auto");
+    modal.close();
+  });
+
+  it("gives the `..` card the folder rules, at every step", async () => {
+    // .is-up was the one card class no density rule named. Asserted against the
+    // dir card's resolved values rather than against literals, so the two
+    // cannot drift apart silently.
+    const modal = await open();
+    await descend(modal);
+    expect(upCard(modal), "the fixture must render a `..` card").not.toBeNull();
+    for (const d of ["grid", "dense", "list"]) {
+      await setDensity(modal, d);
+      const up = getComputedStyle(thumbOf(upCard(modal)));
+      const dir = getComputedStyle(thumbOf(dirCard(modal)));
+      expect(up.height, `.. must match a folder at ${d}`).toBe(dir.height);
+      expect(up.aspectRatio, `.. must not be square at ${d}`).toBe("auto");
+      // ...and the height is a real cap, not the `auto` an unmatched rule
+      // would leave behind.
+      expect(up.height).not.toBe("auto");
+    }
+    modal.close();
+  });
+});
+
+describe("the list step is one ITEM per row, folders included (#106)", () => {
+  it("gives a folder card the same row template as a file card", async () => {
+    const modal = await open();
+    await setDensity(modal, "list");
+    const dir = getComputedStyle(dirCard(modal));
+    expect(dir.display).toBe("grid");
+    expect(dir.gridTemplateColumns).toBe("64px minmax(0, 1fr)");
+    // Two-sided: the row template belongs to the LIST step only. At the default
+    // step the same card is the ordinary vertical card, so a rule that leaked
+    // its scope fails here rather than shipping a row layout everywhere.
+    await setDensity(modal, "grid");
+    expect(getComputedStyle(dirCard(modal)).display).toBe("flex");
+    modal.close();
+  });
+
+  it("keeps the folder's name at every step, while a file's still goes at dense", async () => {
+    // A LOCK, not a regression — this held before #106 too, and it is what the
+    // fix was not allowed to spend: the compaction had to come out of the icon
+    // block, because a nameless folder is not a smaller folder card, it is an
+    // unusable one.
+    //
+    // Two-sided in the same test on purpose. "the folder name is not
+    // display:none" is also true of an implementation that stopped hiding ANY
+    // name, which would undo the dense step; the file-card half is the arm that
+    // separates "folders kept their name" from "nothing hides names any more".
+    const modal = await open();
+    for (const d of ["grid", "dense", "list"]) {
+      await setDensity(modal, d);
+      const dirName = dirCard(modal).querySelector(".ib-name");
+      expect(getComputedStyle(dirName).display, `folder name at ${d}`).not.toBe("none");
+    }
+    await setDensity(modal, "dense");
+    expect(getComputedStyle(fileCard(modal).querySelector(".ib-name")).display).toBe("none");
     modal.close();
   });
 });

@@ -18,11 +18,21 @@
 //   LOCK       — pins what the density work must not break.
 
 import { expect, test } from "@playwright/test";
-import { FILE_CARD, GRID, openBrowser, SCROLLER, waitForFileCards } from "./harness.js";
+import {
+  DIR_CARD,
+  FILE_CARD,
+  GRID,
+  openBrowser,
+  SCROLLER,
+  UP_CARD,
+  waitForFileCards,
+} from "./harness.js";
 import { folderSpec } from "./server.mjs";
 
 const ROOT_FILES = folderSpec("").fileCount;
+const BULK24_FILES = folderSpec("bulk-24").fileCount;
 const DENSITY = (d) => `.ib-density-seg[data-density="${d}"]`;
+const STEPS = ["grid", "dense", "list"];
 
 /** Switch density and wait for the grid to carry it. */
 async function setDensity(page, d) {
@@ -82,6 +92,29 @@ async function firstCardHeight(page) {
   return box.height;
 }
 
+/** Rendered height of the first card matching `sel`, rounded. */
+async function cardHeight(page, sel) {
+  const box = await page.locator(sel).first().boundingBox();
+  return Math.round(box.height);
+}
+
+/**
+ * Card heights at every density step, keyed by step.
+ *
+ * Both kinds are read in the SAME pass at each step so the file card is a
+ * control for the folder card rather than a separate run: a change that shrank
+ * everything (or nothing) is distinguishable from one that shrank folders.
+ */
+async function heightsPerStep(page, selectors) {
+  const out = {};
+  for (const d of STEPS) {
+    await setDensity(page, d);
+    out[d] = {};
+    for (const [key, sel] of Object.entries(selectors)) out[d][key] = await cardHeight(page, sel);
+  }
+  return out;
+}
+
 test.describe("REGRESSION — the density steps at a phone viewport", () => {
   test("dense actually renders four columns at 390px", async ({ page }) => {
     await openBrowser(page);
@@ -139,6 +172,73 @@ test.describe("REGRESSION — the density steps at a phone viewport", () => {
     expect(card.width).toBeGreaterThan(card.height);
     const thumb = await page.locator(`${FILE_CARD} .ib-thumb`).first().boundingBox();
     expect(thumb.width).toBeLessThanOrEqual(72);
+  });
+
+  test("a folder card shrinks at each compaction step, like a file card", async ({ page }) => {
+    // #106: it did the opposite. .ib-thumb is aspect-ratio 1/1 with no override
+    // for .is-dir, so the icon block tracked the TRACK — and at dense a folder
+    // spans two 84px columns, i.e. a WIDER track than the default step's. The
+    // measured numbers against main were 207 -> 209 -> 395px for a folder while
+    // the file card went 313 -> 87 -> 137.
+    //
+    // The file card is read in the same pass as the control: an implementation
+    // that shrank nothing, or that shrank everything into unusability, is
+    // distinguishable from one that fixed the folder. jsdom cannot see any of
+    // this — it has no layout, so every height there is 0.
+    await openBrowser(page);
+    await waitForFileCards(page, ROOT_FILES);
+    const h = await heightsPerStep(page, { dir: DIR_CARD, file: FILE_CARD });
+
+    expect(h.dense.dir, JSON.stringify(h)).toBeLessThan(h.grid.dir);
+    expect(h.list.dir, JSON.stringify(h)).toBeLessThanOrEqual(h.dense.dir);
+    // ...and at no step is a folder — which shows a 32px glyph — taller than a
+    // file card showing an actual image. That is the reading that made the
+    // dense step absurd: 209px of folder next to an 87px thumbnail.
+    for (const d of STEPS)
+      expect(h[d].dir, `${d}: ${JSON.stringify(h[d])}`).toBeLessThan(h[d].file);
+    // The control: the file card still does what it always did.
+    expect(h.dense.file).toBeLessThan(h.grid.file / 2);
+  });
+
+  test("the `..` card is a row at the list step, not a whole screen", async ({ page }) => {
+    // `..` is the first card in every subfolder and is .ib-card.is-up, which no
+    // density rule named. Measured against main inside this fixture's bulk-24:
+    // 395px inside a 411px band, so entering any subfolder at the list step
+    // painted one full screen of "↑ ..".
+    await openBrowser(page);
+    await waitForFileCards(page, ROOT_FILES);
+    await page.locator(`${DIR_CARD}[data-name="bulk-24"]`).click();
+    await waitForFileCards(page, BULK24_FILES);
+    await expect(page.locator(UP_CARD)).toHaveCount(1);
+
+    const h = await heightsPerStep(page, { up: UP_CARD, file: FILE_CARD });
+    const band = await gridBandHeight(page);
+    // At least four items fit beside it, rather than the 1.04 main managed.
+    expect(band / h.list.up, JSON.stringify({ band, ...h })).toBeGreaterThanOrEqual(4);
+    // Two-sided: `..` must not have been shrunk past the file rows it sits
+    // above either — a 4px card would satisfy the assertion above and be
+    // untappable. It is a row like the others.
+    expect(h.list.up).toBeGreaterThanOrEqual(44);
+    expect(h.list.up).toBeLessThanOrEqual(h.list.file);
+    // And it shrinks with the scale at every step, which is the whole ask.
+    expect(h.dense.up).toBeLessThan(h.grid.up);
+    expect(h.list.up).toBeLessThanOrEqual(h.dense.up);
+  });
+
+  test("the folder icon block stops tracking the grid track", async ({ page }) => {
+    // The mechanism, asserted directly rather than through the card height:
+    // aspect-ratio 1/1 made the icon block as TALL as the track is WIDE, which
+    // is why widening the track (span 2 at dense) made the card grow. A folder
+    // thumb must now be markedly wider than it is tall at the default step,
+    // while a FILE thumb stays square — the square is what a photo wants.
+    await openBrowser(page);
+    await waitForFileCards(page, ROOT_FILES);
+    const box = async (sel) => await page.locator(`${sel} .ib-thumb`).first().boundingBox();
+
+    const dirThumb = await box(DIR_CARD);
+    expect(Math.round(dirThumb.height)).toBeLessThan(Math.round(dirThumb.width));
+    const fileThumb = await box(FILE_CARD);
+    expect(Math.round(fileThumb.height)).toBe(Math.round(fileThumb.width));
   });
 
   test("the preference survives a reopen", async ({ page }) => {
@@ -211,6 +311,26 @@ test.describe("LOCK — what the density scale must not break", () => {
     await page.keyboard.press("j");
     const after = await indexOfFocused();
     expect(after - start).toBe(4);
+  });
+
+  test("the folder keeps its NAME and its two-column span while shrinking", async ({ page }) => {
+    // The compaction had to come out of the icon block, never out of the name:
+    // "a nameless folder is not a smaller folder card, it is an unusable one".
+    // The cheap way to make the numbers in the test above look good is to hide
+    // the name, so it is pinned here in the rendered layout as well as in the
+    // stylesheet (tests/js/density.test.js asserts the declaration).
+    await openBrowser(page);
+    await waitForFileCards(page, ROOT_FILES);
+    await setDensity(page, "dense");
+
+    const nameBox = await page.locator(`${DIR_CARD} .ib-name`).first().boundingBox();
+    expect(nameBox.height).toBeGreaterThan(0);
+    expect(await page.locator(`${DIR_CARD} .ib-name`).first().innerText()).not.toBe("");
+    // span 2: the folder is wider than a file tile, which is what buys the room
+    // for the name at an 84px track.
+    const dir = await page.locator(DIR_CARD).first().boundingBox();
+    const file = await page.locator(FILE_CARD).first().boundingBox();
+    expect(dir.width).toBeGreaterThan(file.width);
   });
 
   test("the type filter still works while a density is set", async ({ page }) => {
