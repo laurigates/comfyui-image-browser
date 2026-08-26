@@ -13,6 +13,8 @@ deny-everything guard turns that file red wholesale.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import urllib.parse
 from types import SimpleNamespace
 from typing import ClassVar
@@ -38,6 +40,18 @@ def _req(headers=None, body=None, **overrides):
         if v is None:
             h.pop(k, None)
     return SimpleNamespace(headers=h, json=_json_of(body if body is not None else {}))
+
+
+def _with_settings(request, settings):
+    """Attach stored ComfyUI settings to a fake request.
+
+    conftest's user-manager stub answers `get_settings(request)` from this
+    attribute, so a test switches an opt-in on through the SAME path the server
+    reads it — rather than monkeypatching the predicate it means to exercise. A
+    request without it reads as no settings stored: every opt-in's default-off.
+    """
+    request.comfy_settings = dict(settings)
+    return request
 
 
 def _get_req(query, headers=None):
@@ -245,31 +259,238 @@ class TestRealpathContainment:
             folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
         )
 
-    def test_a_symlinked_SUBFOLDER_still_resolves_while_a_symlinked_NAME_does_not(
+    def test_an_ESCAPING_symlinked_subfolder_is_refused_while_a_real_one_still_writes(
         self, tmp_path, monkeypatch
     ):
-        """The load-bearing pair, and the reason the gate is NOT in the listing
-        resolver. `output/renders -> /mnt/nas/renders` is the layout this
-        workspace actually uses: navigating into it and deleting a file there
-        must keep working. An entry that links OUT (`output/evil -> /etc`) must
-        not."""
+        """The load-bearing pair, END TO END through /delete, with real symlinks.
+
+        This test replaces one that asserted the BYPASS as desired behaviour
+        ("a symlinked subfolder must stay writable"). It was wrong, and the
+        wrongness was executable: anchoring the realpath check on the
+        subfolder-resolved base resolves the symlink into the base, after which
+        the target is contained by construction. Measured against this file
+        before the anchor moved to the root: `output/link -> /etc` plus
+        POST /delete {subfolder: "link", name: "passwd.png"} answered
+        `200 {"ok": true}` and the victim outside the sandbox was gone.
+
+        Both arms here, on one tree and one endpoint, because a refusal-only
+        test passes identically against a resolver hard-wired to refuse — which
+        would break every write in the pack."""
+        root = tmp_path / "output"
+        root.mkdir()
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        victim = etc / "passwd.png"
+        victim.write_bytes(b"secret")
+        (root / "link").symlink_to(etc, target_is_directory=True)
+
+        real = root / "renders"
+        real.mkdir()
+        keep = real / "clip.png"
+        keep.write_bytes(b"x")
+        self._sandbox(root, monkeypatch)
+
+        escaped = asyncio.run(
+            ib.image_browser_delete(
+                _req(body={"type": "output", "subfolder": "link", "name": "passwd.png"})
+            )
+        )
+        assert escaped.status == 400
+        assert victim.exists(), "a file outside the sandbox was deleted"
+        # Actionable, per the /file refusal's precedent: the message names the
+        # setting that permits this layout, so the operator is not left guessing.
+        assert escaped._body["error"] == ib.LINKED_SUBFOLDER_WRITES_DISABLED_MSG
+        assert "Allow writes through symlinked subfolders" in escaped._body["error"]
+
+        served = asyncio.run(
+            ib.image_browser_delete(
+                _req(body={"type": "output", "subfolder": "renders", "name": "clip.png"})
+            )
+        )
+        assert served.status == 200, served._body
+        assert not keep.exists(), "an ordinary in-root subfolder stopped being writable"
+
+    def test_the_DIR_resolver_is_gated_too_and_still_removes_a_real_folder(
+        self, tmp_path, monkeypatch
+    ):
+        """The folder half, END TO END through /rmdir, and it needs its own test:
+        the file and dir resolvers are separate functions with separate calls to
+        the containment gate, and a suite that only drove /delete reported the
+        dir resolver losing its gate as MISSED (measured, on the first run of
+        this table).
+
+        Reproduced before the fix: `output/link -> <outside>` plus
+        POST /rmdir {subfolder: "link", name: "important", recursive: true}
+        answered `200 {"ok": true, "files": 2, "dirs": 1}` and the tree outside
+        the sandbox was gone. Both arms on one tree."""
+        root = tmp_path / "output"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        important = outside / "important"
+        important.mkdir()
+        (important / "a.png").write_bytes(b"x")
+        (important / "b.png").write_bytes(b"x")
+        (important / "nested").mkdir()
+        (root / "link").symlink_to(outside, target_is_directory=True)
+
+        doomed = root / "scratch"
+        doomed.mkdir()
+        (doomed / "a.png").write_bytes(b"x")
+        self._sandbox(root, monkeypatch)
+
+        escaped = asyncio.run(
+            ib.image_browser_rmdir(
+                _req(
+                    body={
+                        "type": "output",
+                        "subfolder": "link",
+                        "name": "important",
+                        "recursive": True,
+                    }
+                )
+            )
+        )
+        assert escaped.status == 400
+        assert escaped._body["error"] == ib.LINKED_SUBFOLDER_WRITES_DISABLED_MSG
+        assert important.exists(), "a tree outside the sandbox was deleted"
+        assert (important / "a.png").exists()
+
+        served = asyncio.run(
+            ib.image_browser_rmdir(
+                _req(
+                    body={
+                        "type": "output",
+                        "subfolder": "",
+                        "name": "scratch",
+                        "recursive": True,
+                    }
+                )
+            )
+        )
+        assert served.status == 200, served._body
+        assert not doomed.exists(), "an ordinary in-root folder stopped being removable"
+
+    def test_an_unknown_type_anchors_on_a_path_nothing_can_be_under(self, tmp_path, monkeypatch):
+        """Defence in depth, and the direction matters.
+
+        Every caller rejects a non-sandboxed type before reaching the anchor, so
+        this is unreachable today. It is asserted anyway because the failure mode
+        of getting it wrong is silent: `folder_paths.get_directory_by_type`
+        answers None for an unknown type, and a fallback of `""` or `"."`
+        resolves to the CWD — under which a great deal IS contained. Paired with
+        a real type so it cannot pass against a function that always refuses."""
+        import folder_paths
+
+        # Type-AWARE, unlike the class helper: core answers None for a type it
+        # does not know, and that None is the input under test here.
+        monkeypatch.setattr(
+            folder_paths,
+            "get_directory_by_type",
+            lambda t: str(tmp_path) if t in ib.SANDBOXED_TYPES else None,
+            raising=False,
+        )
+        assert ib._contained_after_realpath(str(tmp_path / "x.png"), ib._sandbox_root("output"))
+        assert not ib._contained_after_realpath(
+            str(tmp_path / "x.png"), ib._sandbox_root("nonesuch")
+        )
+        assert not ib._contained_after_realpath(os.getcwd(), ib._sandbox_root("nonesuch"))
+
+    def test_a_symlinked_ROOT_stays_writable(self, tmp_path, monkeypatch):
+        """The anchor is realpath(ROOT), which is why moving it off the base did
+        not break the install whose whole output dir lives on another disk
+        (`output -> /mnt/otherdisk/output`). Resolving the root once puts every
+        target under it inside the anchor.
+
+        Paired with the refusal above: without this arm, a resolver that refused
+        every symlink anywhere would read as correct."""
+        disk = tmp_path / "otherdisk"
+        disk.mkdir()
+        (disk / "r.png").write_bytes(b"x")
+        linked_root = tmp_path / "output"
+        linked_root.symlink_to(disk, target_is_directory=True)
+        self._sandbox(linked_root, monkeypatch)
+
+        target, err = ib._resolve_sandboxed_file("output", "", "r.png")
+        assert err == ""
+        assert target is not None
+
+    def test_the_opt_in_permits_the_SUBFOLDER_and_still_refuses_the_LEAF(
+        self, tmp_path, monkeypatch
+    ):
+        """The escape hatch is exactly as wide as the deployment it exists for.
+
+        `output/renders -> /mnt/nas/renders` is a real layout, so it is handed
+        back — but only the subfolder. A symlinked NAME
+        (`output/leak.png -> /etc/passwd`) is refused with the opt-in ON, which
+        is what stops the switch being a general containment off-switch."""
         root = tmp_path / "output"
         root.mkdir()
         nas = tmp_path / "nas"
         nas.mkdir()
         (nas / "clip.png").write_bytes(b"x")
         (root / "renders").symlink_to(nas, target_is_directory=True)
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (root / "evil").symlink_to(outside, target_is_directory=True)
+        secret = tmp_path / "secret.png"
+        secret.write_bytes(b"x")
+        (root / "leak.png").symlink_to(secret)
         self._sandbox(root, monkeypatch)
 
-        target, err = ib._resolve_sandboxed_file("output", "renders", "clip.png")
-        assert err == "", "a symlinked subfolder must stay writable"
-        assert target is not None
+        _t, err = ib._resolve_sandboxed_file(
+            "output", "renders", "clip.png", allow_linked_subfolder=True
+        )
+        assert err == "", "the opt-in must permit the symlinked subfolder"
 
-        _t, err = ib._resolve_sandboxed_dir("output", "", "evil")
-        assert err == "name escapes root"
+        _t, err = ib._resolve_sandboxed_file("output", "", "leak.png", allow_linked_subfolder=True)
+        assert err == "name escapes root", "the opt-in must not widen the leaf"
+
+    def test_the_endpoints_honour_the_opt_in_and_default_it_OFF(self, tmp_path, monkeypatch):
+        """The wiring, not the resolver: a default that is right in
+        `_resolve_sandboxed_file` and never read by a handler protects nothing.
+        Same request twice, only the stored setting differing."""
+        root = tmp_path / "output"
+        root.mkdir()
+        nas = tmp_path / "nas"
+        nas.mkdir()
+        victim = nas / "clip.png"
+        victim.write_bytes(b"x")
+        (root / "renders").symlink_to(nas, target_is_directory=True)
+        self._sandbox(root, monkeypatch)
+        body = {"type": "output", "subfolder": "renders", "name": "clip.png"}
+
+        off = asyncio.run(ib.image_browser_delete(_req(body=body)))
+        assert off.status == 400
+        assert victim.exists()
+
+        on = asyncio.run(
+            ib.image_browser_delete(
+                _with_settings(_req(body=body), {ib.SETTING_ALLOW_LINKED_SUBFOLDER_WRITES: True})
+            )
+        )
+        assert on.status == 200, on._body
+        assert not victim.exists()
+
+    @pytest.mark.parametrize("stored", [False, "true", 1, None, "yes"])
+    def test_only_a_real_boolean_True_opens_the_symlink_hatch(self, tmp_path, monkeypatch, stored):
+        """Same `is True` discipline as the read opt-in — a hand-edited settings
+        file holding the string "false" must not turn a containment gate off.
+        Paired with the True arm in the test above."""
+        root = tmp_path / "output"
+        root.mkdir()
+        nas = tmp_path / "nas"
+        nas.mkdir()
+        (nas / "clip.png").write_bytes(b"x")
+        (root / "renders").symlink_to(nas, target_is_directory=True)
+        self._sandbox(root, monkeypatch)
+
+        resp = asyncio.run(
+            ib.image_browser_delete(
+                _with_settings(
+                    _req(body={"type": "output", "subfolder": "renders", "name": "clip.png"}),
+                    {ib.SETTING_ALLOW_LINKED_SUBFOLDER_WRITES: stored},
+                )
+            )
+        )
+        assert resp.status == 400
 
     def test_the_READ_resolver_is_untouched_by_the_gate(self, tmp_path, monkeypatch):
         """/list, /thumb, /metadata and pin resolution all share
@@ -539,3 +760,230 @@ class TestFileOptIn:
         self._settings(monkeypatch, {ib.SETTING_ALLOW_PATH_READS: True})
         asyncio.run(ib.image_browser_file(_get_req(claimed, headers)))
         ib.web.FileResponse.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# The absolute-path read opt-in covers EVERY absolute-path read
+# ---------------------------------------------------------------------------
+
+
+class TestEveryAbsolutePathReadIsGated:
+    """`ImageBrowser.AllowAbsolutePathReads` must mean what it is named.
+
+    It used to gate /file alone while /thumb, /metadata and `type=path`
+    listings kept their arbitrary reach. Measured with the opt-in OFF against
+    real Pillow and a PNG outside every root: /file answered 403, and
+
+        /thumb    -> 200 image/webp, 436 bytes, decoding to (512, 384) with
+                     pixel(0,0) = (200, 30, 28) — the subject's own colour
+        /metadata -> 200, returning the file's embedded `raw` text
+        /list ?type=path&path=/etc -> 200, 19 directories enumerated
+
+    A 512x384 re-encode of an image IS a read of it: a photo, a screenshot and
+    a scanned document all survive that downscale legibly. So the switch covers
+    all four, and each test below asserts BOTH directions on the same address —
+    a refusal-only suite passes identically against endpoints that stopped
+    answering at all.
+    """
+
+    @staticmethod
+    def _sandbox(base, monkeypatch):
+        import folder_paths
+
+        monkeypatch.setattr(
+            folder_paths, "get_directory_by_type", lambda t: str(base), raising=False
+        )
+
+    def test_thumb_refuses_a_path_read_when_off_and_resolves_it_when_on(self, tmp_path):
+        outside = str(tmp_path / "photo.png")
+
+        off = asyncio.run(ib.image_browser_thumb(_get_req({"path": outside})))
+        assert off.status == 403
+        assert off._body["error"] == ib.PATH_READS_DISABLED_MSG
+
+        on = asyncio.run(
+            ib.image_browser_thumb(
+                _with_settings(_get_req({"path": outside}), {ib.SETTING_ALLOW_PATH_READS: True})
+            )
+        )
+        # Past the gate: the resolver returned the path and the handler is now
+        # answering about the FILE (absent -> 404), not about the setting.
+        assert on.status == 404
+
+    def test_metadata_refuses_a_path_read_when_off_and_resolves_it_when_on(self, tmp_path):
+        outside = str(tmp_path / "notes.txt")
+
+        off = asyncio.run(ib.image_browser_metadata(_get_req({"path": outside})))
+        assert off.status == 403
+        assert off._body["error"] == ib.PATH_READS_DISABLED_MSG
+
+        on = asyncio.run(
+            ib.image_browser_metadata(
+                _with_settings(_get_req({"path": outside}), {ib.SETTING_ALLOW_PATH_READS: True})
+            )
+        )
+        assert on.status == 400
+        assert on._body["error"] == "unsupported file type"
+
+    def test_list_refuses_type_path_when_off_and_enumerates_when_on(self, tmp_path):
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "a.png").write_bytes(b"x")
+        query = {"type": "path", "path": str(tmp_path)}
+
+        off = asyncio.run(ib.image_browser_list(_get_req(query)))
+        assert off.status == 403
+        assert off._body["error"] == ib.PATH_READS_DISABLED_MSG
+        assert "dirs" not in off._body, "a refused listing must not enumerate anything"
+
+        on = asyncio.run(
+            ib.image_browser_list(
+                _with_settings(_get_req(query), {ib.SETTING_ALLOW_PATH_READS: True})
+            )
+        )
+        assert on.status == 200
+        assert [d["name"] for d in on._body["dirs"]] == ["sub"]
+
+    def test_the_refusal_precedes_any_disk_touch(self, tmp_path, monkeypatch):
+        """Refused before the filesystem is consulted, so an off install is not
+        an existence oracle either — the same property /file already had.
+
+        Both arms: the ON call is what proves the endpoints reach scandir at
+        all, so a hard-wired `raise` in the spy could not pass this silently."""
+        calls = []
+        real_scandir = os.scandir
+
+        def spy(path, *a, **kw):
+            calls.append(path)
+            return real_scandir(path, *a, **kw)
+
+        monkeypatch.setattr(os, "scandir", spy)
+        query = {"type": "path", "path": str(tmp_path)}
+
+        asyncio.run(ib.image_browser_list(_get_req(query)))
+        assert calls == [], f"a refused listing scanned {calls}"
+
+        asyncio.run(
+            ib.image_browser_list(
+                _with_settings(_get_req(query), {ib.SETTING_ALLOW_PATH_READS: True})
+            )
+        )
+        assert calls == [str(tmp_path)]
+
+    def test_the_gate_precedes_the_RESOLVER_so_a_refusal_reveals_nothing(self, tmp_path):
+        """Ordering, made observable.
+
+        `_resolve_listing_base` answers 400 "missing path" for `type=path` with
+        no path. Gate first and every refused request collapses to one 403, so a
+        caller learns only that the switch is off. Gate second and the two
+        answers differ — a small oracle, and exactly the shape /file's
+        extension-before-isfile ordering exists to avoid.
+
+        The paired positive is the same malformed request with the switch ON,
+        which must still say 'missing path': the collapse above is the gate
+        acting, not the endpoint having stopped validating."""
+        off = asyncio.run(ib.image_browser_list(_get_req({"type": "path"})))
+        assert off.status == 403
+        assert off._body["error"] == ib.PATH_READS_DISABLED_MSG
+
+        on = asyncio.run(
+            ib.image_browser_list(
+                _with_settings(_get_req({"type": "path"}), {ib.SETTING_ALLOW_PATH_READS: True})
+            )
+        )
+        assert on.status == 400
+        assert on._body["error"] == "missing path"
+
+    def test_the_SANDBOXED_roots_are_never_gated(self, tmp_path, monkeypatch):
+        """The switch is about reach OUTSIDE input/output/temp. Gating the roots
+        too would turn the pack off by default, which is a different bug — and
+        one a refusal-only suite would have called a pass."""
+        self._sandbox(tmp_path, monkeypatch)
+        (tmp_path / "shot.png").write_bytes(b"x")
+
+        resp = asyncio.run(ib.image_browser_list(_get_req({"type": "output"})))
+        assert resp.status == 200
+        assert [f["name"] for f in resp._body["files"]] == ["shot.png"]
+
+        thumb = asyncio.run(
+            ib.image_browser_thumb(_get_req({"type": "output", "name": "missing.png"}))
+        )
+        assert thumb.status == 404, "a sandboxed thumb must fail on the FILE, not on the setting"
+
+
+class TestUserSettingsDegradeToOff:
+    """ "Any failure degrades to off" has to be true, not merely documented.
+
+    `_user_settings` used to be `get_settings(request) or {}` inside a try, so a
+    truthy NON-mapping (a hand-edited settings file holding a list or a string)
+    passed straight through and the caller's `.get` raised AttributeError
+    OUTSIDE the try — a 500 from an endpoint whose contract is to answer 403.
+    """
+
+    @staticmethod
+    def _stored(monkeypatch, value):
+        monkeypatch.setattr(
+            ib,
+            "PromptServer",
+            SimpleNamespace(
+                instance=SimpleNamespace(
+                    user_manager=SimpleNamespace(
+                        settings=SimpleNamespace(get_settings=lambda request: value)
+                    )
+                )
+            ),
+            raising=False,
+        )
+
+    @pytest.mark.parametrize("value", [["a", "b"], "true", 7, {"a"}])
+    def test_a_truthy_non_mapping_reads_as_off_rather_than_raising(self, monkeypatch, value):
+        self._stored(monkeypatch, value)
+        assert ib._user_settings(_get_req({})) == {}
+        assert ib._absolute_path_reads_enabled(_get_req({})) is False
+        assert ib._linked_subfolder_writes_enabled(_get_req({})) is False
+
+    def test_a_real_mapping_still_reads_through(self, monkeypatch):
+        """The paired positive: without it, `_user_settings` hard-wired to `{}`
+        would pass every assertion above while switching both opt-ins off
+        permanently."""
+        self._stored(monkeypatch, {ib.SETTING_ALLOW_PATH_READS: True})
+        assert ib._absolute_path_reads_enabled(_get_req({})) is True
+
+
+class TestCorsHeaderFlag:
+    """`--enable-cors-header` is an explicit "I want this reachable
+    cross-origin", and core drops its OWN cross-site check under it. Refusing
+    anyway broke that deployment with a message about a header the operator was
+    already sending correctly.
+
+    The Content-Type gate is NOT waived with it — that one is what stops a
+    preflight-free <form> post, and it applies to every configuration.
+    """
+
+    @staticmethod
+    def _flag(monkeypatch, value):
+        module = SimpleNamespace(args=SimpleNamespace(enable_cors_header=value))
+        monkeypatch.setitem(sys.modules, "comfy", SimpleNamespace(cli_args=module))
+        monkeypatch.setitem(sys.modules, "comfy.cli_args", module)
+
+    def test_cross_site_is_refused_without_the_flag_and_allowed_with_it(self, monkeypatch):
+        cross = _req(**{"Sec-Fetch-Site": "cross-site"})
+        self._flag(monkeypatch, False)
+        assert ib._reject_cross_site(cross).status == 403
+        self._flag(monkeypatch, True)
+        assert ib._reject_cross_site(cross) is None
+
+    def test_the_JSON_gate_survives_the_flag(self, monkeypatch):
+        """The half that must NOT be waived. Without this arm the flag could be
+        widened into a general guard off-switch and the suite would stay green."""
+        self._flag(monkeypatch, True)
+        form = _req(**{"Content-Type": "text/plain", "Sec-Fetch-Site": "cross-site"})
+        assert ib._reject_non_json(form).status == 415
+
+    def test_an_absent_cli_args_module_leaves_the_STRICT_gate_in_force(self, monkeypatch):
+        """Fail-closed. `comfy.cli_args` exists only inside a ComfyUI install, so
+        the read is a guarded lazy import and any failure must keep the refusal —
+        never open it. Paired with the allowed arm above."""
+        monkeypatch.setitem(sys.modules, "comfy", None)
+        monkeypatch.setitem(sys.modules, "comfy.cli_args", None)
+        assert ib._cors_header_enabled() is False
+        assert ib._reject_cross_site(_req(**{"Sec-Fetch-Site": "cross-site"})).status == 403

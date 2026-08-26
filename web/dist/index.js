@@ -1863,6 +1863,9 @@ var BASE_PATHS = null;
 function pathReadsAllowed() {
   return BASE_PATHS?.allow_path_reads === true;
 }
+function invalidateBasePaths() {
+  BASE_PATHS = null;
+}
 async function fetchBasePaths() {
   if (BASE_PATHS)
     return BASE_PATHS;
@@ -2335,6 +2338,7 @@ async function migrateLocalPins() {
 }
 function openImageBrowser() {
   ensureStyleOnce(STYLE_ID4, BROWSER_CSS);
+  invalidateBasePaths();
   const savedView = viewStore.load();
   const state = {
     type: "output",
@@ -3066,6 +3070,14 @@ function openImageBrowser() {
         const file2 = new File([graphJSON], `${base}.json`, { type: "application/json" });
         modal.close();
         await app.handleFile(file2);
+        return;
+      }
+      if (type === "path" && !pathReadsAllowed()) {
+        notify({
+          severity: "warn",
+          summary: "Absolute-path reads are off",
+          detail: PATH_READS_DISABLED_MSG
+        });
         return;
       }
       const res = await fetch(fullSrcURL(type, sub, f.name, state.absPath));
@@ -5700,6 +5712,15 @@ app3.registerExtension({
       sortOrder: 80,
       name: "Allow absolute-path file reads",
       tooltip: "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. Images still get thumbnails and metadata on the browse… tab either way.",
+      type: "boolean",
+      defaultValue: false
+    },
+    {
+      id: "ImageBrowser.AllowSymlinkedSubfolderWrites",
+      category: ["Touch Tools", "Image Browser", "Symlinked subfolder writes"],
+      sortOrder: 85,
+      name: "Allow writes through symlinked subfolders",
+      tooltip: "Off, a folder inside Input/Output/Temp that is a symlink pointing outside them can be browsed but not renamed, moved, deleted or rated — because a link out of the sandbox is also how a crafted request escapes it. Turn this on only if you deliberately keep renders on another disk or a network share via a symlinked subfolder. A symlinked FILE is still refused either way, and a symlinked ROOT (your whole output dir on another disk) works without this.",
       type: "boolean",
       defaultValue: false
     },

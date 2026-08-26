@@ -1338,11 +1338,18 @@ class TestParseFallthrough:
 # ---------- the endpoint ---------------------------------------------
 
 
+# See tests/test_helpers.py's PATH_READS_ON — /metadata?path= is behind the
+# same opt-in as /file, so a test of the PARSER has to switch it on to reach
+# the parser at all.
+PATH_READS_ON = {"ImageBrowser.AllowAbsolutePathReads": True}
+
+
 class _FakeGetRequest:
     """Stand-in for a GET aiohttp.web.Request — /metadata reads .rel_url.query."""
 
-    def __init__(self, query):
+    def __init__(self, query, settings=None):
         self.rel_url = SimpleNamespace(query=query)
+        self.comfy_settings = dict(settings or {})
 
 
 A1111_PNG = _png(
@@ -1360,8 +1367,11 @@ A1111_PNG = _png(
 
 
 class TestMetadataEndpoint:
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_metadata(_FakeGetRequest(query)))
+    def _call(self, query, settings=PATH_READS_ON):
+        # These classes test the PARSER, which `?path=` is the only way to
+        # reach — so the opt-in is on by default here. The gate itself is
+        # asserted two-sided in tests/test_guard.py, against the real endpoint.
+        return asyncio.run(ib.image_browser_metadata(_FakeGetRequest(query, settings)))
 
     def test_non_image_extension_is_400_before_any_disk_touch(self, monkeypatch):
         """A 400 (not 404) for a file that doesn't exist is the proof that the
@@ -1797,8 +1807,11 @@ class TestVideoFamilySummaries:
 class TestVideoMetadataGate:
     """The /metadata perimeter, and the frontend mirror of it."""
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_metadata(_FakeGetRequest(query)))
+    def _call(self, query, settings=PATH_READS_ON):
+        # These classes test the PARSER, which `?path=` is the only way to
+        # reach — so the opt-in is on by default here. The gate itself is
+        # asserted two-sided in tests/test_guard.py, against the real endpoint.
+        return asyncio.run(ib.image_browser_metadata(_FakeGetRequest(query, settings)))
 
     def test_readable_video_answers_200_with_a_summary(self, tmp_path):
         data = _mp4(_indexed_item(1, VIDEO_GRAPH_JSON.encode()), keys=[b"prompt"])

@@ -136,6 +136,34 @@ app.registerExtension({
     {
       // FROZEN id; distinct third category element; explicit sortOrder — see
       // the note on ImageBrowser.SidebarStars above.
+      //
+      // The SECOND security setting, and deliberately separate from the one
+      // above: the two reaches are unrelated (one reads outside the roots, the
+      // other writes through a link inside them) and one switch granting both
+      // would be a worse default than either.
+      //
+      // Write containment is anchored on the sandbox ROOT, because anchoring it
+      // on the folder you navigated into resolves a symlinked subfolder INTO
+      // the anchor — which let `output/link -> /etc` delete files outside the
+      // sandbox entirely. The root anchor closes that and, as a side effect,
+      // stops a genuinely symlinked subfolder (`output/renders ->
+      // /mnt/nas/renders`, a real layout) being written to. This hands that
+      // layout back to the person who runs it, explicitly.
+      //
+      // It widens the SUBFOLDER only. A symlinked filename is still refused
+      // with this on, so it is not a general containment off-switch.
+      id: "ImageBrowser.AllowSymlinkedSubfolderWrites",
+      category: ["Touch Tools", "Image Browser", "Symlinked subfolder writes"],
+      sortOrder: 85,
+      name: "Allow writes through symlinked subfolders",
+      tooltip:
+        "Off, a folder inside Input/Output/Temp that is a symlink pointing outside them can be browsed but not renamed, moved, deleted or rated — because a link out of the sandbox is also how a crafted request escapes it. Turn this on only if you deliberately keep renders on another disk or a network share via a symlinked subfolder. A symlinked FILE is still refused either way, and a symlinked ROOT (your whole output dir on another disk) works without this.",
+      type: "boolean",
+      defaultValue: false,
+    },
+    {
+      // FROZEN id; distinct third category element; explicit sortOrder — see
+      // the note on ImageBrowser.SidebarStars above.
       id: "ImageBrowser.LightboxActions",
       category: ["Touch Tools", "Image Browser", "Lightbox actions"],
       sortOrder: 90,

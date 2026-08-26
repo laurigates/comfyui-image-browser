@@ -72,6 +72,7 @@ import {
   fullSrcURL,
   type ImageMetadata,
   imageThumbURL,
+  invalidateBasePaths,
   type ListingFile,
   META_EXTS,
   META_VIDEO_EXTS,
@@ -475,6 +476,13 @@ interface ThumbDescriptor {
 
 export function openImageBrowser(): ModalShellController {
   ensureStyleOnce(STYLE_ID, BROWSER_CSS);
+  // /base carries `allow_path_reads`, which the user flips in the settings
+  // panel — a different surface, with no channel back to this module. Drop the
+  // cached answer on every open so the switch takes effect on the next open
+  // rather than on the next hard reload. (The backend already refuses to cache
+  // it for the same reason; the singleton in api.ts had reintroduced the
+  // staleness one layer up.)
+  invalidateBasePaths();
 
   const savedView = viewStore.load();
   const state: BrowserState = {
@@ -1695,6 +1703,19 @@ export function openImageBrowser(): ModalShellController {
         const file = new File([graphJSON], `${base}.json`, { type: "application/json" });
         modal.close();
         await app.handleFile(file);
+        return;
+      }
+      // Images take the byte path, and on the browse…/path tab those bytes
+      // come from /image_browser/file — which is behind the absolute-path
+      // opt-in. Without this the ⤓ button and the `w` shortcut surfaced a bare
+      // "HTTP 403" that never named the setting; openFull already says it
+      // properly, and this is the second route to the same endpoint.
+      if (type === "path" && !pathReadsAllowed()) {
+        notify({
+          severity: "warn",
+          summary: "Absolute-path reads are off",
+          detail: PATH_READS_DISABLED_MSG,
+        });
         return;
       }
       const res = await fetch(fullSrcURL(type, sub, f.name, state.absPath));

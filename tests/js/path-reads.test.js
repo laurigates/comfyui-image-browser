@@ -152,19 +152,24 @@ describe("a type=path video card", () => {
     modal.close();
   });
 
-  it("leaves a type=path IMAGE card alone in both states", async () => {
-    // The opt-in gates /file, never /thumb — thumbnails, listings and metadata
-    // on the browse… tab keep working because none of them returns a file's
-    // bytes. An over-broad gate would take the whole tab out, and that is the
-    // regression this pins.
-    for (const allowed of [true, false]) {
-      const { modal } = await load(allowed);
-      const card = modal.dialog.querySelector('.ib-card[data-ext=".png"]');
-      expect(card).not.toBeNull();
-      expect(card.querySelector("img")).not.toBeNull();
-      expect(card.querySelector(".ib-thumb-icon")).toBeNull();
-      modal.close();
-    }
+  it("renders an ordinary <img> card when the opt-in is ON", async () => {
+    // The paired positive for the locked-tile assertion above: with the switch
+    // on, a type=path listing paints exactly like any other. Without this arm a
+    // grid that had stopped rendering path cards entirely would still pass.
+    //
+    // There is no OFF arm here any more, and its absence is the point: the
+    // backend now refuses `type=path` LISTINGS with the switch off (it used to
+    // serve them, along with /thumb re-encodes and /metadata, while only /file
+    // was gated — see image_browser.py section 2). So "the browse… tab with the
+    // opt-in off" is a tab with no cards at all and a toast naming the setting,
+    // not a tab of image cards. A test painting cards in that state would be
+    // asserting a state the server can no longer produce.
+    const { modal } = await load(true);
+    const card = modal.dialog.querySelector('.ib-card[data-ext=".png"]');
+    expect(card).not.toBeNull();
+    expect(card.querySelector("img")).not.toBeNull();
+    expect(card.querySelector(".ib-thumb-icon")).toBeNull();
+    modal.close();
   });
 });
 
@@ -190,5 +195,145 @@ describe("opening a type=path file full-size", () => {
     await Promise.resolve();
     expect(blocked).not.toHaveBeenCalled();
     off.modal.close();
+  });
+});
+
+describe("loading a workflow from a type=path card", () => {
+  it("warns instead of fetching when the opt-in is OFF, and fetches when it is ON", async () => {
+    // The SECOND route to /image_browser/file, and the one that was left
+    // ungated: openFull checked the opt-in, loadWorkflow did not. With the
+    // switch off the ⤓ button (and the `w` shortcut) surfaced a bare
+    // "HTTP 403" that never named the setting — a message the user cannot act
+    // on, from a control that looks broken.
+    //
+    // Two-sided on one card: the ON arm proves the button still reaches the
+    // endpoint, so a loadWorkflow hard-wired to bail could not pass this.
+    const meta = {
+      ok: true,
+      format: "png",
+      source: "comfyui",
+      summary: {},
+      raw: { workflow: '{"nodes":[]}' },
+      truncated: false,
+    };
+
+    function stubWithMetadata(allowPathReads) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url) => {
+          const s = String(url);
+          if (s.includes("/image_browser/pins")) {
+            return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
+          }
+          if (s.includes("/image_browser/base")) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                ok: true,
+                base_path: "/srv",
+                input_dir: "/srv/in",
+                output_dir: "/srv/out",
+                temp_dir: "/srv/tmp",
+                allow_path_reads: allowPathReads,
+              }),
+            };
+          }
+          if (s.includes("/image_browser/metadata")) {
+            return { ok: true, status: 200, json: async () => meta };
+          }
+          if (s.includes("/image_browser/file")) {
+            return { ok: true, status: 200, blob: async () => new Blob(["{}"]) };
+          }
+          return { ok: true, status: 200, json: async () => PATH_LISTING };
+        }),
+      );
+    }
+
+    async function clickWorkflow(allowPathReads) {
+      vi.resetModules();
+      stubWithMetadata(allowPathReads);
+      const { openShell } = await import("../../src/index.ts");
+      const modal = await openOnPathTab(openShell);
+      const card = modal.dialog.querySelector('.ib-card[data-ext=".png"]');
+      const btn = card.querySelector('[data-action="workflow"]');
+      expect(btn, "the ⤓ button must render on the path tab (it is a READ)").not.toBeNull();
+      btn.click();
+      // The handler awaits /metadata before it decides anything, so give the
+      // whole chain time to settle — asserting immediately would find no /file
+      // request either way and prove nothing.
+      await vi.waitFor(() => {
+        const hitMeta = fetch.mock.calls.some((c) =>
+          String(c[0]).includes("/image_browser/metadata"),
+        );
+        if (!hitMeta) throw new Error("metadata not read yet");
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      const fileCalls = fetch.mock.calls.filter((c) =>
+        String(c[0]).includes("/image_browser/file"),
+      );
+      modal.close();
+      return fileCalls;
+    }
+
+    expect(await clickWorkflow(false)).toHaveLength(0);
+    expect(await clickWorkflow(true)).not.toHaveLength(0);
+  });
+});
+
+describe("the /base answer is re-read on every modal open", () => {
+  it("picks up a flipped setting without a page reload", async () => {
+    // BASE_PATHS is a module singleton and was never invalidated, so a user who
+    // turned the setting on in the settings panel still saw 🔒 tiles until a
+    // hard refresh. The BACKEND deliberately refuses to cache this answer for
+    // exactly that reason; the frontend then cached it one layer up.
+    //
+    // Note the modules are imported ONCE here — no vi.resetModules() between
+    // the two opens. That is the whole point: resetting would clear the cache
+    // by re-import and the test would pass with or without the fix.
+    vi.resetModules();
+    let allowed = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        const s = String(url);
+        if (s.includes("/image_browser/pins")) {
+          return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
+        }
+        if (s.includes("/image_browser/base")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ok: true,
+              base_path: "/srv",
+              input_dir: "/srv/in",
+              output_dir: "/srv/out",
+              temp_dir: "/srv/tmp",
+              allow_path_reads: allowed,
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => PATH_LISTING };
+      }),
+    );
+    const api = await import("../../src/api.ts");
+    const { openShell } = await import("../../src/index.ts");
+
+    const first = await openOnPathTab(openShell);
+    expect(api.pathReadsAllowed()).toBe(false);
+    first.modal ? first.modal.close() : first.close();
+
+    // The user flips the switch in the settings panel — a surface with no
+    // channel back to this module.
+    allowed = true;
+
+    const second = await openOnPathTab(openShell);
+    expect(
+      api.pathReadsAllowed(),
+      "the second open must re-read /base, not serve the cached answer",
+    ).toBe(true);
+    second.modal ? second.modal.close() : second.close();
   });
 });

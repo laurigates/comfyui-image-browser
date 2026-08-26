@@ -37,7 +37,8 @@ manage without leaving ComfyUI.
 
 - **Browse** the **Input / Output / Temp** folders as tabs, plus a **browse…**
   tab for arbitrary absolute paths (`models/`, `custom_nodes/`, anywhere on
-  disk). Breadcrumbs, folder descend, sort (newest / oldest / name / size /
+  disk) — that tab is **off until you switch it on**, see *Security posture*.
+  Breadcrumbs, folder descend, sort (newest / oldest / name / size /
   resolution), and fuzzy filename filter.
 - **Filter by media type** — a segmented **All / 🖼 Images / 🎬 Videos** control
   narrows the grid to one kind. It filters on the server, so in a big output
@@ -58,7 +59,8 @@ manage without leaving ComfyUI.
 - **Thumbnails** for images (WebP previews) and videos (poster frames), lazily
   loaded as you scroll. Tap a card to open the full-size file in a new tab.
 - **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab
-  including `browse…`. ComfyUI writes the workflow into every image *and video*
+  (including `browse…`, once absolute-path reads are switched on). ComfyUI
+  writes the workflow into every image *and video*
   it saves, so this turns the browser into a durable way back into a past
   generation — unlike the stock sidebar, whose list is cleared on every ComfyUI
   restart. Files re-encoded elsewhere (a phone gallery, a chat app) lose that
@@ -292,29 +294,48 @@ token — per Fetch, `Origin` is sent on every non-GET request, so a token buys 
 additional browser defence while breaking any cached copy of the frontend
 bundle.
 
-**Reading files by absolute path is OFF by default.** `GET
-/image_browser/file` is the one endpoint that returns a host file's raw bytes.
-It answers 403 — before touching the disk, so it is not even an existence
-oracle — unless you switch on **Settings → Touch Tools → Image Browser →
-"Allow absolute-path file reads"**. With it off, the `browse…` tab still lists
-folders, shows thumbnails and reads metadata (none of those returns a file's
-bytes); what stops working is video preview and full-size open outside
-Input/Output/Temp, and the grid says so on the card rather than showing a blank
-player. The setting is read from your own ComfyUI settings server-side and
-cannot be flipped by a request parameter or a header.
+**Reading anything outside Input/Output/Temp is OFF by default.** Four
+endpoints can reach an absolute host path — `GET /image_browser/file`,
+`/thumb?path=`, `/metadata?path=` and `/list?type=path` — and all four answer
+403 before touching the disk, so none of them is even an existence oracle,
+unless you switch on **Settings → Touch Tools → Image Browser → "Allow
+absolute-path file reads"**. The setting is read from your own ComfyUI settings
+server-side and cannot be flipped by a request parameter or a header.
+
+With it **off**, the `browse…` tab does not work at all: it reports the
+refusal, naming the setting, instead of half-listing. With it **on**, anyone
+who can reach this port (ComfyUI has no login) can enumerate any directory on
+the machine with names, sizes, image dimensions and timestamps; fetch a decoded
+512px thumbnail of any image on it; read the embedded generation metadata of
+any image or supported video; and stream any whitelisted media file's raw
+bytes. A downscale is a read — a photo, a screenshot and a scanned document all
+survive one legibly — so treat the switch as "let this server serve my media
+library", not as a preview convenience.
 
 **Writes are sandboxed and doubly contained.** Management actions are
 intentionally **disabled in the arbitrary-path (`browse…`) tab** — that mode is
 browse-only. The backend rejects writes outside the Input/Output/Temp roots, so
 an arbitrary path can never be mutated by URL crafting, and each target is
-checked both lexically (no `..`) and after `realpath` (no escaping through a
-symlink inside the sandbox). A symlinked *subfolder* you navigated into stays
-writable; an entry that links out does not. See the security posture in
+checked both lexically (no `..`) and after `realpath`. The realpath check is
+anchored on the **root**, not on the folder you navigated into, so a symlink
+anywhere in the path — the filename *or* any subfolder above it — cannot land a
+write outside Input/Output/Temp. A symlinked root itself (`output` →
+`/mnt/otherdisk/output`) stays fully writable.
+
+The cost of that anchor is a symlinked *subfolder* (`output/renders` →
+`/mnt/nas/renders`), which stops being writable. If you run that layout, a
+second switch — **Settings → Touch Tools → Image Browser → "Allow writes
+through symlinked subfolders"**, off by default — hands it back. It widens the
+subfolder only: a symlinked *filename* is still refused with it on. The refusal
+names the setting rather than just saying no. See the security posture in
 `docs/blueprint/adrs/0002-*`.
 
 **Destructive work is bounded.** Batch delete/move are capped at 200 items, and
 a recursive folder delete is refused above 10 000 entries — counted with an
-early exit, so a huge tree cannot stall the server before the cap can refuse it.
+early exit per directory, so a deep tree cannot stall the server before the cap
+can refuse it. The bound is on depth only: `os.walk` builds one directory's
+whole entry list before yielding it, so a single directory holding millions of
+files is still read in full.
 
 ## Compatibility
 

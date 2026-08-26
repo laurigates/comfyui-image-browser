@@ -89,6 +89,24 @@ class _NoopRoutes:
         return self._register("POST", path)
 
 
+def _get_settings(request):
+    """ComfyUI's user manager, as far as this pack uses it.
+
+    `image_browser._user_settings` routes every opt-in read through
+    `PromptServer.instance.user_manager.settings.get_settings(request)`, so a
+    stub that answers from the REQUEST is what lets a test exercise the real
+    gate rather than monkeypatching the predicate under test. A fake request
+    that carries no `comfy_settings` reads as "no settings stored", which is
+    the default-off state every opt-in must have.
+    """
+    return getattr(request, "comfy_settings", None) or {}
+
+
 # PromptServer.instance.routes is read at module load; supply a real object so
 # the @decorator calls in image_browser.py return their wrapped function.
-_server.PromptServer = SimpleNamespace(instance=SimpleNamespace(routes=_NoopRoutes()))
+_server.PromptServer = SimpleNamespace(
+    instance=SimpleNamespace(
+        routes=_NoopRoutes(),
+        user_manager=SimpleNamespace(settings=SimpleNamespace(get_settings=_get_settings)),
+    )
+)

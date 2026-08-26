@@ -15,7 +15,8 @@ Endpoint surface (all under /image_browser/):
     GET  /list?type=&subfolder=&path=&…     directory listing (dirs + files)
     GET  /thumb?path= | ?type=&subfolder=&name=   cached WebP thumbnail
     GET  /metadata?path= | ?type=&subfolder=&name=  embedded generation metadata
-    GET  /file?path=                        stream a file at an absolute path (OPT-IN)
+    GET  /file?path=                        stream a file at an absolute path
+        Every ?path= / type=path form above is OPT-IN — see section 2.
     POST /delete       {type, subfolder, name}                      delete a file
     POST /delete_many  {items:[{type,subfolder,name}, …]}           batch delete
     POST /rename       {type, subfolder, name, new_name}            rename in place
@@ -63,37 +64,65 @@ that has not. Every gate below is written against that attacker.
    while forking the shared rating helper and breaking any cached bundle.
    A request carrying neither header (curl, a script, ComfyUI's own API
    clients) is allowed through: this is a browser-CSRF gate, not authentication.
+   ``--enable-cors-header`` short-circuits the cross-site tier (core drops its
+   own check under that flag too); the JSON Content-Type requirement is never
+   waived.
 
 2. Arbitrary file reads.
-   ``GET /file`` streams raw bytes from an absolute host path. That reach is
-   **off by default** and only exists when the user switches on the ComfyUI
-   setting ``ImageBrowser.AllowAbsolutePathReads`` (Settings -> Touch Tools ->
-   Image Browser). The setting is read server-side from the user's own
-   ``comfy.settings.json`` through ComfyUI's user manager — it can not be
-   turned on by a request parameter or a header. Off, ``/file`` answers 403
-   before it touches the filesystem, so it is not even an existence oracle.
+   **Every** endpoint that reaches outside input/output/temp is off unless the
+   user switches on the ComfyUI setting ``ImageBrowser.AllowAbsolutePathReads``
+   (Settings -> Touch Tools -> Image Browser). That is ``GET /file``,
+   ``GET /thumb?path=``, ``GET /metadata?path=`` and ``GET /list?type=path``.
+   Each refuses with 403 before it touches the filesystem, so none of them is
+   an existence oracle either. The setting is read server-side from the user's
+   own ``comfy.settings.json`` through ComfyUI's user manager — it can not be
+   turned on by a request parameter or a header.
 
-   ``/list``, ``/thumb`` and ``/metadata`` still accept ``type=path``: that is
-   the pack's declared feature (browse any folder), and none of them returns a
-   file's bytes — ``/thumb`` re-encodes to a bounded WebP, ``/metadata``
-   returns parsed fields, ``/list`` returns names and sizes. ``/file`` is the
-   only endpoint that hands back the file itself, which is why it is the one
-   behind a switch.
+   State plainly what the switch turns ON, because the earlier wording here
+   ("none of them returns a file's bytes") read as reassurance and was used to
+   justify leaving three of the four ungated. With the setting on, a caller who
+   can reach this port can: enumerate any directory on the host, with names,
+   sizes, image dimensions and mtimes (``/list``); obtain a decoded 512px WebP
+   re-encode of any image on it (``/thumb``); read the embedded text metadata of
+   any image or supported video (``/metadata``); and stream any whitelisted
+   media file's raw bytes (``/file``). A downscale is a read: a photo, a
+   screenshot and a scanned document all survive one legibly. Off by default is
+   what makes that reach a choice the machine's owner makes.
 
 3. Path traversal and symlink escape on the mutation path.
    Writes (delete/rename/move/move_dir/rmdir/mkdir/rating/tag) are restricted
    to the sandboxed roots (input/output/temp); ``type=path`` is rejected. Each
    re-asserts a bare traversal-free filename, the extension whitelist, and
    **two independent containment checks**: the lexical one (which rejects
-   ``..`` before any syscall) and a ``realpath`` one (which rejects a target
-   that resolves outside its base through a symlink). The realpath gate is on
-   the MUTATION resolvers only — a symlinked output subfolder is a supported
-   layout and must keep listing.
+   ``..`` before any syscall) and a ``realpath`` one, anchored on the **sandbox
+   root**, which rejects a target that resolves outside that root through a
+   symlink anywhere in the path — the leaf name or any subfolder above it.
+
+   The anchor is the root and not the subfolder-resolved base, and that is the
+   whole point: resolving both sides against the base resolves a symlinked
+   SUBFOLDER *into* the base, after which the target is contained by
+   construction. Before the anchor moved, ``output/link -> /etc`` plus
+   ``POST /delete {subfolder: "link", name: "passwd.png"}`` answered
+   ``200 {"ok": true}`` and deleted the victim. The same symlink was refused as
+   ``name`` and permitted as ``subfolder``, and the caller picks the parameter.
+
+   Anchoring on the root keeps a symlinked ROOT (``output -> /mnt/otherdisk``)
+   writable and costs the symlinked SUBFOLDER (``output/renders ->
+   /mnt/nas/renders``), which is a real layout — so that is handed back through
+   a second, separate, default-OFF setting,
+   ``ImageBrowser.AllowSymlinkedSubfolderWrites``, and the refusal names it.
+   The realpath gate is on the MUTATION resolvers only: ``_resolve_listing_base``
+   is shared by /list, /thumb, /metadata and pin resolution, and a root anchor
+   there would stop a symlinked output subfolder listing at all.
 
 4. Unbounded destructive work.
    Batch mutations are capped (``MAX_MUTATION_BATCH``) and a recursive folder
    delete is refused above ``MAX_RMDIR_ENTRIES``, counted with an early exit so
-   a pathological tree cannot stall the event loop before the cap can refuse.
+   a DEEP tree cannot stall the event loop before the cap can refuse. The early
+   exit is per os.walk yield, and os.walk materializes one directory's whole
+   entry list before yielding it — so a single directory holding millions of
+   entries is still read in full. Breadth is bounded by the filesystem, not by
+   this cap.
 """
 
 from __future__ import annotations
@@ -145,6 +174,29 @@ SANDBOXED_TYPES = ("input", "output", "temp")
 # reset the user's choice back to the safe default (which is at least the safe
 # direction, but it would look like the switch stopped working).
 SETTING_ALLOW_PATH_READS = "ImageBrowser.AllowAbsolutePathReads"
+
+# The SECOND opt-in, and deliberately a separate one. Write containment is
+# anchored on the sandbox ROOT (see `_realpath_containment_error`), which closes
+# the escape a symlinked subfolder opened — and, as a consequence, stops a
+# genuinely symlinked subfolder (`output/renders -> /mnt/nas/renders`, a real
+# deployment) being written to at all. This switch hands that layout back to the
+# user who runs it, explicitly, and defaults OFF so the secure behaviour is what
+# an install gets. FROZEN id, same reasoning as above.
+SETTING_ALLOW_LINKED_SUBFOLDER_WRITES = "ImageBrowser.AllowSymlinkedSubfolderWrites"
+
+# The refusal wording for both opt-ins. One string per setting so the endpoint,
+# the docstring and the tests cannot drift into three phrasings — and each names
+# the exact settings path, because a refusal with no route to enabling it is the
+# silent failure these replace.
+PATH_READS_DISABLED_MSG = (
+    "absolute-path reads are disabled. Enable Settings -> Touch Tools -> Image Browser -> "
+    "'Allow absolute-path file reads' to list, preview, read metadata for or open files "
+    "outside input/output/temp."
+)
+LINKED_SUBFOLDER_WRITES_DISABLED_MSG = (
+    "subfolder resolves outside input/output/temp through a symlink. Enable Settings -> "
+    "Touch Tools -> Image Browser -> 'Allow writes through symlinked subfolders' to permit it."
+)
 
 # Upper bound on the items a batch MUTATION (delete_many / move_many) may carry.
 # The read-side batches were already capped (MAX_WARM_BATCH=64,
@@ -470,25 +522,21 @@ def _is_bare_name(name: Any) -> bool:
 
 
 def _contained_after_realpath(target: str, base: str) -> bool:
-    """Second, INDEPENDENT containment check for a mutation target.
+    """True when ``realpath(target)`` lands inside ``realpath(base)``.
 
-    The lexical ``commonpath`` check every caller already runs rejects ``..``
-    before any syscall, which is the cheap gate and stays. This one resolves
-    symlinks and answers the question the lexical check structurally cannot:
-    does ``target`` still land inside ``base`` once the filesystem has had its
-    say? An entry inside the sandbox that links out (``output/evil -> /etc``)
-    is lexically contained and really is not.
-
-    ``base`` is resolved too, so a symlinked SUBFOLDER the user navigated into
-    (``output/renders -> /mnt/nas/renders``, the layout this workspace uses)
-    still passes: both sides resolve into the same real tree. That is why this
-    lives on the mutation resolvers and NOT in ``_resolve_listing_base``, which
-    /list, /thumb, /metadata and pin resolution all share — putting it there
-    would stop such a folder listing at all.
+    The primitive both containment anchors are expressed in. It resolves
+    symlinks and so answers the question the lexical ``commonpath`` check
+    structurally cannot: does ``target`` still land inside ``base`` once the
+    filesystem has had its say?
 
     A target that does not exist yet (mkdir, a rename destination) resolves
     through its existing parent chain, which is exactly the containment
     question worth asking about it.
+
+    WHICH ``base`` is passed is the whole security decision, and it is made in
+    ``_realpath_containment_error`` — not here. Anchoring on the caller's
+    subfolder-resolved base is what let a symlinked subfolder escape the
+    sandbox, because that base is precisely what the traversed link moves.
     """
     try:
         real_base = os.path.realpath(base)
@@ -500,11 +548,86 @@ def _contained_after_realpath(target: str, base: str) -> bool:
         return False
 
 
-def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[str | None, str]:
+def _realpath_containment_error(
+    target: str, type_name: str, base: str, allow_linked_subfolder: bool
+) -> str:
+    """'' when a mutation target is contained after realpath, else the refusal.
+
+    The lexical ``commonpath`` check every caller already runs rejects ``..``
+    before any syscall; that is the cheap gate and it stays. This is the second,
+    INDEPENDENT one, and its anchor is the **sandbox root**:
+
+        os.path.realpath(folder_paths.get_directory_by_type(type_name))
+
+    NOT the subfolder-resolved base. Anchoring on the base resolves BOTH sides
+    of the comparison, so a symlinked SUBFOLDER is resolved *into* the base and
+    the target is then contained by construction. Measured against this file
+    before the anchor moved: ``output/link -> /etc`` plus
+    ``POST /delete {subfolder: "link", name: "passwd.png"}`` returned
+    ``200 {"ok": true}`` and deleted the victim, and the same link plus
+    ``POST /rmdir {subfolder: "link", name: "important", recursive: true}``
+    returned ``200 {"ok": true, "files": 2, "dirs": 1}`` and destroyed a tree
+    outside the sandbox. The same symlink was refused as ``name`` and permitted
+    as ``subfolder`` — and the attacker picks the parameter.
+
+    Anchoring on ``realpath(root)`` keeps a symlinked ROOT working: an install
+    whose whole ``output`` is ``/mnt/otherdisk/output`` resolves the root once
+    and every target under it is contained. What it costs is the symlinked
+    SUBFOLDER (``output/renders -> /mnt/nas/renders``), which is a real
+    deployment — so it is not silently broken but handed back through
+    ``SETTING_ALLOW_LINKED_SUBFOLDER_WRITES``, default OFF. With that on the
+    anchor falls back to the base, which still refuses a symlinked NAME
+    (``output/link.png -> /etc/passwd``): the escape hatch widens the subfolder
+    only, never the leaf.
+
+    The two refusals are DIFFERENT strings on purpose. "your subfolder is a
+    symlink out, here is the switch" is actionable; "name escapes root" for a
+    leaf link is the whole story and no setting would change it.
+    """
+    anchor = base if allow_linked_subfolder else _sandbox_root(type_name)
+    if _contained_after_realpath(target, anchor):
+        return ""
+    # Distinguish the two escapes so the message can be actionable. If the
+    # target IS contained by its base, the escape is the subfolder's symlink and
+    # the opt-in is exactly what the operator needs to hear about.
+    if not allow_linked_subfolder and _contained_after_realpath(target, base):
+        return LINKED_SUBFOLDER_WRITES_DISABLED_MSG
+    return "name escapes root"
+
+
+def _sandbox_root(type_name: str) -> str:
+    """The sandbox root for a type, or a path that can contain nothing.
+
+    Returned UNRESOLVED: ``_contained_after_realpath``, the only caller's only
+    consumer, resolves whichever anchor it is handed. A ``realpath`` here as
+    well was redundant, and the mutation table proved it — "the sandbox root is
+    not resolved" was reported MISSED, because removing it changed no behaviour
+    at all. One place resolves, and it is the place that compares.
+
+    ``folder_paths.get_directory_by_type`` answers None for an unknown type. The
+    callers have already rejected those, but a containment anchor must never
+    degrade to something permissive if that order ever changes — so an unknown
+    type yields a name no real path is under, rather than ``""`` or ``"."``,
+    either of which resolves to the CWD.
+    """
+    root = folder_paths.get_directory_by_type(type_name)
+    if not root:
+        return os.path.join(os.sep, "\x00nonexistent")
+    return str(root)
+
+
+def _resolve_sandboxed_file(
+    type_name: str, subfolder: str, name: str, *, allow_linked_subfolder: bool = False
+) -> tuple[str | None, str]:
     """Resolve a mutation target to an absolute path inside a sandboxed root.
 
     Enforces: sandboxed type only, bare filename, media extension, and
     containment. Returns (abs_path, '') on success or (None, error).
+
+    ``allow_linked_subfolder`` DEFAULTS FALSE, which is the secure anchor
+    (``realpath(root)``). Every handler passes the user's opt-in explicitly; a
+    call site that forgets fails toward refusing a legitimate symlinked
+    subfolder, never toward permitting an escape.
     """
     if type_name not in SANDBOXED_TYPES:
         return None, "writes are only allowed in input/output/temp"
@@ -519,18 +642,22 @@ def _resolve_sandboxed_file(type_name: str, subfolder: str, name: str) -> tuple[
     target = os.path.abspath(os.path.join(base, name))
     if os.path.commonpath([target, base]) != base:
         return None, "name escapes root"
-    if not _contained_after_realpath(target, base):
-        return None, "name escapes root"
+    err = _realpath_containment_error(target, type_name, base, allow_linked_subfolder)
+    if err:
+        return None, err
     return target, ""
 
 
-def _resolve_sandboxed_dir(type_name: str, subfolder: str, name: str) -> tuple[str | None, str]:
+def _resolve_sandboxed_dir(
+    type_name: str, subfolder: str, name: str, *, allow_linked_subfolder: bool = False
+) -> tuple[str | None, str]:
     """Resolve a directory mutation target inside a sandboxed root.
 
     Same perimeter as ``_resolve_sandboxed_file`` (sandboxed type only, bare
-    name, containment) minus the media-extension gate — directories have no
-    extension. The bare-name check guarantees the target is strictly below the
-    root, so the root itself can never be the target.
+    name, containment, the same default-secure anchor) minus the
+    media-extension gate — directories have no extension. The bare-name check
+    guarantees the target is strictly below the root, so the root itself can
+    never be the target.
     """
     if type_name not in SANDBOXED_TYPES:
         return None, "writes are only allowed in input/output/temp"
@@ -543,8 +670,9 @@ def _resolve_sandboxed_dir(type_name: str, subfolder: str, name: str) -> tuple[s
     target = os.path.abspath(os.path.join(base, name))
     if os.path.commonpath([target, base]) != base:
         return None, "name escapes root"
-    if not _contained_after_realpath(target, base):
-        return None, "name escapes root"
+    err = _realpath_containment_error(target, type_name, base, allow_linked_subfolder)
+    if err:
+        return None, err
     return target, ""
 
 
@@ -558,9 +686,15 @@ def _count_dir_contents(target: str, limit: int | None = None) -> tuple[int, int
     passes it, and the returned counts are then a lower bound whose sum is
     already ``> limit`` — enough to refuse, and no longer exact. That early
     exit is the point: this is a synchronous os.walk on the event loop, called
-    before /rmdir decides anything, so an uncapped walk of a pathological tree
-    would stall the server before the cap could refuse it. Without ``limit``
+    before /rmdir decides anything, so an uncapped walk of a DEEP tree would
+    stall the server before the cap could refuse it. Without ``limit``
     (the default, and what the pin/count callers use) the counts are exact.
+
+    The bound is on DEPTH ONLY, and claiming more overstates it. The check runs
+    once per os.walk yield, and os.walk builds one directory's complete
+    ``dirnames``/``filenames`` lists before yielding it — so a single directory
+    holding a million entries is enumerated in full however small ``limit`` is.
+    Breadth within one directory is bounded by the filesystem, not by this cap.
     """
     n_files = 0
     n_dirs = 0
@@ -660,10 +794,38 @@ def _host_header_host(host: str) -> str | None:
     return _authority_host(host)
 
 
+def _cors_header_enabled() -> bool:
+    """True when the operator started ComfyUI with ``--enable-cors-header``.
+
+    That flag is an explicit "I want this server reachable cross-origin", and
+    core honours it by dropping its OWN cross-site check for the run. A pack
+    that keeps refusing anyway silently breaks a deployment the operator
+    deliberately configured — the writes 403 with a message about a header they
+    are already sending correctly.
+
+    Read through a guarded lazy import, never at module load: ``comfy.cli_args``
+    exists only inside a ComfyUI install (like ``folder_paths`` and ``server``,
+    the pack's other two core imports), and any failure to read it leaves the
+    STRICT gate in force. Fail-closed is the only acceptable direction for a
+    switch that turns a defence off.
+    """
+    try:
+        from comfy.cli_args import args
+
+        return bool(getattr(args, "enable_cors_header", None))
+    except Exception:
+        return False
+
+
 def _reject_cross_site(request: web.Request) -> web.Response | None:
     """403 a request a browser has told us came from another site, else None.
 
-    Three tiers, most authoritative first:
+    ``--enable-cors-header`` short-circuits the whole check, matching core (see
+    ``_cors_header_enabled``). The ``Content-Type: application/json``
+    requirement below is NOT waived with it: that gate is what stops a
+    preflight-free ``<form>`` post, and it stays on for every configuration.
+
+    Otherwise three tiers, most authoritative first:
 
       1. ``Sec-Fetch-Site`` is set by the browser and cannot be forged by page
          script (it is a forbidden header name). ``cross-site`` is refused;
@@ -679,6 +841,9 @@ def _reject_cross_site(request: web.Request) -> web.Response | None:
          — it is curl, a script, or an API client, and refusing those would
          break legitimate automation without closing anything.
     """
+    if _cors_header_enabled():
+        return None
+
     sec_fetch_site = request.headers.get("Sec-Fetch-Site")
     if sec_fetch_site:
         if sec_fetch_site.lower() == "cross-site":
@@ -758,12 +923,22 @@ def _user_settings(request: web.Request) -> dict[str, Any]:
     Read per request and NOT cached: the file is a few kilobytes, and a cache
     would keep serving the old answer after the user flips the switch, which is
     the one moment they are watching for it to take effect.
+
+    The ISINSTANCE check is what makes "any failure degrades to off" true rather
+    than merely documented. ``or {}`` alone passes a truthy non-mapping straight
+    through — a hand-edited settings file holding a list or a string — and the
+    caller's ``.get`` then raises AttributeError OUTSIDE this try, which aiohttp
+    turns into a 500 on an endpoint whose whole contract is to answer 403.
     """
     try:
-        return PromptServer.instance.user_manager.settings.get_settings(request) or {}
+        settings = PromptServer.instance.user_manager.settings.get_settings(request)
     except Exception:
-        log.debug("could not read user settings; treating the path-read opt-in as off")
+        log.debug("could not read user settings; treating the opt-ins as off")
         return {}
+    if not isinstance(settings, dict):
+        log.debug("user settings were not a mapping; treating the opt-ins as off")
+        return {}
+    return settings
 
 
 def _absolute_path_reads_enabled(request: web.Request) -> bool:
@@ -774,6 +949,17 @@ def _absolute_path_reads_enabled(request: web.Request) -> bool:
     security-relevant reach.
     """
     return _user_settings(request).get(SETTING_ALLOW_PATH_READS) is True
+
+
+def _linked_subfolder_writes_enabled(request: web.Request) -> bool:
+    """True only when the user has explicitly opted into symlinked-subfolder writes.
+
+    Separate switch, separate default-off, same ``is True`` discipline: the two
+    reaches are unrelated (one is a read outside the roots, the other a write
+    through a link inside them) and bundling them would make enabling either
+    grant both.
+    """
+    return _user_settings(request).get(SETTING_ALLOW_LINKED_SUBFOLDER_WRITES) is True
 
 
 # ---------------------------------------------------------------------------
@@ -1107,6 +1293,16 @@ async def image_browser_list(request: web.Request) -> web.Response:
     if q.get("safe_prompt", "") in ("1", "true", "yes"):
         prompt_keywords = parse_safe_keywords(q.get("safe_kw", ""))
 
+    # The absolute-path opt-in, asserted BEFORE the resolver so a refused
+    # listing touches no disk. `type=path` enumerates names, sizes, dimensions
+    # and ratings for any directory on the host — measured with the opt-in off,
+    # `?type=path&path=/etc` answered 200 with 19 directories — which is a read
+    # of the filesystem's shape whether or not any file's bytes come back. The
+    # sandboxed roots are unaffected: they are this pack's own territory and
+    # need no switch.
+    if type_name == "path" and not _absolute_path_reads_enabled(request):
+        return _err(PATH_READS_DISABLED_MSG, 403)
+
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -1225,10 +1421,12 @@ async def image_browser_file(request: web.Request) -> web.Response:
     """Stream a file at an absolute path — OFF unless the user opts in.
 
     Previews videos and opens originals in ``type=path`` listings, which core
-    /api/view cannot serve because it only reaches input/output/temp. That also
-    makes this the one endpoint in the pack that hands back a host file's raw
-    bytes, so it is the one behind a switch: see the module docstring,
-    section 2. With the switch off it answers 403 and touches no disk.
+    /api/view cannot serve because it only reaches input/output/temp. This is
+    the endpoint that hands back a host file's raw bytes; ``/thumb``,
+    ``/metadata`` and ``type=path`` listings disclose less of the same file but
+    are behind the SAME switch, because a re-encode and a metadata dump are
+    still reads. See the module docstring, section 2. With the switch off all
+    four answer 403 and touch no disk.
 
     The three checks are ordered opt-in -> extension -> existence, and that
     order is load-bearing. Testing existence first would answer 404 for a path
@@ -1243,12 +1441,7 @@ async def image_browser_file(request: web.Request) -> web.Response:
     if not abs_path:
         return _err("missing path", 400)
     if not _absolute_path_reads_enabled(request):
-        return _err(
-            "absolute-path file reads are disabled. Enable Settings -> Touch Tools -> "
-            "Image Browser -> 'Allow absolute-path file reads' to preview files outside "
-            "input/output/temp.",
-            403,
-        )
+        return _err(PATH_READS_DISABLED_MSG, 403)
     path = os.path.abspath(os.path.expanduser(abs_path))
     if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:
         return _err("unsupported file type", 403)
@@ -1264,12 +1457,27 @@ async def image_browser_file(request: web.Request) -> web.Response:
     )
 
 
-def _resolve_thumb_target(q: Any) -> tuple[str | None, str]:
+def _resolve_thumb_target(q: Any, allow_path: bool) -> tuple[str | None, str]:
     """Resolve /thumb + /metadata query params to an absolute file path.
 
     Two addressing modes, mirroring /list:
       ?type=input|output|temp&subfolder=&name=   (sandboxed roots)
       ?path=/abs/file.png                        (arbitrary read, image-gated)
+
+    The second mode is gated on ``allow_path`` — the caller's read of
+    ``SETTING_ALLOW_PATH_READS`` — and refused BEFORE any syscall, so with the
+    opt-in off neither endpoint is an existence oracle either. The sandboxed
+    mode is never gated: input/output/temp is the pack's own territory.
+
+    This gate used to live on /file alone, which made the setting's NAME a
+    promise the code did not keep. Measured against this file before it moved,
+    with the opt-in off and against real Pillow: ``/file`` answered 403 while
+    ``/thumb`` answered 200 image/webp 432 bytes that decoded to a (512, 384)
+    image of a file outside every root — pixel (0,0) = (200, 30, 28), the
+    subject's own colour — and ``/metadata`` returned its embedded ``raw`` text
+    verbatim. A 512x384 re-encode of a photo, a screenshot or a scanned document
+    IS a read of it; "does not return the bytes verbatim" is not "does not
+    disclose the content".
     """
     type_name = q.get("type", "path")
     if type_name in SANDBOXED_TYPES:
@@ -1287,6 +1495,8 @@ def _resolve_thumb_target(q: Any) -> tuple[str | None, str]:
     abs_path = q.get("path", "")
     if not abs_path:
         return None, "missing path"
+    if not allow_path:
+        return None, PATH_READS_DISABLED_MSG
     return os.path.abspath(os.path.expanduser(abs_path)), ""
 
 
@@ -1307,9 +1517,9 @@ async def image_browser_thumb(request: web.Request) -> web.Response:
     The frontend embeds ?v=<mtime>-<size> in the URL, so a changed file
     keys a new URL and a stale cached copy can never be shown.
     """
-    path, err = _resolve_thumb_target(request.rel_url.query)
+    path, err = _resolve_thumb_target(request.rel_url.query, _absolute_path_reads_enabled(request))
     if err:
-        return _err(err, 400)
+        return _err(err, 403 if err == PATH_READS_DISABLED_MSG else 400)
     assert path is not None
     if not os.path.isfile(path) or not _is_image_file(path):
         return _err("not found", 404)
@@ -1353,9 +1563,9 @@ async def image_browser_metadata(request: web.Request) -> web.Response:
     No cache headers: this is a one-shot tap-to-open read, so duplicating
     /thumb's ETag scheme would buy nothing.
     """
-    path, err = _resolve_thumb_target(request.rel_url.query)
+    path, err = _resolve_thumb_target(request.rel_url.query, _absolute_path_reads_enabled(request))
     if err:
-        return _err(err, 400)
+        return _err(err, 403 if err == PATH_READS_DISABLED_MSG else 400)
     assert path is not None
     if not _has_metadata_reader(path):
         return _err("unsupported file type", 400)
@@ -1404,7 +1614,10 @@ async def image_browser_delete(request: web.Request) -> web.Response:
     assert body is not None
 
     target, err = _resolve_sandboxed_file(
-        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+        body.get("type", ""),
+        body.get("subfolder") or "",
+        body.get("name", ""),
+        allow_linked_subfolder=_linked_subfolder_writes_enabled(request),
     )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -1429,11 +1642,16 @@ async def image_browser_rename(request: web.Request) -> web.Response:
 
     type_name = body.get("type", "")
     subfolder = body.get("subfolder") or ""
-    src, err = _resolve_sandboxed_file(type_name, subfolder, body.get("name", ""))
+    linked = _linked_subfolder_writes_enabled(request)
+    src, err = _resolve_sandboxed_file(
+        type_name, subfolder, body.get("name", ""), allow_linked_subfolder=linked
+    )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
     assert src is not None
-    dst, err = _resolve_sandboxed_file(type_name, subfolder, body.get("new_name", ""))
+    dst, err = _resolve_sandboxed_file(
+        type_name, subfolder, body.get("new_name", ""), allow_linked_subfolder=linked
+    )
     if err:
         return web.json_response({"ok": False, "error": f"new_name: {err}"}, status=400)
     assert dst is not None
@@ -1459,14 +1677,20 @@ async def image_browser_move(request: web.Request) -> web.Response:
     assert body is not None
 
     name = body.get("name", "")
-    src, err = _resolve_sandboxed_file(body.get("type", ""), body.get("subfolder") or "", name)
+    linked = _linked_subfolder_writes_enabled(request)
+    src, err = _resolve_sandboxed_file(
+        body.get("type", ""), body.get("subfolder") or "", name, allow_linked_subfolder=linked
+    )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
     assert src is not None
 
     # Destination keeps the same filename; only the folder changes.
     dst, err = _resolve_sandboxed_file(
-        body.get("dest_type", ""), body.get("dest_subfolder") or "", name
+        body.get("dest_type", ""),
+        body.get("dest_subfolder") or "",
+        name,
+        allow_linked_subfolder=linked,
     )
     if err:
         return web.json_response({"ok": False, "error": f"destination: {err}"}, status=400)
@@ -1553,14 +1777,20 @@ async def image_browser_move_dir(request: web.Request) -> web.Response:
     assert body is not None
 
     name = body.get("name", "")
-    src, err = _resolve_sandboxed_dir(body.get("type", ""), body.get("subfolder") or "", name)
+    linked = _linked_subfolder_writes_enabled(request)
+    src, err = _resolve_sandboxed_dir(
+        body.get("type", ""), body.get("subfolder") or "", name, allow_linked_subfolder=linked
+    )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
     assert src is not None
 
     # Destination keeps the same folder name; only the parent changes.
     dst, err = _resolve_sandboxed_dir(
-        body.get("dest_type", ""), body.get("dest_subfolder") or "", name
+        body.get("dest_type", ""),
+        body.get("dest_subfolder") or "",
+        name,
+        allow_linked_subfolder=linked,
     )
     if err:
         return web.json_response({"ok": False, "error": f"destination: {err}"}, status=400)
@@ -1661,11 +1891,12 @@ async def image_browser_delete_many(request: web.Request) -> web.Response:
     assert items is not None
 
     deleted = 0
+    linked = _linked_subfolder_writes_enabled(request)
     errors: list[dict[str, str]] = []
     for item in items:
         name = item.get("name", "")
         target, err = _resolve_sandboxed_file(
-            item.get("type", ""), item.get("subfolder") or "", name
+            item.get("type", ""), item.get("subfolder") or "", name, allow_linked_subfolder=linked
         )
         if err:
             errors.append({"name": name, "error": err})
@@ -1706,16 +1937,24 @@ async def image_browser_move_many(request: web.Request) -> web.Response:
     dest_type = body.get("dest_type", "")
     dest_subfolder = body.get("dest_subfolder") or ""
 
+    # Read the opt-in ONCE, above the loop: it is a per-request fact, and
+    # re-reading it per item would parse the settings file MAX_MUTATION_BATCH
+    # times for one request.
+    linked = _linked_subfolder_writes_enabled(request)
     moved = 0
     errors: list[dict[str, str]] = []
     for item in items:
         name = item.get("name", "")
-        src, err = _resolve_sandboxed_file(item.get("type", ""), item.get("subfolder") or "", name)
+        src, err = _resolve_sandboxed_file(
+            item.get("type", ""), item.get("subfolder") or "", name, allow_linked_subfolder=linked
+        )
         if err:
             errors.append({"name": name, "error": err})
             continue
         assert src is not None
-        dst, err = _resolve_sandboxed_file(dest_type, dest_subfolder, name)
+        dst, err = _resolve_sandboxed_file(
+            dest_type, dest_subfolder, name, allow_linked_subfolder=linked
+        )
         if err:
             errors.append({"name": name, "error": f"destination: {err}"})
             continue
@@ -1764,7 +2003,10 @@ async def image_browser_rmdir(request: web.Request) -> web.Response:
     assert body is not None
 
     target, err = _resolve_sandboxed_dir(
-        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+        body.get("type", ""),
+        body.get("subfolder") or "",
+        body.get("name", ""),
+        allow_linked_subfolder=_linked_subfolder_writes_enabled(request),
     )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -1834,7 +2076,10 @@ async def image_browser_mkdir(request: web.Request) -> web.Response:
     assert body is not None
 
     target, err = _resolve_sandboxed_dir(
-        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+        body.get("type", ""),
+        body.get("subfolder") or "",
+        body.get("name", ""),
+        allow_linked_subfolder=_linked_subfolder_writes_enabled(request),
     )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -1891,7 +2136,10 @@ async def image_browser_rating(request: web.Request) -> web.Response:
         )
 
     target, err = _resolve_sandboxed_file(
-        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+        body.get("type", ""),
+        body.get("subfolder") or "",
+        body.get("name", ""),
+        allow_linked_subfolder=_linked_subfolder_writes_enabled(request),
     )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -1946,7 +2194,10 @@ async def image_browser_tag(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "present must be a boolean"}, status=400)
 
     target, err = _resolve_sandboxed_file(
-        body.get("type", ""), body.get("subfolder") or "", body.get("name", "")
+        body.get("type", ""),
+        body.get("subfolder") or "",
+        body.get("name", ""),
+        allow_linked_subfolder=_linked_subfolder_writes_enabled(request),
     )
     if err:
         return web.json_response({"ok": False, "error": err}, status=400)
@@ -2017,8 +2268,16 @@ async def image_browser_ratings(request: web.Request) -> web.Response:
 
     ratings: list[int | None] = []
     for item in items:
+        # A READ, so it keeps the BASE anchor (what this resolver did before
+        # write containment moved to the root). Reads deliberately reach further
+        # than writes, and a rating under a symlinked subfolder must keep
+        # answering whether or not the WRITE opt-in is on. A symlinked leaf NAME
+        # is still refused — the base anchor only widens the subfolder.
         target, err = _resolve_sandboxed_file(
-            item.get("type", ""), item.get("subfolder") or "", item.get("name", "")
+            item.get("type", ""),
+            item.get("subfolder") or "",
+            item.get("name", ""),
+            allow_linked_subfolder=True,
         )
         if err or target is None:
             ratings.append(None)
@@ -2076,8 +2335,16 @@ async def image_browser_safeview_warm(request: web.Request) -> web.Response:
 
     targets: list[str] = []
     for item in items:
+        # A READ, so it keeps the BASE anchor (what this resolver did before
+        # write containment moved to the root). Reads deliberately reach further
+        # than writes, and a rating under a symlinked subfolder must keep
+        # answering whether or not the WRITE opt-in is on. A symlinked leaf NAME
+        # is still refused — the base anchor only widens the subfolder.
         target, err = _resolve_sandboxed_file(
-            item.get("type", ""), item.get("subfolder") or "", item.get("name", "")
+            item.get("type", ""),
+            item.get("subfolder") or "",
+            item.get("name", ""),
+            allow_linked_subfolder=True,
         )
         if err or target is None or not _has_metadata_reader(target):
             continue
@@ -2121,8 +2388,12 @@ def _resolve_pin(pin: dict[str, Any]) -> str | None:
     if pin["kind"] == "dir":
         base, err = _resolve_listing_base(pin["type"], pin.get("subfolder", ""), "")
         return None if err else base
+    # A READ (pin resolution for the /pins response), so like /ratings it keeps
+    # the BASE anchor rather than the write gate's root anchor — a pin inside a
+    # symlinked subfolder must keep resolving. The dir arm above runs no
+    # realpath check at all, so this is the stricter of the two.
     target, err = _resolve_sandboxed_file(
-        pin["type"], pin.get("subfolder", ""), pin.get("name", "")
+        pin["type"], pin.get("subfolder", ""), pin.get("name", ""), allow_linked_subfolder=True
     )
     return None if err else target
 

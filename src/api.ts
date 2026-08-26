@@ -224,6 +224,24 @@ export function pathReadsAllowed(): boolean {
   return BASE_PATHS?.allow_path_reads === true;
 }
 
+/**
+ * Drop the cached /base answer so the next fetch re-reads it.
+ *
+ * `allow_path_reads` is part of that answer, and it is a SETTING the user
+ * flips in another panel entirely. The backend deliberately refuses to cache
+ * it — "a cache would keep serving the old answer after the user flips the
+ * switch, which is the one moment they are watching for it to take effect" —
+ * and the module-level `BASE_PATHS` singleton here then reintroduced exactly
+ * that staleness one layer up: the user turned the setting on, came back, and
+ * still saw 🔒 tiles until a hard reload.
+ *
+ * Called from `openImageBrowser`, so every open of the modal re-reads it. One
+ * request per open, against a handler that already answers from memory.
+ */
+export function invalidateBasePaths(): void {
+  BASE_PATHS = null;
+}
+
 export async function fetchBasePaths(): Promise<BasePaths> {
   if (BASE_PATHS) return BASE_PATHS;
   let resolved: BasePaths;

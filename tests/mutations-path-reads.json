@@ -23,8 +23,8 @@
     {
       "label": "INERT locked tile: EVERY video card is locked, so sandboxed-root previews break too",
       "file": "src/browser.ts",
-      "before": "      if (type === \"path\" && !pathReadsAllowed()) {",
-      "after": "      if (true) {"
+      "before": "      if (type === \"path\" && !pathReadsAllowed()) {\n        return { kind: \"icon\", text: \"🔒\", title: PATH_READS_DISABLED_MSG };",
+      "after": "      if (true) {\n        return { kind: \"icon\", text: \"🔒\", title: PATH_READS_DISABLED_MSG };"
     },
     {
       "label": "the locked tile loses its title, leaving a mute glyph the user cannot act on",
@@ -49,6 +49,30 @@
       "file": "src/api.ts",
       "before": "  \"Reading files by absolute path is off. Turn on Settings \\u2192 Touch Tools \\u2192 \" +",
       "after": "  \"Reading files by absolute path is off. \" +"
+    },
+    {
+      "label": "loadWorkflow stops checking the opt-in, so ⤓ on the path tab surfaces a bare \"HTTP 403\" naming no setting",
+      "file": "src/browser.ts",
+      "before": "      if (type === \"path\" && !pathReadsAllowed()) {\n        notify({\n          severity: \"warn\",\n          summary: \"Absolute-path reads are off\",\n          detail: PATH_READS_DISABLED_MSG,\n        });\n        return;\n      }\n      const res = await fetch(fullSrcURL(type, sub, f.name, state.absPath));",
+      "after": "      const res = await fetch(fullSrcURL(type, sub, f.name, state.absPath));"
+    },
+    {
+      "label": "INERT loadWorkflow gate: EVERY workflow load is refused, so the sandboxed roots break too",
+      "file": "src/browser.ts",
+      "before": "      if (type === \"path\" && !pathReadsAllowed()) {\n        notify({\n          severity: \"warn\",\n          summary: \"Absolute-path reads are off\",",
+      "after": "      if (true) {\n        notify({\n          severity: \"warn\",\n          summary: \"Absolute-path reads are off\","
+    },
+    {
+      "label": "the /base cache is never invalidated, so a flipped setting needs a hard reload before the UI agrees",
+      "file": "src/browser.ts",
+      "before": "  invalidateBasePaths();",
+      "after": "  void invalidateBasePaths;"
+    },
+    {
+      "label": "invalidateBasePaths is a no-op, so dropping the cache on open changes nothing",
+      "file": "src/api.ts",
+      "before": "export function invalidateBasePaths(): void {\n  BASE_PATHS = null;\n}",
+      "after": "export function invalidateBasePaths(): void {}"
     }
   ]
 }
