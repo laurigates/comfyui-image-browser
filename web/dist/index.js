@@ -4718,6 +4718,14 @@ var BROWSER_CSS = `
    truncation complaint this density scale sits next to, and a nameless folder
    is not a smaller folder card, it is an unusable one. */
 .ib-grid[data-density="dense"] .ib-card.is-dir { grid-column: span 2; }
+/* ...and the icon block shrinks WITH the step. Keeping the name never required
+   keeping the icon block: at span 2 the folder sits on a 84x2+6 = ~180px track,
+   so the square reserved a ~180px-tall box for a 32px glyph and the folder card
+   came out at 209px against the file tile's 87px — 2.4x, at the step whose
+   whole job is fitting more on screen (#106). 44px is the family's tap-target
+   floor and comfortably holds the glyph. */
+.ib-grid[data-density="dense"] .ib-card.is-up .ib-thumb,
+.ib-grid[data-density="dense"] .ib-card.is-dir .ib-thumb { height: 44px; }
 /* Vertical scroll must survive a finger that starts on a checkbox. .ib-check is
    touch-action:none so a drag sweeps a range, and at 44px on an ~84px tile that
    is half the card width — scoped to this step, so the default is untouched.
@@ -4729,9 +4737,17 @@ var BROWSER_CSS = `
    card would be a ~390px-tall square showing one file, which openFull already
    does better; the point of the step is the details beside the thumb. Pure CSS
    over the existing markup, so there is no second card template to keep in
-   sync. */
+   sync.
+
+   Scoped to .ib-card, NOT .ib-card.is-file: a folder is an ITEM, so "one item
+   per row" has to mean folders too. Scoping the row layout to files is what
+   left a folder card as a full-width square at this step — 395px inside a
+   412px band, i.e. one folder filling the whole visible grid (#106). The dir
+   card's markup is a strict subset of the file card's (thumb + name, no
+   meta/stars/actions), so the shared template needs no dir-specific block; the
+   unused areas collapse to zero-height rows. */
 .ib-grid[data-density="list"] { grid-template-columns: 1fr; }
-.ib-grid[data-density="list"] .ib-card.is-file {
+.ib-grid[data-density="list"] .ib-card {
     display: grid;
     grid-template-columns: 64px minmax(0, 1fr);
     grid-template-areas:
@@ -4743,23 +4759,27 @@ var BROWSER_CSS = `
     align-items: start;
     column-gap: 8px;
 }
-.ib-grid[data-density="list"] .ib-card.is-file .ib-subpath { grid-area: sub; }
-.ib-grid[data-density="list"] .ib-card.is-file .ib-thumb { grid-area: thumb; }
-.ib-grid[data-density="list"] .ib-card.is-file .ib-name { grid-area: name; }
-.ib-grid[data-density="list"] .ib-card.is-file .ib-meta { grid-area: meta; }
-.ib-grid[data-density="list"] .ib-card.is-file .ib-stars { grid-area: stars; }
-.ib-grid[data-density="list"] .ib-card.is-file .ib-actions { grid-area: acts; }
+.ib-grid[data-density="list"] .ib-card .ib-subpath { grid-area: sub; }
+.ib-grid[data-density="list"] .ib-card .ib-thumb { grid-area: thumb; }
+.ib-grid[data-density="list"] .ib-card .ib-name { grid-area: name; }
+.ib-grid[data-density="list"] .ib-card .ib-meta { grid-area: meta; }
+.ib-grid[data-density="list"] .ib-card .ib-stars { grid-area: stars; }
+.ib-grid[data-density="list"] .ib-card .ib-actions { grid-area: acts; }
 /* Two children are appended AFTER the template and would otherwise auto-place
    into a new implicit row: the reveal button applySafeView adds, and the
    selection checkbox. Both are absolutely positioned over the thumb, which
    works because .ib-card is already position:relative — the explicit grid-area
    is what stops the grid reserving a row for them. */
-.ib-grid[data-density="list"] .ib-card.is-file .cmk-sv-reveal,
-.ib-grid[data-density="list"] .ib-card.is-file .ib-check { grid-area: thumb; }
+.ib-grid[data-density="list"] .ib-card .cmk-sv-reveal,
+.ib-grid[data-density="list"] .ib-card .ib-check { grid-area: thumb; }
 /* The row is far wider than 150px, so the name has room to wrap rather than
    elide — the one place the two-span split is not needed. */
 .ib-grid[data-density="list"] .ib-name { display: block; white-space: normal; }
 .ib-grid[data-density="list"] .ib-name-head { white-space: normal; overflow: visible; }
+/* The file thumb is 64px tall because the 64px column plus aspect-ratio 1/1
+   says so. A folder's is not square (see below), so its cap is stated. */
+.ib-grid[data-density="list"] .ib-card.is-up .ib-thumb,
+.ib-grid[data-density="list"] .ib-card.is-dir .ib-thumb { height: 64px; }
 .ib-card {
     background: #21212a; border: 1px solid #2a2a32; border-radius: 6px; overflow: hidden;
     cursor: pointer; display: flex; flex-direction: column;
@@ -4771,10 +4791,24 @@ var BROWSER_CSS = `
 }
 .ib-card:hover { border-color: #6ba6ff; transform: translateY(-1px); }
 .ib-card.is-up, .ib-card.is-dir { background: #1f1f26; }
+/* A FOLDER CARD DOES NOT TAKE ITS ROW'S HEIGHT. The grid stretches items by
+   default, so a folder sharing a row with a file card was pulled to the file's
+   height — measured 313px for the ".." card inside a subfolder, against the
+   ~207px it needs. Scoped to the card rather than added to .ib-grid, because
+   the base .ib-grid rule is read back verbatim by card-actions.test.js. */
+.ib-card.is-up, .ib-card.is-dir { align-self: start; }
 .ib-thumb {
     aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
     background: #12121a; overflow: hidden;
 }
+/* ...but NOT on a folder or the ".." card. The square is what a photo wants; a
+   folder's icon block holds a 32px glyph, so on the default 178px track it
+   reserved a 178px-tall box that was ~91% empty — and, because the box tracks
+   the TRACK, every compaction step made a folder card bigger rather than
+   smaller (#106). Bounded height per step instead: 88 / 44 / 64 for
+   grid / dense / list, each stated in its own block. */
+.ib-card.is-up .ib-thumb,
+.ib-card.is-dir .ib-thumb { aspect-ratio: auto; height: 88px; }
 .ib-thumb-icon { font-size: 32px; color: #777; }
 .ib-thumb img, .ib-thumb video {
     width: 100%; height: 100%; object-fit: cover; display: block; background: #000;

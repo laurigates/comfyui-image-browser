@@ -47,14 +47,50 @@
     {
       "label": "list mode leaves the card as a column, so it is one giant image per row instead of a details row",
       "file": "src/browser.ts",
-      "before": ".ib-grid[data-density=\"list\"] .ib-card.is-file {\n    display: grid;",
-      "after": ".ib-grid[data-density=\"list\"] .ib-card.is-file {\n    display: flex;"
+      "before": ".ib-grid[data-density=\"list\"] .ib-card {\n    display: grid;",
+      "after": ".ib-grid[data-density=\"list\"] .ib-card {\n    display: flex;"
     },
     {
       "label": "list mode drops the explicit grid-area for the post-render children, reserving an implicit row each",
       "file": "src/browser.ts",
-      "before": ".ib-grid[data-density=\"list\"] .ib-card.is-file .cmk-sv-reveal,\n.ib-grid[data-density=\"list\"] .ib-card.is-file .ib-check { grid-area: thumb; }",
-      "after": ".ib-grid[data-density=\"list\"] .ib-card.is-file .cmk-sv-reveal { grid-area: thumb; }"
+      "before": ".ib-grid[data-density=\"list\"] .ib-card .cmk-sv-reveal,\n.ib-grid[data-density=\"list\"] .ib-card .ib-check { grid-area: thumb; }",
+      "after": ".ib-grid[data-density=\"list\"] .ib-card .cmk-sv-reveal { grid-area: thumb; }"
+    },
+    {
+      "label": "#106: the list row layout is re-scoped to .is-file, so a folder stays a full-width square (395px in a 411px band)",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"list\"] .ib-card {\n    display: grid;\n    grid-template-columns: 64px minmax(0, 1fr);",
+      "after": ".ib-grid[data-density=\"list\"] .ib-card.is-file {\n    display: grid;\n    grid-template-columns: 64px minmax(0, 1fr);"
+    },
+    {
+      "label": "#106: the folder icon block gets its square back, so it grows with the track instead of shrinking with the step",
+      "file": "src/browser.ts",
+      "before": ".ib-card.is-up .ib-thumb,\n.ib-card.is-dir .ib-thumb { aspect-ratio: auto; height: 88px; }",
+      "after": ".ib-card.is-up .ib-thumb,\n.ib-card.is-dir .ib-thumb { aspect-ratio: 1 / 1; }"
+    },
+    {
+      "label": "#106: the dense step's folder icon cap is dropped, so a span-2 folder is 2.4x the file tile beside it",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"dense\"] .ib-card.is-up .ib-thumb,\n.ib-grid[data-density=\"dense\"] .ib-card.is-dir .ib-thumb { height: 44px; }",
+      "after": ".ib-grid[data-density=\"dense\"] .ib-card.is-dir .ib-thumb { min-height: 44px; }"
+    },
+    {
+      "label": "#106: the list step's folder icon cap is dropped, so the folder row has no stated thumb height",
+      "file": "src/browser.ts",
+      "before": ".ib-grid[data-density=\"list\"] .ib-card.is-up .ib-thumb,\n.ib-grid[data-density=\"list\"] .ib-card.is-dir .ib-thumb { height: 64px; }",
+      "after": ".ib-grid[data-density=\"list\"] .ib-card.is-dir .ib-thumb { min-height: 64px; }"
+    },
+    {
+      "label": "#106: the folder card is stretched to its row again, so it takes the height of the file card beside it",
+      "file": "src/browser.ts",
+      "before": ".ib-card.is-up, .ib-card.is-dir { align-self: start; }",
+      "after": ".ib-card.is-up, .ib-card.is-dir { align-self: stretch; }"
+    },
+    {
+      "label": "#106: the icon-block caps name .is-dir only, leaving `..` the one card class no density rule reaches",
+      "file": "src/browser.ts",
+      "before": ".ib-card.is-up .ib-thumb,\n.ib-card.is-dir .ib-thumb { aspect-ratio: auto;",
+      "after": ".ib-card.is-dir .ib-thumb { aspect-ratio: auto;"
     },
     {
       "label": "the saved density is read without a whitelist, so a hand-edited value reaches the DOM",
