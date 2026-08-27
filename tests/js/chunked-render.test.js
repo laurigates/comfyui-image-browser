@@ -159,6 +159,45 @@ function stubFetch(files) {
   );
 }
 
+/**
+ * Like stubFetch, but the LISTING is refused the way the backend refuses one:
+ * a 403 that fetchListing turns into a throw (`if (!r.ok) throw` in api.ts).
+ * /pins and /base keep answering, because the refusal is scoped to the read
+ * gate and the modal still builds its chrome.
+ */
+function stubListingRefused() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url, init) => {
+      const s = String(url);
+      if (init?.method === "POST")
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      if (s.includes("/image_browser/pins"))
+        return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
+      if (s.includes("/image_browser/base"))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            base_path: "/",
+            input_dir: "",
+            output_dir: "",
+            temp_dir: "",
+          }),
+        };
+      return {
+        ok: false,
+        status: 403,
+        json: async () => ({
+          ok: false,
+          error: "Absolute-path reads are disabled in this ComfyUI's settings.",
+        }),
+      };
+    }),
+  );
+}
+
 async function open() {
   const modal = openShell();
   // The modal shell queues an opening frame of ITS own (comfy-modal-kit's
@@ -179,6 +218,9 @@ const search = (modal, text) => {
   modal.searchEl.value = text;
   modal.searchEl.dispatchEvent(new Event("input", { bubbles: true }));
 };
+/** ⟳ — the one control that re-enters loadAndRender without navigating. */
+const refresh = (modal) =>
+  modal.dialog.querySelector('.ib-control.ib-icon[title="Refresh"]').click();
 const pressKey = (key) =>
   window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
 
@@ -315,6 +357,84 @@ describe("a re-render cancels the tail in flight", () => {
     expect(cards(modal)).toHaveLength(SYNC_CARD_BUDGET);
     const idx = cards(modal).map((c) => c.dataset.idx);
     expect(new Set(idx).size).toBe(idx.length);
+  });
+});
+
+describe("a reload that yields NO cards still closes the tail", () => {
+  // The two ways a listing comes back with nothing, kept apart because they
+  // reach renderGrid down different paths: an empty `files` array is the
+  // SUCCESS path, while a refusal throws out of fetchListing and is caught in
+  // loadAndRender, which zeroes state.files itself. Both then render a grid of
+  // no cards, and the tail from the PREVIOUS listing must not survive either.
+  //
+  // The refusal arm is not hypothetical: /list answers 403 for type=path when
+  // ImageBrowser.AllowAbsolutePathReads is off, which is its default. So
+  // "browse… with the opt-in off, from a folder that was mid-chunk" is a real
+  // sequence a user can perform, not a constructed one.
+
+  it("an empty listing cancels the tail and schedules nothing new", async () => {
+    stubFetch(pngs(N));
+    const modal = await open();
+
+    // PRECONDITION, asserted rather than assumed — without it the cancellation
+    // below could pass against a queue that was empty for some other reason.
+    expect(frameQueue).toHaveLength(1);
+    const pendingId = frameQueue[0].id;
+
+    stubFetch([]);
+    refresh(modal);
+    await vi.waitFor(() => {
+      if (cards(modal).length) throw new Error("grid still holds the old listing");
+    });
+
+    expect(cancelled).toContain(pendingId);
+    // Nothing re-armed: a zero-length listing must not leave a job whose next
+    // frame appends into a grid the empty-state message now owns.
+    expect(frameQueue).toHaveLength(0);
+    flushAllFrames();
+    expect(cards(modal)).toHaveLength(0);
+    expect(modal.bodyEl.querySelector(".ib-empty")).not.toBeNull();
+  });
+
+  it("a REFUSED listing (403) cancels the tail, and a stale frame appends nothing", async () => {
+    stubFetch(pngs(N));
+    const modal = await open();
+
+    expect(frameQueue).toHaveLength(1);
+    const pendingId = frameQueue[0].id;
+    // The race a cancel cannot close: a callback the engine has already
+    // dispatched. Held and fired by hand after the refusal, which is that
+    // ordering.
+    const stale = frameQueue[0].cb;
+
+    stubListingRefused();
+    refresh(modal);
+    await vi.waitFor(() => {
+      if (cards(modal).length) throw new Error("grid still holds the old listing");
+    });
+
+    expect(cancelled).toContain(pendingId);
+    expect(frameQueue).toHaveLength(0);
+
+    stale();
+
+    // NEGATIVE: the refused grid did not acquire cards from the listing that
+    // was in flight when the refusal landed.
+    expect(cards(modal)).toHaveLength(0);
+    flushAllFrames();
+    expect(cards(modal)).toHaveLength(0);
+
+    // POSITIVE, in the same test: the guard rejected the STALE job, not every
+    // job. Without this arm an implementation that simply stopped chunking
+    // after any refusal would pass every assertion above.
+    stubFetch(pngs(N));
+    refresh(modal);
+    await vi.waitFor(() => {
+      if (!cards(modal).length) throw new Error("grid never came back");
+    });
+    expect(cards(modal)).toHaveLength(SYNC_CARD_BUDGET);
+    flushAllFrames();
+    expect(cards(modal)).toHaveLength(N);
   });
 });
 

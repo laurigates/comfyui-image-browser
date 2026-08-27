@@ -61,6 +61,12 @@
       "file": "src/browser.ts",
       "before": "      const c = buildFileCard(f, fi, ctx);",
       "after": "      const c = buildFileCard(f, fi - from, ctx);"
+    },
+    {
+      "label": "only a listing WITH files cancels the tail, so an empty or refused one leaves a stale job in flight",
+      "file": "src/browser.ts",
+      "before": "    cancelChunkJob();\n    disposeLazyThumbs();\n    const q = state.query;",
+      "after": "    if (state.files.length) cancelChunkJob();\n    disposeLazyThumbs();\n    const q = state.query;"
     }
   ]
 }
