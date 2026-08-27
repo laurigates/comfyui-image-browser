@@ -120,16 +120,19 @@ app.registerExtension({
       // request and trusts nothing the caller sends; see image_browser.py's
       // module docstring, section 2.
       //
-      // Off, type=path video previews and full-size opens do not work, and the
-      // grid says so on the card rather than mounting a <video> that fails
-      // silently. Thumbnails, listings and metadata on the browse… tab are
-      // unaffected: none of them returns a file's bytes.
+      // Off, the browse… tab does not work at all: /list?type=path, /thumb?path=
+      // and /metadata?path= each answer 403 before touching disk, so there are no
+      // cards to render and the tab reports the refusal by name. This block used
+      // to say thumbnails and metadata were "unaffected: none of them returns a
+      // file's bytes" — that was the reasoning PR #109 reversed, measured: with
+      // the switch off /thumb?path= returned a decoded 512x384 WebP of a file
+      // outside every root. A downscale is a read. Do not narrow the gate back.
       id: "ImageBrowser.AllowAbsolutePathReads",
       category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
       sortOrder: 80,
       name: "Allow absolute-path file reads",
       tooltip:
-        "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. Images still get thumbnails and metadata on the browse… tab either way.",
+        "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. With this off the browse… tab is unavailable entirely — listings, thumbnails and metadata for paths outside Input/Output/Temp are all refused, naming this setting.",
       type: "boolean",
       defaultValue: false,
     },

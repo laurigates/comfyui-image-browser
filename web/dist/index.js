@@ -5711,7 +5711,7 @@ app3.registerExtension({
       category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
       sortOrder: 80,
       name: "Allow absolute-path file reads",
-      tooltip: "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. Images still get thumbnails and metadata on the browse… tab either way.",
+      tooltip: "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. With this off the browse… tab is unavailable entirely — listings, thumbnails and metadata for paths outside Input/Output/Temp are all refused, naming this setting.",
       type: "boolean",
       defaultValue: false
     },
