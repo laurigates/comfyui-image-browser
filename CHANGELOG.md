@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.32](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.31...comfyui-image-browser-v0.1.32) (2026-08-27)
+
+
+### Bug Fixes
+
+* **density:** folder cards ignore the density scale and grow at the compact steps ([#107](https://github.com/laurigates/comfyui-image-browser/issues/107)) ([fbe66c6](https://github.com/laurigates/comfyui-image-browser/commit/fbe66c61c92f3cf6b308f975b480a6f787e8928a)), closes [#106](https://github.com/laurigates/comfyui-image-browser/issues/106)
+* **grid:** build the flat view a chunk per frame instead of all 5000 cards up front ([#108](https://github.com/laurigates/comfyui-image-browser/issues/108)) ([3cb3081](https://github.com/laurigates/comfyui-image-browser/commit/3cb30811408d374c43f2e121e2212cf90083421c))
+* **security:** close the endpoint classes the registry banned this pack for ([#109](https://github.com/laurigates/comfyui-image-browser/issues/109)) ([1d43820](https://github.com/laurigates/comfyui-image-browser/commit/1d43820fddc4e0aaab36149414cb3a190b9ba22b))
+
 ## [0.1.31](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.30...comfyui-image-browser-v0.1.31) (2026-08-19)
 
 
