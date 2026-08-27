@@ -99,14 +99,23 @@ test("clamping — grid height at the instant of each restore write", async ({ p
   report("clamping — remembered", remembered);
   report("clamping — writes on descend", writes);
 
-  // The decisive pair: the grid is already at its full height while NO image has
-  // a src yet. `aspect-ratio: 1/1` gives every card its intrinsic height before
-  // a single byte of image data arrives, so the restore target is inside the
-  // scroll range from the very first frame.
+  // The decisive pair: the grid is tall enough for the target while NO image
+  // has a src yet. `aspect-ratio: 1/1` gives every card its intrinsic height
+  // before a single byte of image data arrives, so the restore target is inside
+  // the scroll range from the very first frame.
   expect(restore.requested).toBe(remembered);
   expect(restore.imgsLoaded).toBe(0);
   expect(restore.maxScrollTop).toBeGreaterThan(restore.requested);
   expect(restore.clamped).toBe(false);
+
+  // Since #41 the write lands against the FIRST SCREENFUL, not the whole grid:
+  // renderGrid paints SYNC_CARD_BUDGET cards and defers the rest a chunk per
+  // frame. So the card count at the write is the sync budget rather than the
+  // folder's, and the height at the write is correspondingly short. Asserted
+  // rather than left implicit, because it is the premise the block below rests
+  // on — and because a silent return to the one-pass build would otherwise
+  // only show up as the two heights happening to match.
+  expect(restore.imgs).toBeLessThan(BULK_FILES);
   report("clamping — restore write", {
     requested: restore.requested,
     immediate: restore.immediate,
@@ -117,17 +126,38 @@ test("clamping — grid height at the instant of each restore write", async ({ p
     imgsLoaded: restore.imgsLoaded,
   });
 
-  // And the height does not move afterwards either — so there is no later
-  // moment at which the same offset would have become out of range.
+  // The height DOES move afterwards, and since #41 that is by design: the
+  // deferred tail grows the grid underneath the offset over the following
+  // frames. This used to assert the height never moved, which was true only
+  // while every card was built in one pass.
+  //
+  // Growth cannot invalidate an offset — it only raises maxScrollTop — so the
+  // property that has to hold is that the view does NOT DRIFT while the grid
+  // grows under it, and that the grid arrives at the height a fully-built one
+  // has. Thumbnails still contribute nothing to it: `aspect-ratio` sizes a card
+  // before its image loads, which is what the pre-tail assertions above pin.
   await waitForThumbQuiet(page, thumbs);
+  await waitForFileCards(page, BULK_FILES);
   const after = await page.evaluate(() => window.__IB_PROBE__.mark("after-thumbs"));
-  report("clamping — height before/after thumbnails", {
+  const cardsAfter = await page.evaluate(
+    () => document.querySelectorAll(".ib-card.is-file").length,
+  );
+  report("clamping — height before/after the deferred tail", {
+    imgsAtWrite: restore.imgs,
+    cardsAfter,
     scrollHeightAtWrite: restore.scrollHeight,
-    scrollHeightAfterThumbs: after.scrollHeight,
+    scrollHeightAfterTail: after.scrollHeight,
     delta: after.scrollHeight - restore.scrollHeight,
     scrollTop: after.scrollTop,
   });
-  expect(after.scrollHeight).toBe(restore.scrollHeight);
+  // The tail landed: every card of the folder is now built...
+  expect(cardsAfter).toBe(BULK_FILES);
+  expect(after.scrollHeight).toBeGreaterThan(restore.scrollHeight);
+  // ...the grid only ever GREW, never shrank under the offset...
+  expect(after.maxScrollTop).toBeGreaterThan(restore.maxScrollTop);
+  // ...and the view did not move a pixel while it happened. This is the
+  // user-visible guarantee the old height-is-constant assertion stood in for.
+  expect(after.scrollTop).toBe(remembered);
 });
 
 test("clamping — is live in this harness, and no restore write hits it", async ({ page }) => {

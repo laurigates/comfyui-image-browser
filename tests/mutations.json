@@ -17,8 +17,8 @@
     {
       "label": "the blur/spoiler is never applied to a matching card (thumbnails render in the clear)",
       "file": "src/browser.ts",
-      "before": "      if (hidden) applySafeView(c, f, spoilNames);",
-      "after": "      if (false) applySafeView(c, f, spoilNames);"
+      "before": "    if (hidden) applySafeView(c, f, spoilNames);",
+      "after": "    if (false) applySafeView(c, f, spoilNames);"
     },
     {
       "label": "the ROOT segment is dropped from the path haystack (a keyword naming a root matches nothing)",
@@ -35,8 +35,8 @@
     {
       "label": "the checkbox keeps the filename in its accessible name (the channel CSS cannot touch)",
       "file": "src/browser.ts",
-      "before": "            spoilNames ? \"Select hidden item\" : `Select ${escHTML(f.name)}`",
-      "after": "            `Select ${escHTML(f.name)}`"
+      "before": "          spoilNames ? \"Select hidden item\" : `Select ${escHTML(f.name)}`",
+      "after": "          `Select ${escHTML(f.name)}`"
     },
     {
       "label": "reveals are never cleared, so one survives a walk to another folder and back",
@@ -63,7 +63,7 @@
       "after": "  const disposeSafeView = onSafeViewChange(() => {\n    void 0;\n  });"
     },
     {
-      "label": "the toolbar toggle claims \ud83d\ude48 with an empty keyword list (advertises a filter that is off)",
+      "label": "the toolbar toggle claims 🙈 with an empty keyword list (advertises a filter that is off)",
       "file": "src/browser.ts",
       "before": "    const active = cfg.enabled && cfg.keywords.length > 0;",
       "after": "    const active = cfg.enabled;"
@@ -201,20 +201,20 @@
       "after": ""
     },
     {
-      "label": "the \ud83d\ude48 repaint uses the OPTIMISTIC local guess instead of what the server stored",
+      "label": "the 🙈 repaint uses the OPTIMISTIC local guess instead of what the server stored",
       "file": "src/browser.ts",
       "before": "      f.tags = await postTag(",
       "after": "      f.tags = next ? [keyword] : [];\n      await postTag("
     },
     {
-      "label": "\ud83d\ude48 escapes the per-card write mirror and renders on the browse\u2026/path tab, where /tag 400s",
+      "label": "🙈 escapes the per-card write mirror and renders on the browse…/path tab, where /tag 400s",
       "file": "src/browser.ts",
-      "before": "        canWriteThis && !missing && safeKeyword",
-      "after": "        !missing && safeKeyword"
+      "before": "      canWriteThis && !missing && safeKeyword",
+      "after": "      !missing && safeKeyword"
     },
     {
-      "label": "\ud83d\ude48 is offered with no configured keyword, writing the packaged default the user's filter does not contain",
-      "_note": "Re-anchored at kit 0.14.0: `sensitiveKeyword` itself moved into the kit (comfy-modal-kit#33), so its body can no longer be mutated from this repo. The behaviour it guards is still this pack's \u2014 the pack decides whether to RENDER the control \u2014 so the mutation now defaults the call site's null instead of the function's return. Same shipped bug, same test catches it.",
+      "label": "🙈 is offered with no configured keyword, writing the packaged default the user's filter does not contain",
+      "_note": "Re-anchored at kit 0.14.0: `sensitiveKeyword` itself moved into the kit (comfy-modal-kit#33), so its body can no longer be mutated from this repo. The behaviour it guards is still this pack's — the pack decides whether to RENDER the control — so the mutation now defaults the call site's null instead of the function's return. Same shipped bug, same test catches it.",
       "file": "src/browser.ts",
       "before": "    const safeKeyword = sensitiveKeyword(safeCfg);",
       "after": "    const safeKeyword = sensitiveKeyword(safeCfg) ?? \"nsfw\";"
@@ -226,13 +226,13 @@
       "after": "  return (f.tags ?? []).some((t) => t.toLowerCase().includes(want));"
     },
     {
-      "label": "the \ud83d\ude48 button loses its data-action, so the card handler treats the tap as an open",
+      "label": "the 🙈 button loses its data-action, so the card handler treats the tap as an open",
       "file": "src/safe-tag.ts",
       "before": " data-action=\"marksensitive\"",
       "after": ""
     },
     {
-      "label": "a pinned row drops its tags (the pinned tab stops blurring by keyword and \ud83d\ude48 reads unmarked on a marked file)",
+      "label": "a pinned row drops its tags (the pinned tab stops blurring by keyword and 🙈 reads unmarked on a marked file)",
       "file": "src/api.ts",
       "before": "      ...(e.exists && e.tags ? { tags: e.tags } : {}),\n",
       "after": ""
