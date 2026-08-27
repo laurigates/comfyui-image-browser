@@ -1,0 +1,222 @@
+{
+  "command": [
+    "uv",
+    "run",
+    "pytest",
+    "-q",
+    "tests/test_guard.py"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a section comment reworded, which no test can see",
+      "file": "image_browser.py",
+      "before": "# ---------------------------------------------------------------------------\n# Request guards — see the module docstring, section 1",
+      "after": "# ---------------------------------------------------------------------------\n# Request guards - see the module docstring, section 1"
+    },
+    {
+      "label": "the Content-Type gate is dropped, so a cross-origin text/plain form reaches every POST",
+      "file": "image_browser.py",
+      "before": "    if _request_mime(request) != \"application/json\":",
+      "after": "    if False:"
+    },
+    {
+      "label": "the Content-Type gate accepts anything NON-json (inert: the paired positive)",
+      "file": "image_browser.py",
+      "before": "    if _request_mime(request) != \"application/json\":",
+      "after": "    if _request_mime(request) == \"application/json\":"
+    },
+    {
+      "label": "cross-site is no longer refused (the Sec-Fetch-Site tier goes inert)",
+      "file": "image_browser.py",
+      "before": "        if sec_fetch_site.lower() == \"cross-site\":",
+      "after": "        if sec_fetch_site.lower() == \"nonesuch\":"
+    },
+    {
+      "label": "the origin/host compare is dropped, so an older browser's cross-origin POST lands",
+      "file": "image_browser.py",
+      "before": "    if origin_host.lower() != host_host.lower():",
+      "after": "    if origin_host.lower() == host_host.lower() and False:"
+    },
+    {
+      "label": "the draft's origin parse returns: '//'-rewritten then '//'-prefixed, hostname None for every real Origin",
+      "file": "image_browser.py",
+      "before": "    return _authority_host(rest.split(\"/\", 1)[0])",
+      "after": "    return _authority_host(\"//\" + rest.split(\"/\", 1)[0])"
+    },
+    {
+      "label": "the guard marker is never set, so a new unguarded POST would pass the enumeration",
+      "file": "image_browser.py",
+      "before": "    guarded.image_browser_guarded = True",
+      "after": "    guarded.image_browser_guarded = False"
+    },
+    {
+      "label": "one endpoint loses its guard (/delete), which is what an exception list would allow to rot",
+      "file": "image_browser.py",
+      "before": "@PromptServer.instance.routes.post(\"/image_browser/delete\")\n@_guard_mutation",
+      "after": "@PromptServer.instance.routes.post(\"/image_browser/delete\")"
+    },
+    {
+      "label": "the opt-in widens to truthiness, so a settings file holding the string \"false\" enables path reads",
+      "file": "image_browser.py",
+      "before": "    return _user_settings(request).get(SETTING_ALLOW_PATH_READS) is True",
+      "after": "    return bool(_user_settings(request).get(SETTING_ALLOW_PATH_READS))"
+    },
+    {
+      "label": "/file stops consulting the opt-in at all (the ban's primary category returns)",
+      "file": "image_browser.py",
+      "before": "    if not _absolute_path_reads_enabled(request):",
+      "after": "    if False:"
+    },
+    {
+      "label": "/file goes back to isfile-then-extension, restoring the existence oracle",
+      "file": "image_browser.py",
+      "before": "    if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:\n        return _err(\"unsupported file type\", 403)\n    if not os.path.isfile(path):\n        return _err(\"file not found\", 404)",
+      "after": "    if not os.path.isfile(path):\n        return _err(\"file not found\", 404)\n    if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:\n        return _err(\"unsupported file type\", 403)"
+    },
+    {
+      "label": "the realpath containment answer is inverted to always-contained (the gate goes inert)",
+      "file": "image_browser.py",
+      "before": "        return os.path.commonpath([real_target, real_base]) == real_base",
+      "after": "        return True"
+    },
+    {
+      "label": "the realpath primitive stops resolving its anchor, so realpath(root) is compared against a raw path",
+      "file": "image_browser.py",
+      "before": "        real_base = os.path.realpath(base)",
+      "after": "        real_base = base"
+    },
+    {
+      "label": "the file resolver drops the realpath gate (a symlink out of the sandbox becomes deletable)",
+      "file": "image_browser.py",
+      "before": "    err = _realpath_containment_error(target, type_name, base, allow_linked_subfolder)\n    if err:\n        return None, err\n    return target, \"\"\n\n\ndef _resolve_sandboxed_dir(",
+      "after": "    return target, \"\"\n\n\ndef _resolve_sandboxed_dir("
+    },
+    {
+      "label": "the batch mutation cap is dropped (one request can hand the server an unbounded delete list)",
+      "file": "image_browser.py",
+      "before": "    if len(items) > MAX_MUTATION_BATCH:",
+      "after": "    if False:"
+    },
+    {
+      "label": "the counting walk loses its early exit, so a huge tree is walked in full before the cap can refuse",
+      "file": "image_browser.py",
+      "before": "        if limit is not None and n_files + n_dirs > limit:\n            break",
+      "after": "        if False:\n            break"
+    },
+    {
+      "label": "the rmdir ceiling is dropped (recursive rmtree is unbounded again)",
+      "file": "image_browser.py",
+      "before": "    if n_files + n_dirs > MAX_RMDIR_ENTRIES:",
+      "after": "    if False:"
+    },
+    {
+      "label": "the too-large refusal answers 409 with counts, which the frontend reads as confirm-and-retry -> loop",
+      "file": "image_browser.py",
+      "before": "                \"code\": \"too_large\",\n            },\n            status=413,",
+      "after": "                \"code\": \"too_large\",\n                \"files\": n_files,\n                \"dirs\": n_dirs,\n            },\n            status=409,"
+    },
+    {
+      "label": "rmdir counts without the cap, so the ceiling is decided after a full walk",
+      "file": "image_browser.py",
+      "before": "    n_files, n_dirs = _count_dir_contents(target, limit=MAX_RMDIR_ENTRIES)",
+      "after": "    n_files, n_dirs = _count_dir_contents(target)"
+    },
+    {
+      "label": "THE BLOCKING BUG: containment re-anchors on the subfolder-resolved base, so a symlinked subfolder escapes the sandbox",
+      "file": "image_browser.py",
+      "before": "    anchor = base if allow_linked_subfolder else _sandbox_root(type_name)",
+      "after": "    anchor = base"
+    },
+    {
+      "label": "the dir resolver drops the realpath gate (rmdir/move_dir through a symlinked subfolder destroys a tree outside the roots)",
+      "file": "image_browser.py",
+      "before": "    err = _realpath_containment_error(target, type_name, base, allow_linked_subfolder)\n    if err:\n        return None, err\n    return target, \"\"\n\n\ndef _count_dir_contents(",
+      "after": "    return target, \"\"\n\n\ndef _count_dir_contents("
+    },
+    {
+      "label": "the sandbox anchor degrades to the CWD for an unknown type instead of an uncontainable path",
+      "file": "image_browser.py",
+      "before": "        return os.path.join(os.sep, \"\\x00nonexistent\")",
+      "after": "        return \".\""
+    },
+    {
+      "label": "every handler hard-codes the symlink opt-in ON, so the default-off gate never applies",
+      "file": "image_browser.py",
+      "before": "    return _user_settings(request).get(SETTING_ALLOW_LINKED_SUBFOLDER_WRITES) is True",
+      "after": "    return True"
+    },
+    {
+      "label": "the symlink opt-in widens to truthiness, so a settings file holding the string \"false\" opens the hatch",
+      "file": "image_browser.py",
+      "before": "    return _user_settings(request).get(SETTING_ALLOW_LINKED_SUBFOLDER_WRITES) is True",
+      "after": "    return bool(_user_settings(request).get(SETTING_ALLOW_LINKED_SUBFOLDER_WRITES))"
+    },
+    {
+      "label": "/delete stops reading the symlink opt-in and takes the resolver default (INERT: the paired positive for the hatch)",
+      "file": "image_browser.py",
+      "before": "        body.get(\"name\", \"\"),\n        allow_linked_subfolder=_linked_subfolder_writes_enabled(request),\n    )\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert target is not None\n    if not os.path.isfile(target):\n        return web.json_response({\"ok\": False, \"error\": \"file not found\"}, status=404)\n    try:\n        os.remove(target)",
+      "after": "        body.get(\"name\", \"\"),\n    )\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert target is not None\n    if not os.path.isfile(target):\n        return web.json_response({\"ok\": False, \"error\": \"file not found\"}, status=404)\n    try:\n        os.remove(target)"
+    },
+    {
+      "label": "THE SECOND BLOCKING BUG: /thumb and /metadata stop gating ?path= on the opt-in (a 512px re-encode of any host image, with the switch off)",
+      "file": "image_browser.py",
+      "before": "    if not allow_path:\n        return None, PATH_READS_DISABLED_MSG",
+      "after": "    if False:\n        return None, PATH_READS_DISABLED_MSG"
+    },
+    {
+      "label": "/thumb and /metadata read the opt-in as always ON (INERT: the paired positive — sandboxed reads must be unaffected)",
+      "file": "image_browser.py",
+      "before": "    if not allow_path:\n        return None, PATH_READS_DISABLED_MSG",
+      "after": "    if not True:\n        return None, PATH_READS_DISABLED_MSG"
+    },
+    {
+      "label": "/list stops gating type=path on the opt-in (any directory on the host is enumerable with the switch off)",
+      "file": "image_browser.py",
+      "before": "    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)",
+      "after": "    if False:\n        return _err(PATH_READS_DISABLED_MSG, 403)"
+    },
+    {
+      "label": "/list gates the SANDBOXED roots too, so the pack is off by default (INERT: the over-broad direction)",
+      "file": "image_browser.py",
+      "before": "    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)",
+      "after": "    if not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)"
+    },
+    {
+      "label": "/list gates AFTER the resolver, so a refused listing has already resolved the path",
+      "file": "image_browser.py",
+      "before": "    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)\n\n    base, err = _resolve_listing_base(type_name, subfolder, abs_path)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert base is not None\n",
+      "after": "    base, err = _resolve_listing_base(type_name, subfolder, abs_path)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert base is not None\n    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)\n"
+    },
+    {
+      "label": "_user_settings passes a truthy NON-mapping through, so .get raises outside the try -> 500 where a 403 is promised",
+      "file": "image_browser.py",
+      "before": "    if not isinstance(settings, dict):\n        log.debug(\"user settings were not a mapping; treating the opt-ins as off\")\n        return {}\n    return settings",
+      "after": "    return settings or {}"
+    },
+    {
+      "label": "the CORS flag reads as always ON, so the cross-site gate never applies",
+      "file": "image_browser.py",
+      "before": "        return bool(getattr(args, \"enable_cors_header\", None))",
+      "after": "        return True"
+    },
+    {
+      "label": "the CORS flag is never honoured, so --enable-cors-header keeps 403ing (INERT: the paired positive)",
+      "file": "image_browser.py",
+      "before": "    if _cors_header_enabled():\n        return None",
+      "after": "    if False:\n        return None"
+    },
+    {
+      "label": "an unreadable comfy.cli_args opens the cross-site gate instead of keeping it strict (fail-OPEN)",
+      "file": "image_browser.py",
+      "before": "        return bool(getattr(args, \"enable_cors_header\", None))\n    except Exception:\n        return False",
+      "after": "        return bool(getattr(args, \"enable_cors_header\", None))\n    except Exception:\n        return True"
+    },
+    {
+      "label": "the ESCAPE HATCH stops working: the opt-in path also anchors on the root, so a symlinked subfolder is unwritable either way",
+      "file": "image_browser.py",
+      "before": "    anchor = base if allow_linked_subfolder else _sandbox_root(type_name)",
+      "after": "    anchor = _sandbox_root(type_name)"
+    }
+  ]
+}

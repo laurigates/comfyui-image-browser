@@ -110,6 +110,63 @@ app.registerExtension({
     {
       // FROZEN id; distinct third category element; explicit sortOrder — see
       // the note on ImageBrowser.SidebarStars above.
+      //
+      // This one is a SECURITY setting, and its default is the whole point.
+      // /image_browser/file streams raw bytes from any absolute host path, and
+      // ComfyUI ships no authentication — so off by default makes that reach a
+      // choice the machine's owner makes deliberately, rather than a capability
+      // every install exposes whether or not anyone browses by path. The
+      // backend reads this id back out of the user's own settings on every
+      // request and trusts nothing the caller sends; see image_browser.py's
+      // module docstring, section 2.
+      //
+      // Off, the browse… tab does not work at all: /list?type=path, /thumb?path=
+      // and /metadata?path= each answer 403 before touching disk, so there are no
+      // cards to render and the tab reports the refusal by name. This block used
+      // to say thumbnails and metadata were "unaffected: none of them returns a
+      // file's bytes" — that was the reasoning PR #109 reversed, measured: with
+      // the switch off /thumb?path= returned a decoded 512x384 WebP of a file
+      // outside every root. A downscale is a read. Do not narrow the gate back.
+      id: "ImageBrowser.AllowAbsolutePathReads",
+      category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
+      sortOrder: 80,
+      name: "Allow absolute-path file reads",
+      tooltip:
+        "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. With this off the browse… tab is unavailable entirely — listings, thumbnails and metadata for paths outside Input/Output/Temp are all refused, naming this setting.",
+      type: "boolean",
+      defaultValue: false,
+    },
+    {
+      // FROZEN id; distinct third category element; explicit sortOrder — see
+      // the note on ImageBrowser.SidebarStars above.
+      //
+      // The SECOND security setting, and deliberately separate from the one
+      // above: the two reaches are unrelated (one reads outside the roots, the
+      // other writes through a link inside them) and one switch granting both
+      // would be a worse default than either.
+      //
+      // Write containment is anchored on the sandbox ROOT, because anchoring it
+      // on the folder you navigated into resolves a symlinked subfolder INTO
+      // the anchor — which let `output/link -> /etc` delete files outside the
+      // sandbox entirely. The root anchor closes that and, as a side effect,
+      // stops a genuinely symlinked subfolder (`output/renders ->
+      // /mnt/nas/renders`, a real layout) being written to. This hands that
+      // layout back to the person who runs it, explicitly.
+      //
+      // It widens the SUBFOLDER only. A symlinked filename is still refused
+      // with this on, so it is not a general containment off-switch.
+      id: "ImageBrowser.AllowSymlinkedSubfolderWrites",
+      category: ["Touch Tools", "Image Browser", "Symlinked subfolder writes"],
+      sortOrder: 85,
+      name: "Allow writes through symlinked subfolders",
+      tooltip:
+        "Off, a folder inside Input/Output/Temp that is a symlink pointing outside them can be browsed but not renamed, moved, deleted or rated — because a link out of the sandbox is also how a crafted request escapes it. Turn this on only if you deliberately keep renders on another disk or a network share via a symlinked subfolder. A symlinked FILE is still refused either way, and a symlinked ROOT (your whole output dir on another disk) works without this.",
+      type: "boolean",
+      defaultValue: false,
+    },
+    {
+      // FROZEN id; distinct third category element; explicit sortOrder — see
+      // the note on ImageBrowser.SidebarStars above.
       id: "ImageBrowser.LightboxActions",
       category: ["Touch Tools", "Image Browser", "Lightbox actions"],
       sortOrder: 90,

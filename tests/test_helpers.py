@@ -130,21 +130,53 @@ class TestCountDirContents:
         assert ib._count_dir_contents(str(inner)) == (0, 1)
 
 
-class _FakeRequest:
-    """Minimal stand-in for aiohttp.web.Request — /rmdir only reads .json()."""
+# The header set a real same-origin POST from the served frontend carries.
+# Deliberately the DEFAULT for _FakeRequest below, which makes every existing
+# endpoint test in this file the mutation guard's POSITIVE arm: a guard
+# hard-wired to deny (the failure mode a "no header -> 403" suite cannot see,
+# and which would break the whole pack) turns this file red wholesale. The
+# negative arms — each header wrong, one at a time — live in tests/test_guard.py
+# so they sit next to the enumeration that proves the guard is applied.
+VALID_POST_HEADERS = {
+    "Content-Type": "application/json",
+    "Sec-Fetch-Site": "same-origin",
+    "Origin": "http://127.0.0.1:8188",
+    "Host": "127.0.0.1:8188",
+}
 
-    def __init__(self, body):
+
+class _FakeRequest:
+    """Minimal stand-in for aiohttp.web.Request — POST handlers read .json().
+
+    Since the mutation guard was added they also read .headers, so this carries
+    a valid same-origin JSON header set unless a test overrides it.
+    """
+
+    def __init__(self, body, headers=None):
         self._body = body
+        self.headers = dict(VALID_POST_HEADERS if headers is None else headers)
 
     async def json(self):
         return self._body
 
 
-class _FakeGetRequest:
-    """Stand-in for a GET aiohttp.web.Request — /list reads .rel_url.query."""
+# The absolute-path read opt-in, as a stored settings mapping. conftest's user
+# manager stub answers `get_settings(request)` from the request's own
+# `comfy_settings`, so a test that needs `type=path` turns the REAL gate on
+# rather than monkeypatching the predicate it is meant to be gated by.
+PATH_READS_ON = {"ImageBrowser.AllowAbsolutePathReads": True}
 
-    def __init__(self, query):
+
+class _FakeGetRequest:
+    """Stand-in for a GET aiohttp.web.Request — /list reads .rel_url.query.
+
+    `settings` becomes the request's stored ComfyUI settings; omitted, it reads
+    as none stored, which is every opt-in's default-off state.
+    """
+
+    def __init__(self, query, settings=None):
         self.rel_url = SimpleNamespace(query=query)
+        self.comfy_settings = dict(settings or {})
 
 
 class TestListRecursive:
@@ -153,8 +185,8 @@ class TestListRecursive:
     /list is a GET reading .rel_url.query, so it needs the query-shaped fake
     above (not the json-body _FakeRequest the POST endpoints use)."""
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def _sandbox(self, base, monkeypatch):
         import folder_paths
@@ -219,7 +251,7 @@ class TestListRecursive:
         (tmp_path / "top.png").write_bytes(b"x")
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "nested.png").write_bytes(b"x")
-        resp = self._call({"type": "path", "path": str(tmp_path), "recursive": "1"})
+        resp = self._call({"type": "path", "path": str(tmp_path), "recursive": "1"}, PATH_READS_ON)
         names = {f["name"] for f in resp._body["files"]}
         assert names == {"top.png"}
         assert [d["name"] for d in resp._body["dirs"]] == ["sub"]
@@ -317,8 +349,8 @@ class TestListRecursive:
 class TestListDirCap:
     """The non-recursive path is capped too — it had the same unbounded hole."""
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def _sandbox(self, base, monkeypatch):
         import folder_paths
@@ -376,8 +408,8 @@ class TestListKindFilter:
     kind that was asked for. That is what the recursive case below pins down.
     """
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def _sandbox(self, base, monkeypatch):
         import folder_paths
@@ -444,7 +476,7 @@ class TestListKindFilter:
         base, so the browse… tab filters like any other. Fails the moment
         someone mirrors `recursive`'s `and type_name in SANDBOXED_TYPES`."""
         self._mixed(tmp_path)
-        resp = self._call({"type": "path", "path": str(tmp_path), "kind": "videos"})
+        resp = self._call({"type": "path", "path": str(tmp_path), "kind": "videos"}, PATH_READS_ON)
         assert self._names(resp) == {"b.mp4"}
 
     def test_composes_with_an_explicit_extensions_list(self, tmp_path, monkeypatch):
@@ -556,8 +588,8 @@ class TestListSafeHide:
     caller. The tests below pin behaviour, not a security boundary.
     """
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def _sandbox(self, base, monkeypatch):
         import folder_paths
@@ -688,7 +720,8 @@ class TestListSafeHide:
         segments."""
         self._mixed(tmp_path)
         resp = self._call(
-            {"type": "path", "path": str(tmp_path), "safe_kw": "nsfw", "safe_hide": "1"}
+            {"type": "path", "path": str(tmp_path), "safe_kw": "nsfw", "safe_hide": "1"},
+            PATH_READS_ON,
         )
         assert self._names(resp) == {"holiday.png"}
 
@@ -1501,8 +1534,8 @@ class TestListSafePromptTier:
     behaviour, not a security boundary.
     """
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def _sandbox(self, base, monkeypatch):
         import folder_paths
@@ -1693,7 +1726,8 @@ class TestListSafePromptTier:
         self._mixed(tmp_path)
         self._warm(tmp_path, "leather.png")
         resp = self._call(
-            {"type": "path", "path": str(tmp_path), "safe_kw": "nsfw", "safe_prompt": "1"}
+            {"type": "path", "path": str(tmp_path), "safe_kw": "nsfw", "safe_prompt": "1"},
+            PATH_READS_ON,
         )
         assert self._by_name(resp)["leather.png"]["prompt_match"] is True
 
@@ -1713,8 +1747,8 @@ class TestSafeViewSweepTrigger:
         (base / "_user").mkdir(exist_ok=True)
         monkeypatch.setattr(ib, "_maybe_start_sweep", lambda: calls.append(1))
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def test_a_listing_with_unscanned_files_starts_the_sweep(self, tmp_path, monkeypatch):
         calls = []
@@ -1902,8 +1936,8 @@ class TestListTags:
     """`/list` surfaces each file's `dc:subject` keywords, and the tag tier
     hides on them when Safe View is hiding."""
 
-    def _call(self, query):
-        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query)))
+    def _call(self, query, settings=None):
+        return asyncio.run(ib.image_browser_list(_FakeGetRequest(query, settings)))
 
     def _sandbox(self, base, monkeypatch):
         import folder_paths

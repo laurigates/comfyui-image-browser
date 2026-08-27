@@ -55,3 +55,39 @@ Split the perimeter by operation, not by folder:
 - The gate is unit-tested at its rejection boundary (`tests/test_helpers.py`);
   happy-path containment needs a real `folder_paths` and is covered by the live
   smoke matrix.
+
+## Amendment (2026-08, PR #109) — the reach became opt-in, and containment moved to the root
+
+Two claims above are no longer accurate. Recorded here rather than rewritten in
+place, because *why* they changed is the useful part.
+
+**"Arbitrary-path reads are an accepted, low-blast-radius capability."** They
+are not low-blast-radius on a server with no authentication, and the split this
+ADR drew — reads wide, writes narrow — is now drawn one notch tighter: every
+arbitrary-path READ (`/file`, `/thumb?path=`, `/metadata?path=`,
+`/list?type=path`) is behind the default-off setting
+`ImageBrowser.AllowAbsolutePathReads`. The reasoning that kept three of them
+open was that only `/file` returns a file's bytes; measured with the switch off,
+`/thumb?path=` returned a decoded 512x384 WebP of a file outside every root. A
+re-encode is a read. The decision's *shape* survives — reads may reach further
+than writes — but the wide reach is now a configuration choice rather than a
+default.
+
+**"Containment in the resolved root via `os.path.commonpath`"** is now two
+checks, and the second one's anchor is load-bearing. The lexical `commonpath`
+stays. Beside it, a `realpath` check anchored on
+`realpath(folder_paths.get_directory_by_type(type))` — the **root**, never the
+subfolder-resolved base. Anchoring on the base resolves a symlinked subfolder
+*into* the anchor, after which the target is contained by construction:
+`output/link -> /etc` plus `POST /delete {subfolder: "link", name: "passwd.png"}`
+answered `200 {"ok": true}` and deleted the victim.
+
+The root anchor keeps a symlinked ROOT writable and costs the symlinked
+SUBFOLDER, which is a real layout — so that is handed back by a second,
+separate, default-off setting `ImageBrowser.AllowSymlinkedSubfolderWrites`. It
+widens the subfolder only; a symlinked filename stays refused with it on.
+
+**"The gate is unit-tested at its rejection boundary."** It is now tested at
+both boundaries, end to end through `/delete` and `/rmdir` with real symlinks,
+in `tests/test_guard.py`, with mutation entries in `tests/mutations-guard.json`
+proving each assertion can fail.

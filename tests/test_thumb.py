@@ -15,13 +15,13 @@ import thumb_cache
 
 
 def test_resolve_thumb_target_path_mode_normalizes():
-    path, err = image_browser._resolve_thumb_target({"path": "/tmp/../tmp/x.png"})
+    path, err = image_browser._resolve_thumb_target({"path": "/tmp/../tmp/x.png"}, True)
     assert err == ""
     assert path == "/tmp/x.png"
 
 
 def test_resolve_thumb_target_requires_path_without_type():
-    path, err = image_browser._resolve_thumb_target({})
+    path, err = image_browser._resolve_thumb_target({}, True)
     assert path is None
     assert "missing path" in err
 
@@ -31,7 +31,7 @@ def test_resolve_thumb_target_sandboxed_resolves_under_root(tmp_path, monkeypatc
         folder_paths, "get_directory_by_type", lambda t: str(tmp_path), raising=False
     )
     path, err = image_browser._resolve_thumb_target(
-        {"type": "output", "subfolder": "sub", "name": "a.png"}
+        {"type": "output", "subfolder": "sub", "name": "a.png"}, False
     )
     assert err == ""
     assert path == str(tmp_path / "sub" / "a.png")
@@ -42,7 +42,7 @@ def test_resolve_thumb_target_sandboxed_rejects_traversal_name(tmp_path, monkeyp
         folder_paths, "get_directory_by_type", lambda t: str(tmp_path), raising=False
     )
     for bad in ("../a.png", "a/b.png", "..", ".", ""):
-        path, err = image_browser._resolve_thumb_target({"type": "input", "name": bad})
+        path, err = image_browser._resolve_thumb_target({"type": "input", "name": bad}, False)
         assert path is None, bad
         assert "invalid name" in err
 
@@ -52,7 +52,7 @@ def test_resolve_thumb_target_sandboxed_rejects_subfolder_escape(tmp_path, monke
     root.mkdir()
     monkeypatch.setattr(folder_paths, "get_directory_by_type", lambda t: str(root), raising=False)
     path, err = image_browser._resolve_thumb_target(
-        {"type": "temp", "subfolder": "../outside", "name": "a.png"}
+        {"type": "temp", "subfolder": "../outside", "name": "a.png"}, False
     )
     assert path is None
     assert "escapes root" in err
