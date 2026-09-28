@@ -1236,9 +1236,9 @@ describe("Safe View — the 🙈 mark-sensitive control", () => {
     // The second half is the trap the gallery-loader implementation already
     // solved: the mark button sits inside the card, so a handler that did not
     // consume the tap would ALSO run the card's own click — which here opens
-    // the file in a new tab.
+    // the file in the lightbox.
     //
-    // BOTH DIRECTIONS. "window.open was not called" is trivially satisfied by a
+    // BOTH DIRECTIONS. "the lightbox did not open" is trivially satisfied by a
     // build where the card handler is broken outright, so the same test then
     // taps the card body and requires that one to open.
     stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
@@ -1261,9 +1261,10 @@ describe("Safe View — the 🙈 mark-sensitive control", () => {
       present: true,
     });
     expect(opened).not.toHaveBeenCalled();
+    expect(modal.dialog.querySelector(".ib-lb")).toBeNull();
 
     card(modal, "a.png").querySelector(".ib-name").click();
-    expect(opened).toHaveBeenCalledTimes(1);
+    expect(modal.dialog.querySelector(".ib-lb")).not.toBeNull();
   });
 
   it("repaints from what the SERVER stored, not from the local guess", async () => {

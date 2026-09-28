@@ -96,6 +96,7 @@ import {
   videoSrcURL,
 } from "./api.js";
 import { labelParts } from "./label.js";
+import { openLightbox } from "./lightbox.js";
 // The rest of the mark-sensitive control stays per-pack — `tagRequestBody`,
 // `markSensitiveHTML` and `hasSensitiveTag` have deliberately diverged from
 // comfyui-gallery-loader's copies (no `type: "path"` arm here per ADR-0002, and
@@ -313,7 +314,7 @@ export const INLINE_ACTION_SLOTS = Math.floor(
 
 /** Label for each `data-action`, used by the overflow sheet's rows. */
 const ACTION_LABELS: Record<string, string> = {
-  open: "Open full size",
+  open: "Open in new tab",
   pin: "Pin / unpin",
   marksensitive: "Mark sensitive",
   meta: "Metadata",
@@ -1324,7 +1325,7 @@ export function openImageBrowser(): ModalShellController {
       toggleSelectionAt(idx);
       return;
     }
-    openFull(f);
+    openViewer(f);
   });
 
   // ---- Touch gestures: long-press → select mode; drag over ☑ → range select
@@ -1463,6 +1464,20 @@ export function openImageBrowser(): ModalShellController {
   function setStarRating(f: ListingFile, row: HTMLElement, next: number): void {
     const prev = Number(row.dataset.rating || "0");
     applyStars(row, next);
+    persistRating(f, next, prev).then(
+      (confirmed) => {
+        if (confirmed !== next) applyStars(row, confirmed);
+      },
+      () => applyStars(row, prev),
+    );
+  }
+
+  /**
+   * Write a rating and keep `f.rating` in step with the server. Shared by the
+   * card's star row and the lightbox's, so both surfaces land the same value
+   * on the file object the grid repaints from. Rejects after reporting.
+   */
+  function persistRating(f: ListingFile, next: number, prev: number): Promise<number> {
     f.rating = next;
     const addr: RatingAddress = {
       type: fileType(f),
@@ -1470,18 +1485,17 @@ export function openImageBrowser(): ModalShellController {
       absDir: state.absPath,
       name: f.name,
     };
-    postRating(RATING_URL, addr, next)
-      .then((confirmed) => {
-        if (confirmed !== next) {
-          applyStars(row, confirmed);
-          f.rating = confirmed;
-        }
-      })
-      .catch((e) => {
+    return postRating(RATING_URL, addr, next).then(
+      (confirmed) => {
+        f.rating = confirmed;
+        return confirmed;
+      },
+      (e) => {
         reportError("Rating failed", e);
-        applyStars(row, prev);
         f.rating = prev;
-      });
+        throw e;
+      },
+    );
   }
 
   /**
@@ -1593,7 +1607,11 @@ export function openImageBrowser(): ModalShellController {
     });
   }
 
-  function openFull(f: ListingFile): void {
+  /**
+   * Gate + reveal shared by both full-size routes. Returns false (after saying
+   * why) when the file cannot be read at all.
+   */
+  function prepareFullOpen(f: ListingFile): boolean {
     // Opening a file full-size IS the decision to look at it, so it reveals the
     // card behind it. Without this the user opens a blurred image in a new tab
     // — unblurred, since the filter is a class on OUR thumbnail and not on the
@@ -1607,18 +1625,78 @@ export function openImageBrowser(): ModalShellController {
       renderGrid();
     }
     // Opening an absolute-path file also goes through /image_browser/file, so
-    // with the opt-in off this would open a new tab onto a 403 JSON body. Say
-    // why here rather than in a tab the user has to read and close.
+    // with the opt-in off this would open onto a 403 JSON body. Say why here
+    // rather than in a view the user has to read and close.
     if (fileType(f) === "path" && !pathReadsAllowed()) {
       notify({
         severity: "warn",
         summary: "Absolute-path reads are off",
         detail: PATH_READS_DISABLED_MSG,
       });
-      return;
+      return false;
     }
+    return true;
+  }
+
+  /** The ↗ action: the original file in a new browser tab. */
+  function openFull(f: ListingFile): void {
+    if (!prepareFullOpen(f)) return;
     const url = fullSrcURL(fileType(f), fileSub(f), f.name, state.absPath);
     window.open(url, "_blank", "noopener");
+  }
+
+  /**
+   * A card tap: the in-browser lightbox (src/lightbox.ts), stepping through
+   * `renderedFiles` — the grid's current order and filter.
+   *
+   * Only the file the user TAPPED is revealed. A Safe View match reached by
+   * arrowing through arrives blurred with its own 👁, because stepping onto a
+   * file is not a decision to look at it.
+   */
+  function openViewer(f: ListingFile): void {
+    if (!prepareFullOpen(f)) return;
+    const rated = new Set<ListingFile>();
+    openLightbox<ListingFile>(f, {
+      shell: modal,
+      files: () => renderedFiles,
+      name: (x) => x.name,
+      kind: (x) => {
+        const ext = (x.ext || "").toLowerCase();
+        return IMG_EXTS.has(ext) ? "image" : VIDEO_EXTS.has(ext) ? "video" : "other";
+      },
+      src: (x) =>
+        fileType(x) === "path" && !pathReadsAllowed()
+          ? { blocked: PATH_READS_DISABLED_MSG }
+          : { url: fullSrcURL(fileType(x), fileSub(x), x.name, state.absPath) },
+      rating: (x) => (canWriteFile(x) ? ratingOf(x) : null),
+      rate: (x, next) => {
+        rated.add(x);
+        return persistRating(x, next, ratingOf(x));
+      },
+      canDelete: (x) => canWriteFile(x),
+      remove: (x) => onDelete(x),
+      hidden: (x) => isCardHidden(x, readSafeViewConfig()),
+      reveal: (x) => {
+        revealed.reveal(fileType(x), fileSub(x), x.name);
+        renderGrid();
+      },
+      openInTab: (x) => openFull(x),
+      onClose: (last) => {
+        // Stars set in the viewer, onto the cards underneath. ratingOf reads
+        // the value persistRating settled on, not the optimistic one.
+        for (const x of rated) {
+          const i = renderedFiles.indexOf(x);
+          const row = gridEl.querySelector<HTMLElement>(`.ib-card[data-idx="${i}"] .ib-stars`);
+          if (i >= 0 && row) applyStars(row, ratingOf(x));
+        }
+        // Leave keyboard focus on the file the user was last looking at.
+        const i = last ? renderedFiles.indexOf(last) : -1;
+        if (i >= 0) {
+          focusIndex = i;
+          applyFocus();
+        }
+      },
+    });
   }
 
   // Copy feedback lives on the button itself: label → "Copied ✓" → back.
@@ -1867,14 +1945,15 @@ export function openImageBrowser(): ModalShellController {
     allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
   }
 
-  async function onDelete(f: ListingFile): Promise<void> {
+  /** Resolves true only when the file was deleted (the lightbox advances on it). */
+  async function onDelete(f: ListingFile): Promise<boolean> {
     const ok = await confirmInShell(modal, {
       title: "Delete file?",
       message: `Permanently delete "${f.name}"? This cannot be undone.`,
       confirmLabel: "Delete",
       danger: true,
     });
-    if (!ok) return;
+    if (!ok) return false;
     const pin = filePinItem(f);
     try {
       await deleteFile(fileType(f), fileSub(f), f.name);
@@ -1885,8 +1964,10 @@ export function openImageBrowser(): ModalShellController {
       await followPins([{ from: pin, to: null }]);
       state.files = state.files.filter((x) => x !== f);
       renderGrid();
+      return true;
     } catch (e) {
       reportError("Delete failed", e);
+      return false;
     }
   }
 
@@ -2715,14 +2796,14 @@ export function openImageBrowser(): ModalShellController {
         // first, because their state is the reason they are on the card at
         // all: 📌 renders filled while pinned and 🙈 pressed while marked,
         // and a control whose state you cannot see without opening a sheet
-        // has stopped being an indicator. ↗ open follows them rather than
-        // leading, because a tap anywhere on the card already calls
-        // openFull() (the grid click handler's fall-through) — so it is the
-        // one control whose demotion costs the user nothing. Destructive
-        // last, which is the whole point of #90.
+        // has stopped being an indicator. ↗ open-in-tab follows them rather
+        // than leading, because a tap anywhere on the card already opens the
+        // full-size lightbox (the grid click handler's fall-through) — so it
+        // is the one control whose demotion costs the user nothing.
+        // Destructive last, which is the whole point of #90.
         pinBtn,
         markBtn,
-        `<button type="button" class="ib-act" data-action="open" title="Open full size">↗</button>`,
+        `<button type="button" class="ib-act" data-action="open" title="Open in new tab">↗</button>`,
         metaBtn,
         wfBtn,
         renameBtn,
@@ -3569,7 +3650,7 @@ export function openImageBrowser(): ModalShellController {
         <div class="ib-help-col">
           <div class="ib-help-h">Other</div>
           <dl>
-            <dt>Enter / o</dt><dd>open preview</dd>
+            <dt>Enter / o</dt><dd>open in lightbox (←/→ step, Del delete, Esc close)</dd>
             <dt>i</dt><dd>metadata</dd>
             <dt>w</dt><dd>load workflow</dd>
             <dt>b</dt><dd>safe view on/off</dd>
@@ -3731,7 +3812,7 @@ export function openImageBrowser(): ModalShellController {
       case "o":
         e.preventDefault();
         e.stopPropagation();
-        if (f) openFull(f);
+        if (f) openViewer(f);
         break;
       case "w":
         // Same gate as the ⤓ button: META_EXTS, every tab (a read, not a write).

@@ -1,0 +1,75 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/lightbox.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/lightbox.ts",
+      "before": "// Why not ComfyUI's MediaLightbox itself: it has no extension point.",
+      "after": "// Why not ComfyUI's MediaLightbox: it has no extension point.",
+      "control": true
+    },
+    {
+      "label": "a card tap opens a new tab again instead of the lightbox",
+      "file": "src/browser.ts",
+      "before": "      toggleSelectionAt(idx);\n      return;\n    }\n    openViewer(f);",
+      "after": "      toggleSelectionAt(idx);\n      return;\n    }\n    openFull(f);",
+      "expect": ["opens the tapped file in the lightbox"]
+    },
+    {
+      "label": "the root loses cmp-ov-backdrop, so grid shortcuts fire behind the viewer",
+      "file": "src/lightbox.ts",
+      "before": "  root.className = \"cmp-ov-backdrop ib-lb\";",
+      "after": "  root.className = \"ib-lb\";",
+      "expect": ["grid shortcuts do not fire behind the viewer"]
+    },
+    {
+      "label": "the shell's ESC is not taken back after the delete question, so Esc closes the whole browser",
+      "file": "src/lightbox.ts",
+      "before": "      if (!closed) document.removeEventListener(\"keydown\", shell._onKey, true);",
+      "after": "      // (dropped)",
+      "expect": ["keeps Esc scoped"]
+    },
+    {
+      "label": "keys are not ignored while the question is up, so an arrow moves the file being deleted",
+      "file": "src/lightbox.ts",
+      "before": "    if (busy) return; // the delete question owns the keyboard",
+      "after": "    // (dropped)",
+      "expect": ["owns every key while the question is up"]
+    },
+    {
+      "label": "navigation ignores the grid order and stays on the first file",
+      "file": "src/lightbox.ts",
+      "before": "    const next = neighbour(deps.files(), indexOfCurrent(), dir);",
+      "after": "    const next = null as F | null;",
+      "expect": ["steps through the grid in display order"]
+    },
+    {
+      "label": "Safe View is ignored in the viewer, so an arrowed-onto match shows in the clear",
+      "file": "src/browser.ts",
+      "before": "      hidden: (x) => isCardHidden(x, readSafeViewConfig()),",
+      "after": "      hidden: (_x) => false,",
+      "expect": ["blurs a match you arrow onto"]
+    },
+    {
+      "label": "INERT Safe View: every file is blurred, including the one the user tapped",
+      "file": "src/browser.ts",
+      "before": "      hidden: (x) => isCardHidden(x, readSafeViewConfig()),",
+      "after": "      hidden: (_x) => true,",
+      "expect": ["reveals the file you tapped"]
+    },
+    {
+      "label": "lightbox ratings are not mirrored onto the grid card on close",
+      "file": "src/browser.ts",
+      "before": "          if (i >= 0 && row) applyStars(row, ratingOf(x));",
+      "after": "          if (false) applyStars(row!, ratingOf(x));",
+      "expect": ["shows on the card after close"]
+    }
+  ]
+}

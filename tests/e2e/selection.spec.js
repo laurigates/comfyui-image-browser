@@ -277,15 +277,14 @@ test.describe("LOCK — what the capture change must not break", () => {
     // Clear of the 44px hit box in the top-left corner, and clear of the action
     // row at the card's foot — the card is ~313px tall and only its top ~264px
     // are above the fold, so "bottom-right of the card" is off-screen. Tap the
-    // thumbnail's right side instead. `openFull` is
-    // `window.open(url, "_blank")`, so the file opening IS a new page here.
+    // thumbnail's right side instead. A card tap opens the in-browser lightbox
+    // (src/lightbox.ts), so the file opening IS that overlay appearing.
     const box = await card.boundingBox();
-    const popup = page.waitForEvent("popup");
     await page.mouse.move(box.x + box.width - 16, box.y + 120);
     await page.mouse.down();
     await page.mouse.up();
 
-    await popup;
+    await expect(page.locator(".ib-lb")).toBeVisible();
     await expect(page.locator(SELECTED)).toHaveCount(0);
   });
 

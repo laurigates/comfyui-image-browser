@@ -57,7 +57,11 @@ manage without leaving ComfyUI.
   descriptor rather than twenty identical prefixes. The whole name is on the
   **⋯** sheet, and searching shows names unshaped so you can see what matched.
 - **Thumbnails** for images (WebP previews) and videos (poster frames), lazily
-  loaded as you scroll. Tap a card to open the full-size file in a new tab.
+  loaded as you scroll.
+- **Lightbox** — tap a card (or `Enter`/`o`) to view it full-size without
+  leaving the browser. Swipe or ←/→ steps through the grid in its current sort
+  and filter, and the bar at the bottom rates (★) and deletes (🗑) the file
+  on screen. ↗ opens the original in a new tab instead.
 - **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab
   (including `browse…`, once absolute-path reads are switched on). ComfyUI
   writes the workflow into every image *and video*
@@ -194,7 +198,8 @@ Turning it back off stops the matching immediately; the cache is kept.
 
 Tap the **👁** on a blurred card to reveal that one card. Reveals last for the
 session and are forgotten when you leave the folder or close the browser.
-Opening a file full-size counts as revealing it.
+Opening a file full-size counts as revealing it. A matching file you reach by
+swiping in the lightbox stays blurred until you tap its own 👁.
 
 The same filter applies to ComfyUI's own **Media Assets** sidebar cards and its
 full-screen asset viewer, following the same setting. Nothing is injected into
