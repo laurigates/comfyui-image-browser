@@ -174,11 +174,11 @@ describe("a type=path video card", () => {
 });
 
 describe("opening a type=path file full-size", () => {
-  it("opens a tab when the opt-in is ON and warns instead when it is OFF", async () => {
+  it("↗ opens a tab when the opt-in is ON and warns instead when it is OFF", async () => {
     const on = await load(true);
     const opener = vi.fn();
     vi.stubGlobal("open", opener);
-    videoCard(on.modal).click();
+    videoCard(on.modal).querySelector('[data-action="open"]').click();
     await vi.waitFor(() => {
       if (opener.mock.calls.length === 0) throw new Error("no open yet");
     });
@@ -188,12 +188,27 @@ describe("opening a type=path file full-size", () => {
     const off = await load(false);
     const blocked = vi.fn();
     vi.stubGlobal("open", blocked);
-    videoCard(off.modal).click();
+    videoCard(off.modal).querySelector('[data-action="open"]').click();
     // Nothing to wait for on the refusal path, so give the click's own async
     // work a turn before asserting the absence — otherwise "no open yet" is
     // true simply because nothing has run.
     await Promise.resolve();
     expect(blocked).not.toHaveBeenCalled();
+    off.modal.close();
+  });
+
+  it("a card tap opens the lightbox when the opt-in is ON and does not when it is OFF", async () => {
+    const on = await load(true);
+    videoCard(on.modal).click();
+    const media = on.modal.dialog.querySelector(".ib-lb .ib-lb-media");
+    expect(media?.tagName).toBe("VIDEO");
+    expect(media.getAttribute("src")).toContain("/image_browser/file");
+    on.modal.close();
+
+    const off = await load(false);
+    videoCard(off.modal).click();
+    await Promise.resolve();
+    expect(off.modal.dialog.querySelector(".ib-lb")).toBeNull();
     off.modal.close();
   });
 });
