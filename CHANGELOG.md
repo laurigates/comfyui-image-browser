@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.33](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.32...comfyui-image-browser-v0.1.33) (2026-09-28)
+
+
+### Features
+
+* **browser:** open tapped files in an in-browser lightbox ([#115](https://github.com/laurigates/comfyui-image-browser/issues/115)) ([4ac5bb4](https://github.com/laurigates/comfyui-image-browser/commit/4ac5bb4c0057cb01886e9571ec6cada8ce8bdce2))
+
 ## [0.1.32](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.31...comfyui-image-browser-v0.1.32) (2026-08-27)
 
 
