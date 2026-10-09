@@ -1,0 +1,121 @@
+{
+  "command": [
+    "uv",
+    "run",
+    "pytest",
+    "-q",
+    "tests/test_upload.py"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "CONTROL: upload docstring prose reworded",
+      "file": "image_browser.py",
+      "before": "    contract, because a phone multi-select can carry a ``.heic`` beside four\n",
+      "after": "    contract, because a phone multi-select may carry a ``.heic`` beside four\n",
+      "control": true
+    },
+    {
+      "label": "type=path is no longer refused at the REQUEST level",
+      "file": "image_browser.py",
+      "before": "            if type_name not in SANDBOXED_TYPES:\n                return refuse(\"writes are only allowed in input/output/temp\", 400)\n",
+      "after": "            if False:\n                return refuse(\"writes are only allowed in input/output/temp\", 400)\n"
+    },
+    {
+      "label": "a `..` segment is basenamed away instead of refused",
+      "file": "image_browser.py",
+      "before": "    if \"..\" in segments:\n        return None\n",
+      "after": "    if False:\n        return None\n"
+    },
+    {
+      "label": "only `/` is a separator (a POSIX basename leaves C:\\\\fakepath\\\\x.png whole)",
+      "file": "image_browser.py",
+      "before": "_UPLOAD_PATH_SEP = re.compile(r\"[\\\\/]\")",
+      "after": "_UPLOAD_PATH_SEP = re.compile(r\"[/]\")"
+    },
+    {
+      "label": "the up-front existence check is dropped (a collision streams the whole body first)",
+      "file": "image_browser.py",
+      "before": "        if os.path.lexists(target):\n            errors.append(",
+      "after": "        if False:\n            errors.append("
+    },
+    {
+      "label": "placement uses os.replace — overwrites a file that appeared mid-stream",
+      "file": "image_browser.py",
+      "before": "        os.link(tmp, target)\n        return True\n",
+      "after": "        os.replace(tmp, target)\n        return True\n"
+    },
+    {
+      "label": "the no-hard-link fallback reserves the name WITHOUT O_EXCL",
+      "file": "image_browser.py",
+      "before": "        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)\n",
+      "after": "        fd = os.open(target, os.O_WRONLY | os.O_CREAT, 0o666)\n"
+    },
+    {
+      "label": "the per-file size cap is not enforced",
+      "file": "image_browser.py",
+      "before": "                if size > cap:\n",
+      "after": "                if False:\n"
+    },
+    {
+      "label": "parts past MAX_UPLOAD_FILES are streamed anyway",
+      "file": "image_browser.py",
+      "before": "        if seen > MAX_UPLOAD_FILES:\n",
+      "after": "        if False:\n"
+    },
+    {
+      "label": "every part past MAX_UPLOAD_FILES gets its own errors[] row (unbounded)",
+      "file": "image_browser.py",
+      "before": "            if overflow is None:\n",
+      "after": "            if True:\n"
+    },
+    {
+      "label": "an overlong form field is accepted",
+      "file": "image_browser.py",
+      "before": "        if len(data) > UPLOAD_FIELD_MAX_BYTES:\n            return None\n",
+      "after": "        if False:\n            return None\n"
+    },
+    {
+      "label": "a destination field after a file is honoured",
+      "file": "image_browser.py",
+      "before": "            if destination_fixed:\n                return refuse(",
+      "after": "            if False:\n                return refuse("
+    },
+    {
+      "label": "the temp file is left behind after placement",
+      "file": "image_browser.py",
+      "before": "        if created:\n            with contextlib.suppress(FileNotFoundError):\n                os.unlink(tmp)\n",
+      "after": "        if False:\n            with contextlib.suppress(FileNotFoundError):\n                os.unlink(tmp)\n"
+    },
+    {
+      "label": "cleanup deletes the temp name even when this call did not create it",
+      "file": "image_browser.py",
+      "before": "        if created:\n            with contextlib.suppress(FileNotFoundError):\n",
+      "after": "        if True:\n            with contextlib.suppress(FileNotFoundError):\n"
+    },
+    {
+      "label": "a NaN --max-upload-size becomes the cap",
+      "file": "image_browser.py",
+      "before": "    if not math.isfinite(mb) or mb <= 0:\n",
+      "after": "    if mb <= 0:\n"
+    },
+    {
+      "label": "the upload route is gated by the JSON body gate (multipart can never reach it)",
+      "file": "image_browser.py",
+      "before": "    return _guard(handler, _reject_non_upload)\n",
+      "after": "    return _guard(handler, _reject_non_json)\n"
+    },
+    {
+      "label": "the custom header is not required (multipart alone is CORS-simple)",
+      "file": "image_browser.py",
+      "before": "    if request.headers.get(UPLOAD_HEADER) != \"1\":\n",
+      "after": "    if False:\n"
+    },
+    {
+      "label": "nothing-landed status is 409 for any failure mix",
+      "file": "image_browser.py",
+      "before": "    status = 409 if all(e[\"status\"] == 409 for e in errors) else 400\n",
+      "after": "    status = 409\n"
+    }
+  ]
+}

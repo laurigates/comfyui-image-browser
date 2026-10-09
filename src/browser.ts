@@ -93,6 +93,7 @@ import {
   SANDBOXED_TYPES,
   type TypeFilter,
   thumbVersion,
+  uploadFiles,
   videoSrcURL,
 } from "./api.js";
 import { labelParts } from "./label.js";
@@ -673,6 +674,25 @@ export function openImageBrowser(): ModalShellController {
   newFolderEl.title = "New folder";
   newFolderEl.textContent = "📁+";
 
+  // Upload into the current directory (#105). Same location-level gate as 📁+:
+  // a sandboxed write, so hidden on browse…/path, and hidden on the pinned tab,
+  // which is not a directory to upload into. The picker is a hidden file input;
+  // on iOS/Android `accept="image/*,video/*"` opens the camera roll, which is
+  // the case this exists for. Visually hidden rather than display:none, because
+  // some mobile browsers refuse a programmatic click() on an undisplayed input.
+  const uploadEl = document.createElement("button");
+  uploadEl.type = "button";
+  uploadEl.className = "ib-control ib-icon ib-upload";
+  uploadEl.title = "Upload files here";
+  uploadEl.textContent = "⬆︎";
+  const uploadInputEl = document.createElement("input");
+  uploadInputEl.type = "file";
+  uploadInputEl.multiple = true;
+  uploadInputEl.accept = "image/*,video/*";
+  uploadInputEl.className = "ib-upload-input";
+  uploadInputEl.tabIndex = -1;
+  uploadInputEl.setAttribute("aria-hidden", "true");
+
   // Drop every pin whose file or folder is gone. Shown only in the pinned view,
   // and only while there is something to prune — there is no watcher (a file
   // deleted from the other pack, or over ssh, cannot notify this one), so a
@@ -788,6 +808,8 @@ export function openImageBrowser(): ModalShellController {
     selectToggleEl,
     pinToggleEl,
     newFolderEl,
+    uploadEl,
+    uploadInputEl,
     pruneEl,
     safeToggleEl,
     scanPillEl,
@@ -1193,6 +1215,16 @@ export function openImageBrowser(): ModalShellController {
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
+  uploadEl.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    // Cleared first so picking the same file again still fires `change`.
+    uploadInputEl.value = "";
+    uploadInputEl.click();
+  });
+  uploadInputEl.addEventListener("change", () => {
+    const files = Array.from(uploadInputEl.files ?? []);
+    if (files.length > 0) void onUpload(files);
+  });
   viewToggleEl.addEventListener("click", () => {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     rememberScroll();
@@ -2240,6 +2272,7 @@ export function openImageBrowser(): ModalShellController {
     const canWrite = SANDBOXED_TYPES.includes(state.type);
     selectToggleEl.style.display = canSelectHere() ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
+    uploadEl.style.display = canWrite ? "" : "none";
     viewToggleEl.style.display = canWrite ? "" : "none";
     viewToggleEl.classList.toggle("is-active", isFlat());
     viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
@@ -3507,6 +3540,57 @@ export function openImageBrowser(): ModalShellController {
     }
   }
 
+  /**
+   * POST the picked files into the folder the picker was opened from.
+   *
+   * The destination is captured BEFORE the request: the user can change tab or
+   * folder while a phone uploads a video, and the files must land where they
+   * were aimed, not wherever the grid is by the time the response arrives. The
+   * grid is only re-listed if it is still showing that folder.
+   *
+   * Progress is an in-dialog overlay naming the count. It is indeterminate —
+   * `fetch` exposes no upload progress — and it says so by not drawing a bar.
+   */
+  async function onUpload(files: File[]): Promise<void> {
+    if (!SANDBOXED_TYPES.includes(state.type)) return;
+    const type = state.type;
+    const subfolder = state.subfolder;
+    const where = `${type}${subfolder ? `/${subfolder}` : ""}`;
+    const ov = openShellOverlay(modal);
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">Uploading ${files.length} file(s)…</div>
+      <div class="ib-upload-where">to ${escHTML(where)}</div>`;
+    let result: Awaited<ReturnType<typeof uploadFiles>>;
+    try {
+      result = await uploadFiles(type, subfolder, files);
+    } catch (e) {
+      ov.close();
+      reportError("Upload failed", e);
+      return;
+    }
+    ov.close();
+    if (result.uploaded.length > 0 && state.type === type && state.subfolder === subfolder) {
+      // New files sort in by mtime; keep the user's place rather than jumping
+      // to the top (the same refresh-in-place 📁+ uses).
+      await loadAndRender({ preserveScroll: true });
+    }
+    const failures = result.errors.map((er) => `${er.name}: ${er.error}`).join("\n");
+    if (result.ok && result.errors.length === 0) {
+      notify({
+        severity: "success",
+        summary: "Uploaded",
+        detail: `${result.uploaded.length} file(s) to ${where}`,
+      });
+    } else if (result.uploaded.length > 0) {
+      reportError(
+        `Uploaded ${result.uploaded.length}, ${result.errors.length} failed`,
+        new Error(failures),
+      );
+    } else {
+      reportError("Upload failed", new Error(failures || result.error || "nothing was uploaded"));
+    }
+  }
+
   async function onMoveDir(name: string): Promise<void> {
     if (!SANDBOXED_TYPES.includes(state.type)) return;
     // The folder's own path, so the picker can hide it (and its subtree) — the
@@ -4287,6 +4371,12 @@ const BROWSER_CSS = `
 }
 .ib-control:hover { background: #3a3a4a; color: #fff; }
 .ib-icon { min-width: 34px; text-align: center; }
+/* The upload picker: present for click(), invisible and untouchable. */
+.ib-upload-input {
+  position: absolute; width: 1px; height: 1px; opacity: 0;
+  pointer-events: none; overflow: hidden;
+}
+.ib-upload-where { opacity: 0.75; word-break: break-all; }
 .ib-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px; padding: 4px;
