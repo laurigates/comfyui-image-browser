@@ -9,6 +9,12 @@
   "reporter": "exit-code",
   "mutations": [
     {
+      "label": "XMP CACHE (#42) — the vendored cap is back to FLAT_LIST_CAP, so one capped listing evicts its own entries",
+      "file": "xmp_meta.py",
+      "before": "_CACHE_MAX = 25_000",
+      "after": "_CACHE_MAX = 5000"
+    },
+    {
       "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
       "file": "image_browser.py",
       "before": "# THIS IS DISCRETION, NOT ACCESS CONTROL. `safe_hide` is a rendering preference",
