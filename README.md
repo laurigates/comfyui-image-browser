@@ -36,8 +36,9 @@ canvas while open — a touch-first card grid of thumbnails you can browse and
 manage without leaving ComfyUI.
 
 - **Browse** the **Input / Output / Temp** folders as tabs, plus a **browse…**
-  tab for arbitrary absolute paths (`models/`, `custom_nodes/`, anywhere on
-  disk) — that tab is **off until you switch it on**, see *Security posture*.
+  tab for absolute paths inside ComfyUI's directories (`models/`,
+  `custom_nodes/`, folders in `extra_model_paths.yaml`) — that tab is **off
+  until you switch it on**, see *Security posture*.
   Breadcrumbs, folder descend, sort (newest / oldest / name / size /
   resolution), and fuzzy filename filter.
 - **Filter by media type** — a segmented **All / 🖼 Images / 🎬 Videos** control
@@ -307,15 +308,24 @@ unless you switch on **Settings → Touch Tools → Image Browser → "Allow
 absolute-path file reads"**. The setting is read from your own ComfyUI settings
 server-side and cannot be flipped by a request parameter or a header.
 
-With it **off**, the `browse…` tab does not work at all: it reports the
+**Even with it on, the reach stops at ComfyUI's own directories**: `base_path`,
+input/output/temp/user, and every folder ComfyUI registers, including the
+entries of `extra_model_paths.yaml`. A path anywhere else answers 403 before
+anything on disk is touched. The setting alone cannot be the boundary, because
+ComfyUI's own `POST /settings/{id}` lets any caller who can reach the port
+switch it on. To browse another folder, list it in `extra_model_paths.yaml` or
+symlink it inside the ComfyUI tree, then restart. Both need access to the
+server's filesystem.
+
+With the setting **off**, the `browse…` tab does not work at all: it reports the
 refusal, naming the setting, instead of half-listing. With it **on**, anyone
-who can reach this port (ComfyUI has no login) can enumerate any directory on
-the machine with names, sizes, image dimensions and timestamps; fetch a decoded
-512px thumbnail of any image on it; read the embedded generation metadata of
-any image or supported video; and stream any whitelisted media file's raw
-bytes. A downscale is a read — a photo, a screenshot and a scanned document all
+who can reach this port (ComfyUI has no login) can enumerate any directory
+inside that reach with names, sizes, image dimensions and timestamps; fetch a
+decoded 512px thumbnail of any image in it; read the embedded generation
+metadata of any image or supported video; and stream any whitelisted media
+file's raw bytes. A downscale is a read — a photo, a screenshot and a scanned document all
 survive one legibly — so treat the switch as "let this server serve my media
-library", not as a preview convenience.
+library and model folders", not as a preview convenience.
 
 **Writes are sandboxed and doubly contained.** Management actions are
 intentionally **disabled in the arbitrary-path (`browse…`) tab** — that mode is

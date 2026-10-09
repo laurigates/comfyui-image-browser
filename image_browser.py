@@ -78,16 +78,24 @@ that has not. Every gate below is written against that attacker.
    own ``comfy.settings.json`` through ComfyUI's user manager — it can not be
    turned on by a request parameter or a header.
 
-   State plainly what the switch turns ON, because the earlier wording here
-   ("none of them returns a file's bytes") read as reassurance and was used to
-   justify leaving three of the four ungated. With the setting on, a caller who
-   can reach this port can: enumerate any directory on the host, with names,
-   sizes, image dimensions and mtimes (``/list``); obtain a decoded 512px WebP
-   re-encode of any image on it (``/thumb``); read the embedded text metadata of
-   any image or supported video (``/metadata``); and stream any whitelisted
-   media file's raw bytes (``/file``). A downscale is a read: a photo, a
-   screenshot and a scanned document all survive one legibly. Off by default is
-   what makes that reach a choice the machine's owner makes.
+   That file is NOT out of a caller's reach, though: core's
+   ``POST /settings/{id}`` writes it for any caller, unauthenticated. So the
+   setting decides whether the browse… tab works, and cannot decide WHERE it
+   reaches. The reach is fixed separately to ComfyUI's own directories
+   (``_read_roots``: base_path, input/output/temp/user, and every
+   ``folder_paths`` folder including extra_model_paths.yaml entries), checked
+   lexically before any disk touch. Widening it takes the server's filesystem
+   — a yaml entry or a symlink inside the tree — which no HTTP route grants.
+   Registry moderation kept 0.1.32 and 0.1.33 flagged as arbitrary-file-read
+   until that second gate existed (#113).
+
+   State plainly what the switch turns ON. With the setting on, a caller who
+   can reach this port can: enumerate any directory inside the reach, with
+   names, sizes, image dimensions and mtimes (``/list``); obtain a decoded
+   512px WebP re-encode of any image in it (``/thumb``); read the embedded text
+   metadata of any image or supported video (``/metadata``); and stream any
+   whitelisted media file's raw bytes (``/file``). A downscale is a read: a
+   photo, a screenshot and a scanned document all survive one legibly.
 
 3. Path traversal and symlink escape on the mutation path.
    Writes (delete/rename/move/move_dir/rmdir/mkdir/rating/tag) are restricted
@@ -490,11 +498,81 @@ def _parse_extensions(raw: str) -> set[str]:
     return out or (IMG_EXTS | VIDEO_EXTS)
 
 
+# ---------------------------------------------------------------------------
+# Read reach — where an absolute-path read may go once the opt-in is on
+# ---------------------------------------------------------------------------
+#
+# The opt-in (``ImageBrowser.AllowAbsolutePathReads``) decides WHETHER the
+# browse… tab works; it cannot decide where it reaches, because it is not a
+# boundary against the caller it is meant to stop. Core's POST /settings/{id}
+# writes comfy.settings.json for any caller with no authentication, and
+# _user_settings reads the opt-in back from that file — one request switches
+# it on. So the reach is fixed to the directories ComfyUI itself knows about,
+# and widening it takes the server's filesystem (an extra_model_paths.yaml
+# entry, or a symlink inside the tree), which no HTTP route grants. Registry
+# moderation kept 0.1.32 and 0.1.33 flagged as arbitrary-file-read until this.
+
+READ_REACH_REFUSAL = (
+    "path is outside ComfyUI's directories. To browse another folder, register it in "
+    "extra_model_paths.yaml or symlink it inside the ComfyUI tree, then restart ComfyUI."
+)
+
+
+def _read_roots() -> list[str]:
+    """Absolute directories an absolute-path read may reach.
+
+    ``base_path``, the input/output/temp/user directories (which
+    --output-directory and friends can move outside base_path), and every path
+    registered in ``folder_paths.folder_names_and_paths`` — models,
+    custom_nodes, and the operator's extra_model_paths.yaml entries. Anything
+    that is not an absolute string is dropped: a relative entry would resolve
+    against the server's working directory, which is not a root of anything.
+    """
+    candidates: list[Any] = [getattr(folder_paths, "base_path", None)]
+    for getter in (
+        "get_input_directory",
+        "get_output_directory",
+        "get_temp_directory",
+        "get_user_directory",
+    ):
+        fn = getattr(folder_paths, getter, None)
+        try:
+            candidates.append(fn() if callable(fn) else None)
+        except Exception:
+            continue
+    registered = getattr(folder_paths, "folder_names_and_paths", None)
+    if isinstance(registered, dict):
+        for entry in registered.values():
+            if isinstance(entry, (tuple, list)) and entry and isinstance(entry[0], (list, tuple)):
+                candidates.extend(entry[0])
+    return [os.path.abspath(c) for c in candidates if isinstance(c, str) and os.path.isabs(c)]
+
+
+def _within_read_roots(path: str) -> bool:
+    """True when ``path`` lies lexically inside one of ``_read_roots()``.
+
+    Lexical on purpose: ``abspath`` folds ``..`` away before the compare, so a
+    traversal cannot escape, while a symlink the operator placed inside the
+    tree stays followable — that is the documented way to widen the reach, and
+    nothing reachable over HTTP can create one. ``commonpath`` rather than a
+    prefix test, so ``/x/comfy-private`` is not inside ``/x/comfy``.
+    """
+    target = os.path.abspath(path)
+    for root in _read_roots():
+        try:
+            if os.path.commonpath([target, root]) == root:
+                return True
+        except ValueError:
+            # Different drives on Windows: not inside this root.
+            continue
+    return False
+
+
 def _resolve_listing_base(type_name: str, subfolder: str, abs_path: str) -> tuple[str | None, str]:
     """Return (base_dir, error_msg). On success error_msg == ''.
 
-    Sandboxed types are constrained to their root; ``path`` accepts any absolute
-    directory (read-only reach).
+    Sandboxed types are constrained to their root; ``path`` accepts an absolute
+    directory inside ``_read_roots()`` (read-only reach).
     """
     if type_name in SANDBOXED_TYPES:
         root = folder_paths.get_directory_by_type(type_name)
@@ -507,7 +585,10 @@ def _resolve_listing_base(type_name: str, subfolder: str, abs_path: str) -> tupl
     if type_name == "path":
         if not abs_path:
             return None, "missing path"
-        return os.path.abspath(os.path.expanduser(abs_path)), ""
+        target = os.path.abspath(os.path.expanduser(abs_path))
+        if not _within_read_roots(target):
+            return None, READ_REACH_REFUSAL
+        return target, ""
     return None, f"unknown type: {type_name}"
 
 
@@ -1305,7 +1386,8 @@ async def image_browser_list(request: web.Request) -> web.Response:
 
     base, err = _resolve_listing_base(type_name, subfolder, abs_path)
     if err:
-        return web.json_response({"ok": False, "error": err}, status=400)
+        status = 403 if err == READ_REACH_REFUSAL else 400
+        return web.json_response({"ok": False, "error": err}, status=status)
     assert base is not None
 
     if not os.path.isdir(base):
@@ -1443,6 +1525,8 @@ async def image_browser_file(request: web.Request) -> web.Response:
     if not _absolute_path_reads_enabled(request):
         return _err(PATH_READS_DISABLED_MSG, 403)
     path = os.path.abspath(os.path.expanduser(abs_path))
+    if not _within_read_roots(path):
+        return _err(READ_REACH_REFUSAL, 403)
     if os.path.splitext(path)[1].lower() not in STREAMABLE_EXTS:
         return _err("unsupported file type", 403)
     if not os.path.isfile(path):
@@ -1497,7 +1581,10 @@ def _resolve_thumb_target(q: Any, allow_path: bool) -> tuple[str | None, str]:
         return None, "missing path"
     if not allow_path:
         return None, PATH_READS_DISABLED_MSG
-    return os.path.abspath(os.path.expanduser(abs_path)), ""
+    path = os.path.abspath(os.path.expanduser(abs_path))
+    if not _within_read_roots(path):
+        return None, READ_REACH_REFUSAL
+    return path, ""
 
 
 def _thumb_cache_dir() -> str:
@@ -1519,7 +1606,7 @@ async def image_browser_thumb(request: web.Request) -> web.Response:
     """
     path, err = _resolve_thumb_target(request.rel_url.query, _absolute_path_reads_enabled(request))
     if err:
-        return _err(err, 403 if err == PATH_READS_DISABLED_MSG else 400)
+        return _err(err, 403 if err in (PATH_READS_DISABLED_MSG, READ_REACH_REFUSAL) else 400)
     assert path is not None
     if not os.path.isfile(path) or not _is_image_file(path):
         return _err("not found", 404)
@@ -1565,7 +1652,7 @@ async def image_browser_metadata(request: web.Request) -> web.Response:
     """
     path, err = _resolve_thumb_target(request.rel_url.query, _absolute_path_reads_enabled(request))
     if err:
-        return _err(err, 403 if err == PATH_READS_DISABLED_MSG else 400)
+        return _err(err, 403 if err in (PATH_READS_DISABLED_MSG, READ_REACH_REFUSAL) else 400)
     assert path is not None
     if not _has_metadata_reader(path):
         return _err("unsupported file type", 400)
