@@ -2338,6 +2338,7 @@ async def image_browser_upload(request: web.Request) -> web.Response:
     linked = _linked_subfolder_writes_enabled(request)
     cap = _max_upload_bytes()
     seen = 0
+    overflow: dict[str, Any] | None = None
     while True:
         try:
             part = await reader.next()
@@ -2377,12 +2378,14 @@ async def image_browser_upload(request: web.Request) -> web.Response:
             destination_fixed = True
 
         if seen > MAX_UPLOAD_FILES:
-            errors.append(
-                {
-                    "name": filename,
-                    "error": f"too many files (max {MAX_UPLOAD_FILES})",
-                    "status": 413,
-                }
+            # ONE row for the whole overflow, updated in place. A row per excess
+            # part grew errors[] (and the response) without bound: the body is
+            # streamed, so client_max_size never caps how many parts arrive.
+            if overflow is None:
+                overflow = {"name": filename, "error": "", "status": 413}
+                errors.append(overflow)
+            overflow["error"] = (
+                f"too many files (max {MAX_UPLOAD_FILES}); {seen - MAX_UPLOAD_FILES} not uploaded"
             )
             continue
         name = _upload_basename(filename)

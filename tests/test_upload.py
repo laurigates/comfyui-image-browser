@@ -373,6 +373,22 @@ class TestBounds:
         assert extra.consumed == 0
         assert _all_files(root) == ["a.png", "b.png"]
 
+    def test_parts_past_the_cap_add_one_error_not_one_per_part(self, root, monkeypatch):
+        # The body is streamed, so aiohttp's client_max_size never bounds it: an
+        # error row per excess part grew errors[] (and the response) without
+        # limit — measured at 142 MB peak for 8000 parts with 4 KB names.
+        monkeypatch.setattr(ib, "MAX_UPLOAD_FILES", 2)
+        extras = [_file(f"x{i}.png") for i in range(50)]
+        resp = _upload([*_dest("input", ""), _file("a.png"), _file("b.png"), *extras])
+        assert resp._body["uploaded"] == ["a.png", "b.png"]
+        assert len(resp._body["errors"]) == 1
+        overflow = resp._body["errors"][0]
+        assert overflow["name"] == "x0.png"
+        assert overflow["status"] == 413
+        assert "50 not uploaded" in overflow["error"]
+        assert all(p.consumed == 0 for p in extras)
+        assert _all_files(root) == ["a.png", "b.png"]
+
     def test_an_overlong_form_field_is_refused(self, root):
         resp = _upload(
             [_field("type", "input"), _field("subfolder", "a" * 10_000), _file("a.png")]

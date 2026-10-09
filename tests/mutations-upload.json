@@ -64,6 +64,12 @@
       "after": "        if False:\n"
     },
     {
+      "label": "every part past MAX_UPLOAD_FILES gets its own errors[] row (unbounded)",
+      "file": "image_browser.py",
+      "before": "            if overflow is None:\n",
+      "after": "            if True:\n"
+    },
+    {
       "label": "an overlong form field is accepted",
       "file": "image_browser.py",
       "before": "        if len(data) > UPLOAD_FIELD_MAX_BYTES:\n            return None\n",
