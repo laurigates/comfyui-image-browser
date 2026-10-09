@@ -1852,6 +1852,7 @@ var MOVE_DIR_URL = "/image_browser/move_dir";
 var MOVE_MANY_URL = "/image_browser/move_many";
 var RMDIR_URL = "/image_browser/rmdir";
 var MKDIR_URL = "/image_browser/mkdir";
+var UPLOAD_URL = "/image_browser/upload";
 var PINS_URL = "/image_browser/pins";
 var RATING_URL = "/image_browser/rating";
 var SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
@@ -2066,6 +2067,33 @@ function moveMany(items, destType, destSubfolder) {
 }
 function makeDir(type, subfolder, name) {
   return postJSON(MKDIR_URL, { type, subfolder, name });
+}
+var UPLOAD_HEADER = "X-Image-Browser-Upload";
+async function uploadFiles(type, subfolder, files) {
+  const form = new FormData;
+  form.append("type", type);
+  form.append("subfolder", subfolder);
+  for (const f of files)
+    form.append("file", f, f.name);
+  const r = await fetch(UPLOAD_URL, {
+    method: "POST",
+    headers: { [UPLOAD_HEADER]: "1" },
+    body: form
+  });
+  let data;
+  try {
+    data = await r.json();
+  } catch {
+    throw new Error(`HTTP ${r.status}`);
+  }
+  if (!data || typeof data !== "object")
+    throw new Error(`HTTP ${r.status}`);
+  return {
+    ok: r.ok && data.ok === true,
+    uploaded: Array.isArray(data.uploaded) ? data.uploaded : [],
+    errors: Array.isArray(data.errors) ? data.errors : [],
+    error: data.error ?? (r.ok ? undefined : `HTTP ${r.status}`)
+  };
 }
 function pinKeyOf(p) {
   return `${p.kind}:${p.type}:${p.subfolder}:${p.name ?? ""}`;
@@ -2709,6 +2737,18 @@ function openImageBrowser() {
   newFolderEl.className = "ib-control ib-icon ib-newfolder";
   newFolderEl.title = "New folder";
   newFolderEl.textContent = "\uD83D\uDCC1+";
+  const uploadEl = document.createElement("button");
+  uploadEl.type = "button";
+  uploadEl.className = "ib-control ib-icon ib-upload";
+  uploadEl.title = "Upload files here";
+  uploadEl.textContent = "⬆︎";
+  const uploadInputEl = document.createElement("input");
+  uploadInputEl.type = "file";
+  uploadInputEl.multiple = true;
+  uploadInputEl.accept = "image/*,video/*";
+  uploadInputEl.className = "ib-upload-input";
+  uploadInputEl.tabIndex = -1;
+  uploadInputEl.setAttribute("aria-hidden", "true");
   const pruneEl = document.createElement("button");
   pruneEl.type = "button";
   pruneEl.className = "ib-control ib-prune";
@@ -2760,7 +2800,7 @@ function openImageBrowser() {
   filterEl.appendChild(densityGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, scanPillEl, sortEl, refreshEl, filterEl, pinsEl);
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, uploadEl, uploadInputEl, pruneEl, safeToggleEl, scanPillEl, sortEl, refreshEl, filterEl, pinsEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -2959,6 +2999,17 @@ function openImageBrowser() {
   });
   refreshEl.addEventListener("click", () => loadAndRender({ preserveScroll: true }));
   newFolderEl.addEventListener("click", () => void onNewFolder());
+  uploadEl.addEventListener("click", () => {
+    if (!SANDBOXED_TYPES2.includes(state.type))
+      return;
+    uploadInputEl.value = "";
+    uploadInputEl.click();
+  });
+  uploadInputEl.addEventListener("change", () => {
+    const files = Array.from(uploadInputEl.files ?? []);
+    if (files.length > 0)
+      onUpload(files);
+  });
   viewToggleEl.addEventListener("click", () => {
     if (!SANDBOXED_TYPES2.includes(state.type))
       return;
@@ -3699,6 +3750,7 @@ function openImageBrowser() {
     const canWrite = SANDBOXED_TYPES2.includes(state.type);
     selectToggleEl.style.display = canSelectHere() ? "" : "none";
     newFolderEl.style.display = canWrite ? "" : "none";
+    uploadEl.style.display = canWrite ? "" : "none";
     viewToggleEl.style.display = canWrite ? "" : "none";
     viewToggleEl.classList.toggle("is-active", isFlat());
     viewToggleEl.title = isFlat() ? "Folder view" : "Flat view (all subfolders)";
@@ -4451,6 +4503,42 @@ ${when}`;
       reportError("Create folder failed", e);
     }
   }
+  async function onUpload(files) {
+    if (!SANDBOXED_TYPES2.includes(state.type))
+      return;
+    const type = state.type;
+    const subfolder = state.subfolder;
+    const where = `${type}${subfolder ? `/${subfolder}` : ""}`;
+    const ov = openShellOverlay(modal);
+    ov.card.innerHTML = `
+      <div class="cmp-ov-title">Uploading ${files.length} file(s)…</div>
+      <div class="ib-upload-where">to ${escapeHTML(where)}</div>`;
+    let result;
+    try {
+      result = await uploadFiles(type, subfolder, files);
+    } catch (e) {
+      ov.close();
+      reportError("Upload failed", e);
+      return;
+    }
+    ov.close();
+    if (result.uploaded.length > 0 && state.type === type && state.subfolder === subfolder) {
+      await loadAndRender({ preserveScroll: true });
+    }
+    const failures = result.errors.map((er) => `${er.name}: ${er.error}`).join(`
+`);
+    if (result.ok && result.errors.length === 0) {
+      notify({
+        severity: "success",
+        summary: "Uploaded",
+        detail: `${result.uploaded.length} file(s) to ${where}`
+      });
+    } else if (result.uploaded.length > 0) {
+      reportError(`Uploaded ${result.uploaded.length}, ${result.errors.length} failed`, new Error(failures));
+    } else {
+      reportError("Upload failed", new Error(failures || result.error || "nothing was uploaded"));
+    }
+  }
   async function onMoveDir(name) {
     if (!SANDBOXED_TYPES2.includes(state.type))
       return;
@@ -5116,6 +5204,12 @@ var BROWSER_CSS = `
 }
 .ib-control:hover { background: #3a3a4a; color: #fff; }
 .ib-icon { min-width: 34px; text-align: center; }
+/* The upload picker: present for click(), invisible and untouchable. */
+.ib-upload-input {
+  position: absolute; width: 1px; height: 1px; opacity: 0;
+  pointer-events: none; overflow: hidden;
+}
+.ib-upload-where { opacity: 0.75; word-break: break-all; }
 .ib-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px; padding: 4px;

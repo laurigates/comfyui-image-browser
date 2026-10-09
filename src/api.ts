@@ -38,6 +38,7 @@ const MOVE_DIR_URL = "/image_browser/move_dir";
 const MOVE_MANY_URL = "/image_browser/move_many";
 const RMDIR_URL = "/image_browser/rmdir";
 const MKDIR_URL = "/image_browser/mkdir";
+const UPLOAD_URL = "/image_browser/upload";
 const PINS_URL = "/image_browser/pins";
 export const RATING_URL = "/image_browser/rating";
 const SAFEVIEW_WARM_URL = "/image_browser/safeview_warm";
@@ -665,6 +666,65 @@ export function moveMany(
 // with the backend's error message.
 export function makeDir(type: BrowseType, subfolder: string, name: string): Promise<void> {
   return postJSON(MKDIR_URL, { type, subfolder, name });
+}
+
+// ---- Upload (sandboxed roots only) --------------------------------------
+//
+// The one POST that is not JSON: a file body is multipart, which is a
+// CORS-simple content type, so the backend's CSRF gate for this route is the
+// custom header below instead of `Content-Type: application/json` (see
+// `_reject_non_upload` in image_browser.py). Content-Type is deliberately NOT
+// set here — the browser must write it, because only the browser knows the
+// multipart boundary.
+//
+// The backend's /delete_many contract: anything landed → ok:true with per-item
+// errors[]; nothing landed → ok:false (409 when every failure was a
+// collision). Both come back as a result rather than a throw, so the caller
+// can name each failed file; only an unreadable response throws.
+const UPLOAD_HEADER = "X-Image-Browser-Upload";
+
+interface UploadError {
+  name: string;
+  error: string;
+  status?: number;
+}
+
+interface UploadResult {
+  ok: boolean;
+  uploaded: string[];
+  errors: UploadError[];
+  error?: string;
+}
+
+export async function uploadFiles(
+  type: BrowseType,
+  subfolder: string,
+  files: readonly File[],
+): Promise<UploadResult> {
+  // Destination first: the backend resolves it before streaming a byte and
+  // refuses a body that names it after a file.
+  const form = new FormData();
+  form.append("type", type);
+  form.append("subfolder", subfolder);
+  for (const f of files) form.append("file", f, f.name);
+  const r = await fetch(UPLOAD_URL, {
+    method: "POST",
+    headers: { [UPLOAD_HEADER]: "1" },
+    body: form,
+  });
+  let data: Partial<UploadResult>;
+  try {
+    data = (await r.json()) as Partial<UploadResult>;
+  } catch {
+    throw new Error(`HTTP ${r.status}`);
+  }
+  if (!data || typeof data !== "object") throw new Error(`HTTP ${r.status}`);
+  return {
+    ok: r.ok && data.ok === true,
+    uploaded: Array.isArray(data.uploaded) ? data.uploaded : [],
+    errors: Array.isArray(data.errors) ? data.errors : [],
+    error: data.error ?? (r.ok ? undefined : `HTTP ${r.status}`),
+  };
 }
 
 // ---- Pins (server-side, shared between packs AND devices) --------------
