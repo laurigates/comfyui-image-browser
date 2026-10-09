@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.34](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.33...comfyui-image-browser-v0.1.34) (2026-10-09)
+
+
+### Features
+
+* **browser:** count a slow listing's wait and say why it is slow ([#118](https://github.com/laurigates/comfyui-image-browser/issues/118)) ([a62f0ce](https://github.com/laurigates/comfyui-image-browser/commit/a62f0ce807bd987d91c05e1c161985ecdb3d8e8d)), closes [#42](https://github.com/laurigates/comfyui-image-browser/issues/42)
+* upload files into the current folder from the browser ([#119](https://github.com/laurigates/comfyui-image-browser/issues/119)) ([ee70b98](https://github.com/laurigates/comfyui-image-browser/commit/ee70b98d2d795af693ec232241746b2af6acd4bb))
+
+
+### Bug Fixes
+
+* **security:** keep absolute-path reads inside ComfyUI's directories ([#122](https://github.com/laurigates/comfyui-image-browser/issues/122)) ([0563974](https://github.com/laurigates/comfyui-image-browser/commit/0563974dc0ae61aa0a3393c1810165d5a1724811)), closes [#113](https://github.com/laurigates/comfyui-image-browser/issues/113)
+
+
+### Performance Improvements
+
+* **xmp:** sync the rating-cache headroom fix from gallery-loader ([#117](https://github.com/laurigates/comfyui-image-browser/issues/117)) ([ed6eee9](https://github.com/laurigates/comfyui-image-browser/commit/ed6eee9466669ef393a8202bff908078d8077a73))
+
 ## [0.1.33](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.32...comfyui-image-browser-v0.1.33) (2026-09-28)
 
 
