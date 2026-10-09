@@ -57,53 +57,47 @@ check: typecheck build lint test test-e2e check-xmp-drift check-thumb-cache-drif
 # Vendored code
 ##########
 
-# Canonical home of the shared XMP rating module (vendored verbatim here).
-xmp-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/xmp_meta.py"
+# xmp_meta.py, thumb_cache.py and pins_store.py are vendored verbatim from
+# comfyui-gallery-loader at the commit in scripts/vendored-pin. The checks diff
+# against that PINNED commit, never against canonical main, so a canonical merge
+# cannot turn an unrelated PR here red (comfyui-gallery-loader#92). The
+# scheduled "Vendored sync" workflow opens the PR that moves the pin; to move it
+# by hand, run `just bump-vendored`. Logic lives in scripts/vendored.sh.
 
-# Canonical home of the shared thumbnail-cache module (vendored verbatim here).
-thumb-cache-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/thumb_cache.py"
+# Move the pin to a canonical ref (default: main) and re-fetch every vendored file.
+[group: "vendored"]
+bump-vendored ref="main":
+    scripts/vendored.sh bump {{ref}}
 
-# Canonical home of the shared pin-store module (vendored verbatim here).
-pins-store-upstream := "https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/pins_store.py"
-
-# Re-sync the vendored xmp_meta.py from its canonical home.
+# Restore the vendored xmp_meta.py from the pinned canonical commit.
 [group: "vendored"]
 sync-xmp:
-    curl -fsSL {{xmp-upstream}} -o xmp_meta.py
-    @echo "xmp_meta.py synced from comfyui-gallery-loader@main"
+    scripts/vendored.sh sync xmp_meta.py
 
-# Re-sync the vendored thumb_cache.py from its canonical home.
+# Restore the vendored thumb_cache.py from the pinned canonical commit.
 [group: "vendored"]
 sync-thumb-cache:
-    curl -fsSL {{thumb-cache-upstream}} -o thumb_cache.py
-    @echo "thumb_cache.py synced from comfyui-gallery-loader@main"
+    scripts/vendored.sh sync thumb_cache.py
 
-# Re-sync the vendored pins_store.py from its canonical home.
+# Restore the vendored pins_store.py from the pinned canonical commit.
 [group: "vendored"]
 sync-pins-store:
-    curl -fsSL {{pins-store-upstream}} -o pins_store.py
-    @echo "pins_store.py synced from comfyui-gallery-loader@main"
+    scripts/vendored.sh sync pins_store.py
 
-# Fail if the vendored xmp_meta.py has drifted from the canonical copy.
+# Fail if the vendored xmp_meta.py differs from the pinned canonical commit.
 [group: "vendored"]
 check-xmp-drift:
-    @curl -fsSL {{xmp-upstream}} | diff -u - xmp_meta.py \
-        && echo "xmp_meta.py matches canonical" \
-        || { echo "DRIFT: xmp_meta.py differs from comfyui-gallery-loader@main — run 'just sync-xmp' (or land the fix upstream first)"; exit 1; }
+    @scripts/vendored.sh check xmp_meta.py
 
-# Fail if the vendored thumb_cache.py has drifted from the canonical copy.
+# Fail if the vendored thumb_cache.py differs from the pinned canonical commit.
 [group: "vendored"]
 check-thumb-cache-drift:
-    @curl -fsSL {{thumb-cache-upstream}} | diff -u - thumb_cache.py \
-        && echo "thumb_cache.py matches canonical" \
-        || { echo "DRIFT: thumb_cache.py differs from comfyui-gallery-loader@main — run 'just sync-thumb-cache' (or land the fix upstream first)"; exit 1; }
+    @scripts/vendored.sh check thumb_cache.py
 
-# Fail if the vendored pins_store.py has drifted from the canonical copy.
+# Fail if the vendored pins_store.py differs from the pinned canonical commit.
 [group: "vendored"]
 check-pins-store-drift:
-    @curl -fsSL {{pins-store-upstream}} | diff -u - pins_store.py \
-        && echo "pins_store.py matches canonical" \
-        || { echo "DRIFT: pins_store.py differs from comfyui-gallery-loader@main — run 'just sync-pins-store' (or land the fix upstream first)"; exit 1; }
+    @scripts/vendored.sh check pins_store.py
 
 # Regenerate the README screenshot (docs/browser.png) via the containerized
 # Playwright pipeline. First build ~4 min; cached rebuild ~30 s. See

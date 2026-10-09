@@ -165,28 +165,17 @@ jobs:
           if-no-files-found: ignore
 
   vendored-drift:
+    # Diffs each vendored file against comfyui-gallery-loader at the commit in
+    # scripts/vendored-pin, NOT against its main: a canonical merge must not
+    # turn an unrelated PR here red (laurigates/comfyui-gallery-loader#92). The
+    # "Vendored sync" workflow is what notices canonical moving and opens the
+    # PR that bumps the pin.
     name: Vendored modules match canonical
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Diff xmp_meta.py against comfyui-gallery-loader@main
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/xmp_meta.py | diff -u - xmp_meta.py || {
-            echo "::error::xmp_meta.py drifted from its canonical home (comfyui-gallery-loader). Run 'just sync-xmp' — or land the fix upstream first."
-            exit 1
-          }
-      - name: Diff thumb_cache.py against comfyui-gallery-loader@main
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/thumb_cache.py | diff -u - thumb_cache.py || {
-            echo "::error::thumb_cache.py drifted from its canonical home (comfyui-gallery-loader). Run 'just sync-thumb-cache' — or land the fix upstream first."
-            exit 1
-          }
-      - name: Diff pins_store.py against comfyui-gallery-loader@main
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/laurigates/comfyui-gallery-loader/main/pins_store.py | diff -u - pins_store.py || {
-            echo "::error::pins_store.py drifted from its canonical home (comfyui-gallery-loader). Run 'just sync-pins-store' — or land the fix upstream first."
-            exit 1
-          }
+      - name: Diff vendored modules against the pinned canonical commit
+        run: scripts/vendored.sh check
 
   security:
     name: Security scanning
