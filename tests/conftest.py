@@ -12,6 +12,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 
 class _StubModule(ModuleType):
     def __getattr__(self, attr: str):
@@ -110,3 +112,18 @@ _server.PromptServer = SimpleNamespace(
         user_manager=SimpleNamespace(settings=SimpleNamespace(get_settings=_get_settings)),
     )
 )
+
+
+@pytest.fixture(autouse=True)
+def comfy_base_is_tmp_path(tmp_path, monkeypatch):
+    """Make each test's tmp_path ComfyUI's base_path.
+
+    Absolute-path reads stop at ComfyUI's own directories (``_read_roots``), and
+    the stubbed folder_paths has none, so without this every ``type=path`` test
+    would be refused before reaching the behaviour it is about. Files a test
+    writes under tmp_path are therefore "inside ComfyUI", as real renders are.
+    ``tests/test_read_reach.py`` overrides it to build an inside/outside split.
+    """
+    import folder_paths
+
+    monkeypatch.setattr(folder_paths, "base_path", str(tmp_path), raising=False)

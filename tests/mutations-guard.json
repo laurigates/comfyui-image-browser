@@ -185,8 +185,8 @@
     {
       "label": "/list gates AFTER the resolver, so a refused listing has already resolved the path",
       "file": "image_browser.py",
-      "before": "    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)\n\n    base, err = _resolve_listing_base(type_name, subfolder, abs_path)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert base is not None\n",
-      "after": "    base, err = _resolve_listing_base(type_name, subfolder, abs_path)\n    if err:\n        return web.json_response({\"ok\": False, \"error\": err}, status=400)\n    assert base is not None\n    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)\n"
+      "before": "    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)\n\n    base, err = _resolve_listing_base(type_name, subfolder, abs_path)\n    if err:\n        status = 403 if err == READ_REACH_REFUSAL else 400\n        return web.json_response({\"ok\": False, \"error\": err}, status=status)\n    assert base is not None\n",
+      "after": "    base, err = _resolve_listing_base(type_name, subfolder, abs_path)\n    if err:\n        status = 403 if err == READ_REACH_REFUSAL else 400\n        return web.json_response({\"ok\": False, \"error\": err}, status=status)\n    assert base is not None\n    if type_name == \"path\" and not _absolute_path_reads_enabled(request):\n        return _err(PATH_READS_DISABLED_MSG, 403)\n"
     },
     {
       "label": "_user_settings passes a truthy NON-mapping through, so .get raises outside the try -> 500 where a 403 is promised",

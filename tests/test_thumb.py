@@ -14,10 +14,12 @@ import thumb_cache
 # ---------- _resolve_thumb_target -----------------------------------
 
 
-def test_resolve_thumb_target_path_mode_normalizes():
-    path, err = image_browser._resolve_thumb_target({"path": "/tmp/../tmp/x.png"}, True)
+def test_resolve_thumb_target_path_mode_normalizes(tmp_path):
+    path, err = image_browser._resolve_thumb_target(
+        {"path": f"{tmp_path}/../{tmp_path.name}/x.png"}, True
+    )
     assert err == ""
-    assert path == "/tmp/x.png"
+    assert path == str(tmp_path / "x.png")
 
 
 def test_resolve_thumb_target_requires_path_without_type():

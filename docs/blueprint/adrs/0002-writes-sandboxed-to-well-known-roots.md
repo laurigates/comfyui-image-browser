@@ -91,3 +91,38 @@ widens the subfolder only; a symlinked filename stays refused with it on.
 both boundaries, end to end through `/delete` and `/rmdir` with real symlinks,
 in `tests/test_guard.py`, with mutation entries in `tests/mutations-guard.json`
 proving each assertion can fail.
+
+## Amendment (2026-10, issue #113): the setting is not a boundary, so the reach is fixed
+
+The 2026-08 amendment made every absolute-path read opt-in through
+`ImageBrowser.AllowAbsolutePathReads`. Registry moderation kept 0.1.32 and
+0.1.33 flagged as `arbitrary-file-read` afterwards, and the flag was right.
+The setting lives in the user's `comfy.settings.json`, and core's
+`POST /settings/{id}` (app/app_settings.py) writes that file for any caller
+with no authentication. Any caller who can reach the port, which includes the
+whole LAN on a `--listen 0.0.0.0` install, can switch the opt-in on with one
+request and then read any media file on the host. "Cannot be flipped by a
+request parameter or a header" was true. It was also beside the point, because
+core provides another request that flips it.
+
+Decision: the setting still decides **whether** the browse… tab works. Where
+it reaches is fixed to `_read_roots()`: `folder_paths.base_path`, the
+input/output/temp/user directories, and every path in
+`folder_paths.folder_names_and_paths`, which includes models, custom_nodes and
+`extra_model_paths.yaml` entries. All four reads (`/list?type=path`, `/file`,
+`/thumb?path=`, `/metadata?path=`) check it lexically (`abspath` and
+`commonpath`) before any disk touch, and answer `403` naming the remedy.
+
+- **Widening takes the server's filesystem.** An operator lists the folder in
+  `extra_model_paths.yaml` or symlinks it inside the tree. The check is
+  lexical, so `..` cannot escape while an operator's symlink is followed. No
+  route in this pack or in core creates a symlink.
+- **Not an environment variable.** `os.environ` is a scanner tripwire that
+  `tests/test_publish_hygiene.py` keeps out of shipped code. ComfyUI's
+  directory list is already server-side configuration.
+- **The ADR's shape survives.** Reads still reach further than writes, since
+  the browse… tab covers `models/` and `custom_nodes/` and writes stay in
+  input/output/temp. The reads no longer reach the whole host.
+
+Pinned by `tests/test_read_reach.py`, which runs every case with the setting
+ON. `tests/mutations-read-reach.json` proves each assertion can fail.

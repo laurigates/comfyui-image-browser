@@ -1373,7 +1373,7 @@ class TestMetadataEndpoint:
         # asserted two-sided in tests/test_guard.py, against the real endpoint.
         return asyncio.run(ib.image_browser_metadata(_FakeGetRequest(query, settings)))
 
-    def test_non_image_extension_is_400_before_any_disk_touch(self, monkeypatch):
+    def test_non_image_extension_is_400_before_any_disk_touch(self, monkeypatch, tmp_path):
         """A 400 (not 404) for a file that doesn't exist is the proof that the
         IMG_EXTS gate runs before os.path.isfile — unlike /file, which stats an
         arbitrary caller-supplied path first."""
@@ -1382,12 +1382,12 @@ class TestMetadataEndpoint:
             raise AssertionError("the extension gate must precede os.path.isfile")
 
         monkeypatch.setattr(os.path, "isfile", boom)
-        resp = self._call({"path": "/nonexistent/a.txt"})
+        resp = self._call({"path": f"{tmp_path}/nonexistent/a.txt"})
         assert resp.status == 400
         assert resp._body["error"] == "unsupported file type"
 
-    def test_missing_image_is_404(self):
-        resp = self._call({"path": "/nonexistent/a.png"})
+    def test_missing_image_is_404(self, tmp_path):
+        resp = self._call({"path": f"{tmp_path}/nonexistent/a.png"})
         assert resp.status == 404
         assert resp._body["error"] == "file not found"
 
@@ -1822,7 +1822,7 @@ class TestVideoMetadataGate:
         assert resp._body["source"] == "comfyui"
         assert resp._body["summary"]["seed"] == "123456789"
 
-    def test_container_without_a_reader_is_400_before_any_disk_touch(self, monkeypatch):
+    def test_container_without_a_reader_is_400_before_any_disk_touch(self, monkeypatch, tmp_path):
         """.avi is in VIDEO_EXTS — it lists and previews — but has no reader, so
         the endpoint rejects it and the frontend withholds the ⓘ / ⤓ buttons.
         A 400 for a path that does not exist proves the gate precedes isfile."""
@@ -1831,7 +1831,7 @@ class TestVideoMetadataGate:
             raise AssertionError("the extension gate must precede os.path.isfile")
 
         monkeypatch.setattr(os.path, "isfile", boom)
-        resp = self._call({"path": "/nonexistent/clip.avi"})
+        resp = self._call({"path": f"{tmp_path}/nonexistent/clip.avi"})
         assert resp.status == 400
         assert resp._body["error"] == "unsupported file type"
 

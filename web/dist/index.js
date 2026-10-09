@@ -1908,11 +1908,11 @@ async function fetchListing(p) {
     params.set("safe_prompt", "1");
   }
   const r = await fetch(`${LIST_URL}?${params.toString()}`, { cache: "no-cache" });
+  const data = await r.json().catch(() => null);
   if (!r.ok)
-    throw new Error(`HTTP ${r.status}`);
-  const data = await r.json();
-  if (!data.ok)
-    throw new Error(data.error || "listing failed");
+    throw new Error(data?.error || `HTTP ${r.status}`);
+  if (!data?.ok)
+    throw new Error(data?.error || "listing failed");
   return data;
 }
 function thumbVersion(mtime, size) {
@@ -6328,7 +6328,7 @@ app3.registerExtension({
       category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
       sortOrder: 80,
       name: "Allow absolute-path file reads",
-      tooltip: "Lets the browse… tab play videos and open originals from anywhere on this machine, by serving their bytes over HTTP. ComfyUI has no login, so anyone who can reach this server can then read any image or video file on it — leave this off unless you trust everything on the network the server listens on. With this off the browse… tab is unavailable entirely — listings, thumbnails and metadata for paths outside Input/Output/Temp are all refused, naming this setting.",
+      tooltip: "Lets the browse… tab list, preview and open files outside Input/Output/Temp, by serving them over HTTP. It reaches only ComfyUI's own directories (models/, custom_nodes/ and folders in extra_model_paths.yaml); a folder anywhere else needs an extra_model_paths.yaml entry or a symlink inside the ComfyUI tree. ComfyUI has no login, so anyone who can reach this server can read the image and video files in those directories while this is on. With this off the browse… tab is unavailable entirely, and listings, thumbnails and metadata outside Input/Output/Temp are refused, naming this setting.",
       type: "boolean",
       defaultValue: false
     },
