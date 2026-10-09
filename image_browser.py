@@ -25,6 +25,7 @@ Endpoint surface (all under /image_browser/):
     POST /move_many    {items:[{type,subfolder,name}, …], dest_type, dest_subfolder} batch move
     POST /rmdir        {type, subfolder, name, recursive}           delete a folder
     POST /mkdir        {type, subfolder, name}                       create a folder
+    POST /upload       multipart: type, subfolder, file…             upload into a folder
     POST /rating       {type, subfolder, name, rating}              0..5 star rating
     POST /ratings      {items:[{type,subfolder,name}, …]}           batch rating READ
     GET  /pins                                    pinned folders + media, resolved
@@ -54,6 +55,11 @@ that has not. Every gate below is written against that attacker.
      * ``Content-Type: application/json`` is REQUIRED (415 otherwise). A form
        cannot set that header, so the endpoints stop being CORS-simple and a
        cross-origin call now needs a preflight the server never grants.
+       The ONE exception is ``POST /upload``, whose body must be multipart —
+       a CORS-simple type — so ``_guard_upload`` requires multipart PLUS the
+       custom ``X-Image-Browser-Upload: 1`` header instead, which a form
+       cannot send either (see ``_reject_non_upload``). Same marker, same
+       enumeration test.
      * The request must not be cross-site: ``Sec-Fetch-Site: cross-site`` is
        refused, and when that browser-set header is absent an ``Origin`` whose
        host differs from ``Host`` is refused (403).
@@ -98,7 +104,7 @@ that has not. Every gate below is written against that attacker.
    photo, a screenshot and a scanned document all survive one legibly.
 
 3. Path traversal and symlink escape on the mutation path.
-   Writes (delete/rename/move/move_dir/rmdir/mkdir/rating/tag) are restricted
+   Writes (delete/rename/move/move_dir/rmdir/mkdir/upload/rating/tag) are restricted
    to the sandboxed roots (input/output/temp); ``type=path`` is rejected. Each
    re-asserts a bare traversal-free filename, the extension whitelist, and
    **two independent containment checks**: the lexical one (which rejects
@@ -136,11 +142,14 @@ that has not. Every gate below is written against that attacker.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
+import math
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import time
 from email.utils import formatdate
@@ -221,6 +230,19 @@ MAX_MUTATION_BATCH = 200
 # uncapped os.walk of a pathological tree would stall the event loop BEFORE the
 # cap could refuse, which would defeat the point of having one.
 MAX_RMDIR_ENTRIES = 10_000
+
+# Bounds on POST /upload. Files past MAX_UPLOAD_FILES in one request are
+# reported in errors[] and never read. The per-file size cap is ComfyUI's own
+# --max-upload-size (see `_max_upload_bytes`), so an operator raises one knob
+# for core's /upload/image and this endpoint alike; DEFAULT_MAX_UPLOAD_MB is
+# core's default for that flag, used when it cannot be read. It has to be
+# enforced here: aiohttp's client_max_size bounds request.read()/post() only,
+# and the streaming request.multipart() reader this endpoint uses bypasses it.
+MAX_UPLOAD_FILES = 64
+DEFAULT_MAX_UPLOAD_MB = 100
+UPLOAD_CHUNK_BYTES = 256 * 1024
+# A `type`/`subfolder` form field longer than this is refused, not buffered.
+UPLOAD_FIELD_MAX_BYTES = 4096
 
 # Upper bound on files a recursive ("flat") listing RETURNS. The walk itself
 # always covers the whole subtree (see FLAT_WALK_CAP) and the cap is applied
@@ -958,6 +980,58 @@ def _reject_non_json(request: web.Request) -> web.Response | None:
     return None
 
 
+# The header that stands in for the JSON requirement on POST /upload. Its name
+# is arbitrary; what matters is that it is not a CORS-safelisted request header.
+UPLOAD_HEADER = "X-Image-Browser-Upload"
+
+
+def _reject_non_upload(request: web.Request) -> web.Response | None:
+    """415 an upload that is not multipart AND marked with ``UPLOAD_HEADER``.
+
+    ``/upload`` cannot require application/json: a file body is
+    multipart/form-data, and multipart is one of the three CORS-SIMPLE content
+    types — a cross-origin ``<form enctype="multipart/form-data">`` sends it
+    with no preflight. So the Content-Type check alone closes nothing here.
+
+    The custom header is what restores the property the JSON gate gives every
+    other POST: a form cannot set a header at all, and a cross-origin
+    ``fetch`` that sets one is no longer simple and must preflight. ComfyUI's
+    own CORS middleware (active only under ``--enable-cors-header``) answers a
+    preflight with ``Access-Control-Allow-Headers: Content-Type, Authorization``
+    — not this header — so unlike the JSON gate this one is not waived even
+    under that flag: uploads stay same-origin in every configuration.
+    """
+    if _request_mime(request) != "multipart/form-data":
+        return _err("Content-Type: multipart/form-data required", 415)
+    if request.headers.get(UPLOAD_HEADER) != "1":
+        return _err(f"{UPLOAD_HEADER}: 1 required", 415)
+    return None
+
+
+def _guard(handler, body_gate):
+    """Wrap ``handler`` in the cross-site gate plus one body gate, and mark it."""
+
+    @functools.wraps(handler)
+    async def guarded(request: web.Request) -> web.Response:
+        refusal = _reject_cross_site(request)
+        if refusal is not None:
+            return refusal
+        refusal = body_gate(request)
+        if refusal is not None:
+            return refusal
+        return await handler(request)
+
+    guarded.image_browser_guarded = True
+    return guarded
+
+
+def _guard_upload(handler):
+    """``_guard_mutation`` for the one multipart POST: same cross-site gate, and
+    ``_reject_non_upload`` in place of the JSON requirement. Carries the same
+    marker, so the enumeration in tests/test_guard.py covers it unchanged."""
+    return _guard(handler, _reject_non_upload)
+
+
 def _guard_mutation(handler):
     """Apply both mutation gates to one POST handler.
 
@@ -973,19 +1047,7 @@ def _guard_mutation(handler):
     attribute set here, so a new endpoint cannot be added without a gate — an
     exception list would rot, an enumeration cannot.
     """
-
-    @functools.wraps(handler)
-    async def guarded(request: web.Request) -> web.Response:
-        refusal = _reject_cross_site(request)
-        if refusal is not None:
-            return refusal
-        refusal = _reject_non_json(request)
-        if refusal is not None:
-            return refusal
-        return await handler(request)
-
-    guarded.image_browser_guarded = True
-    return guarded
+    return _guard(handler, _reject_non_json)
 
 
 # ---------------------------------------------------------------------------
@@ -2186,6 +2248,260 @@ async def image_browser_mkdir(request: web.Request) -> web.Response:
         log.exception("mkdir failed for %s", target)
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
     return web.json_response({"ok": True, "name": os.path.basename(target)})
+
+
+def _max_upload_bytes() -> int:
+    """Per-file upload cap in bytes: ComfyUI's ``--max-upload-size`` (MB).
+
+    Read through the same guarded lazy import as ``_cors_header_enabled``;
+    anything unreadable or non-positive falls back to core's own default for
+    that flag, so the cap can never degrade to "unbounded".
+    """
+    mb: Any = DEFAULT_MAX_UPLOAD_MB
+    try:
+        from comfy.cli_args import args
+
+        mb = getattr(args, "max_upload_size", DEFAULT_MAX_UPLOAD_MB)
+    except Exception:
+        pass
+    try:
+        mb = float(mb)
+    except (TypeError, ValueError):
+        mb = DEFAULT_MAX_UPLOAD_MB
+    if not math.isfinite(mb) or mb <= 0:
+        mb = DEFAULT_MAX_UPLOAD_MB
+    return round(mb * 1024 * 1024)
+
+
+_UPLOAD_PATH_SEP = re.compile(r"[\\/]")
+
+
+def _upload_basename(raw: Any) -> str | None:
+    """The name an uploaded file lands under, or None when the name is refused.
+
+    Browsers send ``filename`` as a bare name almost everywhere, but some send a
+    full device path (``C:\\fakepath\\photo.png``, ``/storage/emulated/0/DCIM/
+    IMG_1.jpg``), so both separators are split on and the last segment kept —
+    a POSIX ``os.path.basename`` would leave a backslash path whole.
+
+    A ``..`` segment is refused rather than basenamed away: no browser sends
+    one, so it is a request trying to traverse, and landing it under a cleaned
+    name would report success to it. Everything else — empty, ``.``, a NUL
+    byte (its realpath raises, which the containment check reads as an
+    escape), the extension whitelist, containment — is re-asserted by
+    ``_resolve_sandboxed_file``, which every returned name still goes through.
+    """
+    if not isinstance(raw, str):
+        return None
+    segments = _UPLOAD_PATH_SEP.split(raw)
+    if ".." in segments:
+        return None
+    return segments[-1]
+
+
+async def _read_upload_field(part: Any) -> str | None:
+    """A small text form field, or None when it is too long or not UTF-8.
+
+    Bounded on purpose: ``BodyPartReader.text()`` buffers the whole part, and a
+    ``subfolder`` field is attacker-sized.
+    """
+    data = b""
+    while chunk := await part.read_chunk(UPLOAD_FIELD_MAX_BYTES + 1):
+        data += chunk
+        if len(data) > UPLOAD_FIELD_MAX_BYTES:
+            return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _place_without_clobber(tmp: str, target: str) -> bool:
+    """Give ``tmp`` the name ``target`` unless that name exists. True when placed.
+
+    ``os.replace`` would be the obvious call, and it overwrites by definition,
+    so the earlier ``lexists`` check would be the only guard and a file created
+    while the bytes were streaming would be silently destroyed. ``link(2)``
+    fails atomically on an existing name instead.
+
+    Filesystems without hard links (FAT/exFAT, some network mounts) raise a
+    different OSError; there the name is reserved with an exclusive create and
+    the temp file replaces that empty placeholder — which is ours, so the
+    replace clobbers nothing.
+    """
+    try:
+        os.link(tmp, target)
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        pass
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    os.replace(tmp, target)
+    return True
+
+
+async def _stream_upload_part(part: Any, target: str, cap: int) -> tuple[str, int] | None:
+    """Stream one file part into ``target``. None on success, else (error, status).
+
+    Written to a dot-prefixed ``.part`` temp file beside the target — a name no
+    listing shows, since ``.part`` is not a media extension — and placed only
+    once complete, so a half-received file never appears in the grid. The temp
+    file is removed on every path, and only ever if THIS call created it.
+    """
+    tmp = os.path.join(os.path.dirname(target), f".ib-upload-{secrets.token_hex(8)}.part")
+    created = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(tmp, flags, 0o666)
+        created = True
+        size = 0
+        with os.fdopen(fd, "wb") as fh:
+            while chunk := await part.read_chunk(UPLOAD_CHUNK_BYTES):
+                size += len(chunk)
+                if size > cap:
+                    return f"file too large (max {cap / (1024 * 1024):.4g} MB)", 413
+                fh.write(chunk)
+        if not _place_without_clobber(tmp, target):
+            return f'"{os.path.basename(target)}" already exists', 409
+        return None
+    except OSError as exc:
+        log.exception("upload failed for %s", target)
+        return str(exc), 500
+    finally:
+        if created:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+
+
+@PromptServer.instance.routes.post("/image_browser/upload")
+@_guard_upload
+async def image_browser_upload(request: web.Request) -> web.Response:
+    """Upload one or more files into a folder of a sandboxed root.
+
+    ``multipart/form-data``: ``type`` and ``subfolder`` fields, then one or more
+    ``file`` parts. The destination fields must come FIRST — the destination is
+    resolved before a byte is streamed, and a body that names it after a file
+    (or changes it midway) is refused rather than buffered.
+
+    Perimeter (ADR-0002), all asserted before a part is read:
+      * ``type`` must be a sandboxed root — ``type=path`` is refused for the
+        whole request, like every other write.
+      * each name goes through ``_upload_basename`` and then
+        ``_resolve_sandboxed_file`` (bare name, ``IMG_EXTS | VIDEO_EXTS`` read
+        off the SERVER's view of the name, lexical + realpath containment).
+      * an existing name is never overwritten (409), checked up front and
+        again atomically at placement.
+
+    Per-item failures go in ``errors[]`` (each ``{name, error, status}``) and a
+    request where anything landed is ``ok:true`` — the ``/delete_many``
+    contract, because a phone multi-select can carry a ``.heic`` beside four
+    images and the four should land. When nothing lands the response is
+    ``ok:false`` with status 409 if every failure was a collision, else 400.
+    """
+    uploaded: list[str] = []
+    errors: list[dict[str, Any]] = []
+
+    def refuse(message: str, status: int) -> web.Response:
+        # Request-level refusal. Files already placed stay placed, so say which.
+        return web.json_response(
+            {"ok": False, "error": message, "uploaded": uploaded, "errors": errors},
+            status=status,
+        )
+
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return refuse("invalid multipart body", 400)
+
+    fields: dict[str, str] = {}
+    type_name = ""
+    subfolder = ""
+    destination_fixed = False
+    linked = _linked_subfolder_writes_enabled(request)
+    cap = _max_upload_bytes()
+    seen = 0
+    overflow: dict[str, Any] | None = None
+    while True:
+        try:
+            part = await reader.next()
+        except Exception:
+            log.exception("malformed multipart upload")
+            return refuse("malformed multipart body", 400)
+        if part is None:
+            break
+        if not hasattr(part, "read_chunk"):
+            return refuse("nested multipart is not supported", 400)
+        filename = part.filename
+        if filename is None:
+            if part.name not in ("type", "subfolder"):
+                continue
+            if destination_fixed:
+                return refuse("type and subfolder must precede the files", 400)
+            value = await _read_upload_field(part)
+            if value is None:
+                return refuse(f"invalid {part.name} field", 400)
+            fields[part.name] = value
+            continue
+        if part.name != "file":
+            continue
+
+        seen += 1
+        if not destination_fixed:
+            type_name = fields.get("type", "")
+            subfolder = fields.get("subfolder", "")
+            if type_name not in SANDBOXED_TYPES:
+                return refuse("writes are only allowed in input/output/temp", 400)
+            base, err = _resolve_listing_base(type_name, subfolder, "")
+            if err:
+                return refuse(err, 400)
+            assert base is not None
+            if not os.path.isdir(base):
+                return refuse("folder does not exist", 404)
+            destination_fixed = True
+
+        if seen > MAX_UPLOAD_FILES:
+            # ONE row for the whole overflow, updated in place. A row per excess
+            # part grew errors[] (and the response) without bound: the body is
+            # streamed, so client_max_size never caps how many parts arrive.
+            if overflow is None:
+                overflow = {"name": filename, "error": "", "status": 413}
+                errors.append(overflow)
+            overflow["error"] = (
+                f"too many files (max {MAX_UPLOAD_FILES}); {seen - MAX_UPLOAD_FILES} not uploaded"
+            )
+            continue
+        name = _upload_basename(filename)
+        if name is None:
+            errors.append({"name": filename, "error": "invalid name", "status": 400})
+            continue
+        target, err = _resolve_sandboxed_file(
+            type_name, subfolder, name, allow_linked_subfolder=linked
+        )
+        if err:
+            errors.append({"name": name or filename, "error": err, "status": 400})
+            continue
+        assert target is not None
+        if os.path.lexists(target):
+            errors.append({"name": name, "error": f'"{name}" already exists', "status": 409})
+            continue
+        failure = await _stream_upload_part(part, target, cap)
+        if failure is not None:
+            errors.append({"name": name, "error": failure[0], "status": failure[1]})
+            continue
+        uploaded.append(name)
+
+    if seen == 0:
+        return refuse("no files in upload", 400)
+    if uploaded:
+        return web.json_response({"ok": True, "uploaded": uploaded, "errors": errors})
+    status = 409 if all(e["status"] == 409 for e in errors) else 400
+    message = errors[0]["error"] if len(errors) == 1 else f"{len(errors)} files failed"
+    return refuse(message, status)
 
 
 def _parse_rating(value: Any) -> int | None:

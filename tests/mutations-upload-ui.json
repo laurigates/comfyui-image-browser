@@ -1,0 +1,93 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/upload.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL: onUpload comment reworded",
+      "file": "src/browser.ts",
+      "before": "   * Progress is an in-dialog overlay naming the count. It is indeterminate —\n",
+      "after": "   * Progress is an in-dialog overlay naming the count. It is not determinate —\n",
+      "control": true
+    },
+    {
+      "label": "the ⬆︎ control ignores the write gate",
+      "file": "src/browser.ts",
+      "before": "    uploadEl.style.display = canWrite ? \"\" : \"none\";\n",
+      "after": "    uploadEl.style.display = \"\";\n",
+      "expect": [
+        "is hidden on the browse…/path tab",
+        "is hidden on the pinned tab"
+      ]
+    },
+    {
+      "label": "the file parts are appended BEFORE the destination fields",
+      "file": "src/api.ts",
+      "before": "  form.append(\"type\", type);\n  form.append(\"subfolder\", subfolder);\n  for (const f of files) form.append(\"file\", f, f.name);\n",
+      "after": "  for (const f of files) form.append(\"file\", f, f.name);\n  form.append(\"type\", type);\n  form.append(\"subfolder\", subfolder);\n",
+      "expect": [
+        "destination fields first"
+      ]
+    },
+    {
+      "label": "the CSRF header is not sent",
+      "file": "src/api.ts",
+      "before": "    headers: { [UPLOAD_HEADER]: \"1\" },\n    body: form,\n",
+      "after": "    headers: {},\n    body: form,\n",
+      "expect": [
+        "destination fields first"
+      ]
+    },
+    {
+      "label": "a hand-set multipart Content-Type (no boundary)",
+      "file": "src/api.ts",
+      "before": "    headers: { [UPLOAD_HEADER]: \"1\" },\n    body: form,\n",
+      "after": "    headers: { [UPLOAD_HEADER]: \"1\", \"Content-Type\": \"multipart/form-data\" },\n    body: form,\n",
+      "expect": [
+        "destination fields first"
+      ]
+    },
+    {
+      "label": "no re-list after a successful upload",
+      "file": "src/browser.ts",
+      "before": "    if (result.uploaded.length > 0 && state.type === type && state.subfolder === subfolder) {\n",
+      "after": "    if (false) {\n",
+      "expect": [
+        "destination fields first",
+        "a partial failure lands the rest"
+      ]
+    },
+    {
+      "label": "a partial failure reads as success",
+      "file": "src/browser.ts",
+      "before": "    if (result.ok && result.errors.length === 0) {\n",
+      "after": "    if (result.ok) {\n",
+      "expect": [
+        "a partial failure lands the rest"
+      ]
+    },
+    {
+      "label": "an empty selection still posts",
+      "file": "src/browser.ts",
+      "before": "    if (files.length > 0) void onUpload(files);\n",
+      "after": "    void onUpload(files);\n",
+      "expect": [
+        "an empty selection posts nothing"
+      ]
+    },
+    {
+      "label": "the button no longer opens the picker",
+      "file": "src/browser.ts",
+      "before": "    uploadInputEl.value = \"\";\n    uploadInputEl.click();\n",
+      "after": "    uploadInputEl.value = \"\";\n",
+      "expect": [
+        "opens the picker from the button"
+      ]
+    }
+  ]
+}

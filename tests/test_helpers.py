@@ -2284,6 +2284,18 @@ class TestRatingTagPreservation:
         assert row["tags"] == ["nsfw"]
 
 
+def test_xmp_cache_holds_the_largest_listing_this_pack_can_probe():
+    """Tripwire (#42): one listing probes at most cap * PROBE_BUDGET_FACTOR
+    files (the Safe View tag-tier top-up), and every probe is an xmp_meta cache
+    insert. A cache smaller than that lets one listing evict its own entries,
+    so the next identical listing re-opens every file. xmp_meta.py is vendored,
+    so its cap cannot see this pack's constants; this test is what ties them
+    together. If it fails, raise _CACHE_MAX in comfyui-gallery-loader's
+    canonical copy and re-sync — never here."""
+    worst = max(ib.FLAT_LIST_CAP, ib.DIR_LIST_CAP)
+    assert worst * ib.PROBE_BUDGET_FACTOR < xmp_meta._CACHE_MAX
+
+
 # Imported at the bottom so the classes above can reference the stubbed server
 # without leaking the import into the pure-helper tests above.
 from server import PromptServer  # noqa: E402

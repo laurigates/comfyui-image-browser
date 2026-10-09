@@ -83,6 +83,10 @@ manage without leaving ComfyUI.
   - **🗑 Delete** — with a confirm step.
   - **✎ Rename** — in place (extension preserved).
   - **⇄ Move** — into another root or subfolder via a destination picker.
+  - **⬆︎ Upload** — toolbar button; pick images or videos (on a phone, from the
+    camera roll) and they land in the folder you are looking at. An existing
+    name is refused, never overwritten; unsupported types (e.g. `.heic`) are
+    named in the error while the rest still land.
 - **📌 Pin** folders *and* individual files. A pinned folder becomes a one-tap
   chip in the toolbar and a shortcut row in the move picker; pinned files
   collect on their own **📌 pinned** tab, where each card behaves exactly like
