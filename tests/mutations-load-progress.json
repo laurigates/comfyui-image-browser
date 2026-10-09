@@ -1,0 +1,83 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/load-progress.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "the counter never counts: the status stays a bare Loading… however long the wait",
+      "file": "src/browser.ts",
+      "before": "  if (elapsedMs < 1000) return \"Loading…\";\n  return `Loading… ${Math.floor(elapsedMs / 1000)}s`;",
+      "after": "  return \"Loading…\";",
+      "expect": [
+        "stays a bare Loading",
+        "counts up in the status"
+      ]
+    },
+    {
+      "label": "the note is shown from the first tick instead of only once the load is slow",
+      "file": "src/browser.ts",
+      "before": "      if (elapsed >= LOAD_NOTE_MS && loadNoteEl.hidden) {",
+      "after": "      if (loadNoteEl.hidden) {",
+      "expect": [
+        "shows the note only once the load is slow"
+      ]
+    },
+    {
+      "label": "the note never names the flat view's whole-tree cost",
+      "file": "src/browser.ts",
+      "before": "        loadNoteEl.textContent = flat ? LOAD_NOTE_FLAT : LOAD_NOTE_FOLDER;",
+      "after": "        loadNoteEl.textContent = LOAD_NOTE_FOLDER;",
+      "expect": [
+        "names the flat view's whole-tree cost"
+      ]
+    },
+    {
+      "label": "the note names the flat view on every load, folder listings included",
+      "file": "src/browser.ts",
+      "before": "        loadNoteEl.textContent = flat ? LOAD_NOTE_FLAT : LOAD_NOTE_FOLDER;",
+      "after": "        loadNoteEl.textContent = LOAD_NOTE_FLAT;",
+      "expect": [
+        "does not name the flat view on a folder listing"
+      ]
+    },
+    {
+      "label": "the listing landing does not stop the ticker, so the counter overwrites the result",
+      "file": "src/browser.ts",
+      "before": "    } finally {\n      stopLoadTicker();\n    }",
+      "after": "    } finally {\n      void stopLoadTicker;\n    }",
+      "expect": [
+        "stops ticking once the listing lands"
+      ]
+    },
+    {
+      "label": "closing the modal mid-load leaves the interval running",
+      "file": "src/browser.ts",
+      "before": "      // status element until the listing it was counting finally lands.\n      cancelLoadTicker();",
+      "after": "      // status element until the listing it was counting finally lands.",
+      "expect": [
+        "closing mid-load leaves no ticker running"
+      ]
+    },
+    {
+      "label": "an older load landing clears the newer load's ticker (the current-ticker guard is gone)",
+      "file": "src/browser.ts",
+      "before": "      clearInterval(mine);\n      if (loadTicker === mine) {\n        loadTicker = null;\n        hideLoadNote();\n      }",
+      "after": "      clearInterval(mine);\n      cancelLoadTicker();",
+      "expect": [
+        "an older load finishing does not stop the newer load's counter"
+      ]
+    },
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/browser.ts",
+      "before": "// a bare \"Loading…\" for that long reads as a hang. So the status counts the",
+      "after": "// a bare \"Loading…\" that long reads as a hang. So the status counts the",
+      "control": true
+    }
+  ]
+}

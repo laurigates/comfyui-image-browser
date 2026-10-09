@@ -2523,6 +2523,15 @@ var ACTIONS_PADDING_X = 12;
 var ACTIONS_GAP = 2;
 var TOUCH_FLOOR = 44;
 var INLINE_ACTION_SLOTS = Math.floor((CARD_MIN_WIDTH - ACTIONS_PADDING_X + ACTIONS_GAP) / (TOUCH_FLOOR + ACTIONS_GAP));
+var LOAD_NOTE_MS = 3000;
+var LOAD_TICK_MS = 1000;
+function loadingStatusText(elapsedMs) {
+  if (elapsedMs < 1000)
+    return "Loading…";
+  return `Loading… ${Math.floor(elapsedMs / 1000)}s`;
+}
+var LOAD_NOTE_FLAT = "Still loading. The first flat listing after a ComfyUI restart reads every file from disk, so a large tree can take a while. Later loads are quick.";
+var LOAD_NOTE_FOLDER = "Still loading. The first listing of a large folder after a ComfyUI restart reads every file from disk. Later loads are quick.";
 var ACTION_LABELS = {
   open: "Open in new tab",
   pin: "Pin / unpin",
@@ -2660,6 +2669,7 @@ function openImageBrowser() {
       disposeBackGuard = null;
       disposeSafeView();
       cancelScanPoll();
+      cancelLoadTicker();
       revealed.clear();
     }
   });
@@ -2760,7 +2770,11 @@ function openImageBrowser() {
   filterEl.appendChild(densityGroupEl);
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
-  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, scanPillEl, sortEl, refreshEl, filterEl, pinsEl);
+  const loadNoteEl = document.createElement("div");
+  loadNoteEl.className = "ib-load-note";
+  loadNoteEl.setAttribute("role", "status");
+  loadNoteEl.hidden = true;
+  modal.toolbarEl.append(tabsEl, crumbsEl, viewToggleEl, selectToggleEl, pinToggleEl, newFolderEl, pruneEl, safeToggleEl, scanPillEl, sortEl, refreshEl, filterEl, pinsEl, loadNoteEl);
   const gridEl = document.createElement("div");
   gridEl.className = "ib-grid";
   root.appendChild(gridEl);
@@ -3763,6 +3777,39 @@ function openImageBrowser() {
       }
     }
   }
+  let loadTicker = null;
+  function hideLoadNote() {
+    loadNoteEl.hidden = true;
+    loadNoteEl.textContent = "";
+  }
+  function cancelLoadTicker() {
+    if (loadTicker !== null) {
+      clearInterval(loadTicker);
+      loadTicker = null;
+    }
+    hideLoadNote();
+  }
+  function startLoadTicker(flat) {
+    cancelLoadTicker();
+    const started = Date.now();
+    modal.setStatus(loadingStatusText(0));
+    const mine = setInterval(() => {
+      const elapsed = Date.now() - started;
+      modal.setStatus(loadingStatusText(elapsed));
+      if (elapsed >= LOAD_NOTE_MS && loadNoteEl.hidden) {
+        loadNoteEl.textContent = flat ? LOAD_NOTE_FLAT : LOAD_NOTE_FOLDER;
+        loadNoteEl.hidden = false;
+      }
+    }, LOAD_TICK_MS);
+    loadTicker = mine;
+    return () => {
+      clearInterval(mine);
+      if (loadTicker === mine) {
+        loadTicker = null;
+        hideLoadNote();
+      }
+    };
+  }
   async function loadAndRender(opts) {
     focusIndex = 0;
     visualMode = false;
@@ -3777,10 +3824,10 @@ function openImageBrowser() {
     renderTabs();
     renderCrumbs();
     modal.setBusy(true);
-    modal.setStatus("Loading…");
     viewStore.markPending(isFlat());
     const safeCfg = readSafeViewConfig();
     renderSafeToggle(safeCfg);
+    const stopLoadTicker = startLoadTicker(isFlat());
     try {
       if (isPinnedView()) {
         const res = await fetchPins();
@@ -3821,6 +3868,8 @@ function openImageBrowser() {
       state.dirs = [];
       state.files = [];
       renderScanPill(0);
+    } finally {
+      stopLoadTicker();
     }
     modal.setBusy(false);
     renderPins();
@@ -5412,6 +5461,14 @@ var BROWSER_CSS = `
     order: 11; flex-basis: 100%;
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
 }
+/* The slow-load note: a full-width row under everything else (order:12), so it
+   wraps as a sentence instead of being clipped beside the search input.
+   [hidden] is restated because the display rule would otherwise beat the UA's. */
+.ib-load-note {
+    order: 12; flex-basis: 100%;
+    font-size: 13px; line-height: 1.4; color: #c8b06a;
+}
+.ib-load-note[hidden] { display: none; }
 .ib-pin-chip { display: inline-flex; align-items: stretch; }
 .ib-pin-go {
     background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
