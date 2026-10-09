@@ -312,6 +312,29 @@ export const INLINE_ACTION_SLOTS = Math.floor(
   (CARD_MIN_WIDTH - ACTIONS_PADDING_X + ACTIONS_GAP) / (TOUCH_FLOOR + ACTIONS_GAP),
 );
 
+// ---- Slow-load progress (issue #42) ----------------------------------
+// /list answers in ONE response, so there is no real progress to report. The
+// first listing after a ComfyUI restart opens every returned file on a cold
+// page cache (measured ~30 s for a capped flat listing on a real install), and
+// a bare "Loading…" for that long reads as a hang. So the status counts the
+// wait, and past LOAD_NOTE_MS a note says why a first load is slow.
+
+/** When the full-width "why is this slow" note appears. */
+export const LOAD_NOTE_MS = 3000;
+/** How often the elapsed counter repaints. */
+const LOAD_TICK_MS = 1000;
+
+/** The status text for a load that has been running `elapsedMs`. */
+export function loadingStatusText(elapsedMs: number): string {
+  if (elapsedMs < 1000) return "Loading…";
+  return `Loading… ${Math.floor(elapsedMs / 1000)}s`;
+}
+
+const LOAD_NOTE_FLAT =
+  "Still loading. The first flat listing after a ComfyUI restart reads every file from disk, so a large tree can take a while. Later loads are quick.";
+const LOAD_NOTE_FOLDER =
+  "Still loading. The first listing of a large folder after a ComfyUI restart reads every file from disk. Later loads are quick.";
+
 /** Label for each `data-action`, used by the overflow sheet's rows. */
 const ACTION_LABELS: Record<string, string> = {
   open: "Open in new tab",
@@ -568,6 +591,9 @@ export function openImageBrowser(): ModalShellController {
       // Same rule again: the scan poll is a timer, and a timer that outlives the
       // modal re-lists a dead grid every 3 s forever.
       cancelScanPoll();
+      // And the slow-load counter, which would otherwise tick against a detached
+      // status element until the listing it was counting finally lands.
+      cancelLoadTicker();
       // Reveals are per-session by design: reopening the browser must not still
       // be showing what the user unblurred an hour ago.
       revealed.clear();
@@ -744,6 +770,17 @@ export function openImageBrowser(): ModalShellController {
   const pinsEl = document.createElement("div");
   pinsEl.className = "ib-pins";
 
+  // The slow-load note (see LOAD_NOTE_MS). A toolbar row rather than the status
+  // text: the status sits beside the search input with `white-space: nowrap`, so
+  // a sentence there is clipped on a phone. In the toolbar, outside the body, so
+  // the busy dim does not fade it. role=status announces it once when its text
+  // is set; the per-second counter is in the status element, which is not a
+  // live region, so a screen reader does not hear every tick.
+  const loadNoteEl = document.createElement("div");
+  loadNoteEl.className = "ib-load-note";
+  loadNoteEl.setAttribute("role", "status");
+  loadNoteEl.hidden = true;
+
   modal.toolbarEl.append(
     tabsEl,
     crumbsEl,
@@ -758,6 +795,7 @@ export function openImageBrowser(): ModalShellController {
     refreshEl,
     filterEl,
     pinsEl,
+    loadNoteEl,
   );
 
   // ---- Grid ------------------------------------------------------
@@ -2277,6 +2315,48 @@ export function openImageBrowser(): ModalShellController {
     }
   }
 
+  // The ticker of the load currently on screen. Loads can overlap (a refresh
+  // while a listing is still out, a scan-poll re-list), so each load keeps its
+  // OWN handle and only clears the shared state while it is still the current
+  // one: an older load landing late must not stop the newer load's counter.
+  let loadTicker: ReturnType<typeof setInterval> | null = null;
+
+  function hideLoadNote(): void {
+    loadNoteEl.hidden = true;
+    loadNoteEl.textContent = "";
+  }
+
+  function cancelLoadTicker(): void {
+    if (loadTicker !== null) {
+      clearInterval(loadTicker);
+      loadTicker = null;
+    }
+    hideLoadNote();
+  }
+
+  /** Start counting this load's wait; returns the stop for THIS load only. */
+  function startLoadTicker(flat: boolean): () => void {
+    cancelLoadTicker();
+    const started = Date.now();
+    modal.setStatus(loadingStatusText(0));
+    const mine = setInterval(() => {
+      const elapsed = Date.now() - started;
+      modal.setStatus(loadingStatusText(elapsed));
+      if (elapsed >= LOAD_NOTE_MS && loadNoteEl.hidden) {
+        loadNoteEl.textContent = flat ? LOAD_NOTE_FLAT : LOAD_NOTE_FOLDER;
+        loadNoteEl.hidden = false;
+      }
+    }, LOAD_TICK_MS);
+    loadTicker = mine;
+    return () => {
+      clearInterval(mine);
+      if (loadTicker === mine) {
+        loadTicker = null;
+        hideLoadNote();
+      }
+    };
+  }
+
   async function loadAndRender(opts?: { preserveScroll?: boolean }): Promise<void> {
     focusIndex = 0;
     visualMode = false;
@@ -2299,7 +2379,6 @@ export function openImageBrowser(): ModalShellController {
     renderTabs();
     renderCrumbs();
     modal.setBusy(true);
-    modal.setStatus("Loading…");
     // Arm the recovery breadcrumb around the whole flat load+render. It is
     // cleared below once the grid has painted, so only an attempt that never
     // got there (a tab the render killed) leaves it set.
@@ -2308,6 +2387,9 @@ export function openImageBrowser(): ModalShellController {
     // to call it once per render pass and not once per card.
     const safeCfg = readSafeViewConfig();
     renderSafeToggle(safeCfg);
+    // Started immediately before the try whose finally stops it, so nothing
+    // that can throw sits between the two and leaks a running interval.
+    const stopLoadTicker = startLoadTicker(isFlat());
     try {
       if (isPinnedView()) {
         // The pinned view is not a directory: its grid comes from /pins, and
@@ -2380,6 +2462,8 @@ export function openImageBrowser(): ModalShellController {
       // A failed load says nothing about the scan; polling on top of an error
       // would retry the failing request on a timer.
       renderScanPill(0);
+    } finally {
+      stopLoadTicker();
     }
     modal.setBusy(false);
     // Pins render into the toolbar, which lives INSIDE the scroller — do it
@@ -4499,6 +4583,14 @@ const BROWSER_CSS = `
     order: 11; flex-basis: 100%;
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
 }
+/* The slow-load note: a full-width row under everything else (order:12), so it
+   wraps as a sentence instead of being clipped beside the search input.
+   [hidden] is restated because the display rule would otherwise beat the UA's. */
+.ib-load-note {
+    order: 12; flex-basis: 100%;
+    font-size: 13px; line-height: 1.4; color: #c8b06a;
+}
+.ib-load-note[hidden] { display: none; }
 .ib-pin-chip { display: inline-flex; align-items: stretch; }
 .ib-pin-go {
     background: #23283a; color: #9ec6ff; border: 1px solid #3a4560; border-right: 0;
