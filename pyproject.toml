@@ -16,7 +16,7 @@ classifiers = [
 
 # Floor tied to the registerExtension action-bar/command API. Backend uses ComfyUI-bundled libs only (aiohttp, folder_paths, server).
 dependencies = [
-    "comfyui-frontend-package>=1.40.0",
+    "comfyui-frontend-package==1.45.20",
 ]
 
 [project.urls]
@@ -25,14 +25,14 @@ Issues = "https://github.com/laurigates/comfyui-image-browser/issues"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.11",
-    "pytest>=8",
-    "pre-commit>=4",
-    "pathspec>=1.1.1",
+    "ruff==0.15.20",
+    "pytest==9.1.1",
+    "pre-commit==4.6.0",
+    "pathspec==1.1.1",
     # tests/test_ci_node_pin.py parses .github/workflows/ci.yml structurally.
     # It was already importable as a transitive dep of pre-commit; declared so
     # the test does not depend on another package's dependency tree.
-    "pyyaml>=6",
+    "pyyaml==6.0.3",
 ]
 
 [tool.ruff]
