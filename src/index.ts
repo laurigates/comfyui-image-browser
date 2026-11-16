@@ -30,6 +30,11 @@ import { installLightboxActions } from "./lightbox-actions.js";
 import { installScanWarm } from "./scan-warm.js";
 import { installSidebarStars } from "./sidebar-stars.js";
 
+// frontend-types >=1.59 types a setting id as `keyof Settings`, a closed
+// `type` alias of the core `Comfy.*` keys that cannot be augmented. The
+// runtime settings store accepts any string id, so each pack id is cast once.
+type SettingId = NonNullable<Parameters<typeof app.registerExtension>[0]["settings"]>[number]["id"];
+
 // Exported so the jsdom mount smoke test can open the view without the app
 // chrome and assert the body renders. Delegates to the real explorer.
 export function openShell(): ModalShellController {
@@ -84,7 +89,7 @@ app.registerExtension({
       // getSettingInfo (:16-22), so re-keying the category is value-safe in
       // both directions while renaming the id would silently reset the user's
       // preference.
-      id: "ImageBrowser.SidebarStars",
+      id: "ImageBrowser.SidebarStars" as SettingId,
       // Three elements with a DISTINCT third, always: two settings sharing an
       // identical full category array silently collapse into one — buildTree
       // reuses the node at that path and unconditionally overwrites
@@ -127,7 +132,7 @@ app.registerExtension({
       // file's bytes" — that was the reasoning PR #109 reversed, measured: with
       // the switch off /thumb?path= returned a decoded 512x384 WebP of a file
       // outside every root. A downscale is a read. Do not narrow the gate back.
-      id: "ImageBrowser.AllowAbsolutePathReads",
+      id: "ImageBrowser.AllowAbsolutePathReads" as SettingId,
       category: ["Touch Tools", "Image Browser", "Absolute-path reads"],
       sortOrder: 80,
       name: "Allow absolute-path file reads",
@@ -155,7 +160,7 @@ app.registerExtension({
       //
       // It widens the SUBFOLDER only. A symlinked filename is still refused
       // with this on, so it is not a general containment off-switch.
-      id: "ImageBrowser.AllowSymlinkedSubfolderWrites",
+      id: "ImageBrowser.AllowSymlinkedSubfolderWrites" as SettingId,
       category: ["Touch Tools", "Image Browser", "Symlinked subfolder writes"],
       sortOrder: 85,
       name: "Allow writes through symlinked subfolders",
@@ -167,7 +172,7 @@ app.registerExtension({
     {
       // FROZEN id; distinct third category element; explicit sortOrder — see
       // the note on ImageBrowser.SidebarStars above.
-      id: "ImageBrowser.LightboxActions",
+      id: "ImageBrowser.LightboxActions" as SettingId,
       category: ["Touch Tools", "Image Browser", "Lightbox actions"],
       sortOrder: 90,
       name: "Rate & delete in the asset lightbox",
