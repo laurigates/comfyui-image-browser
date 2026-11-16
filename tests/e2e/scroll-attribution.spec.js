@@ -29,7 +29,7 @@
 // covering nothing.
 
 import { expect, test } from "@playwright/test";
-import { DIR_CARD, openBrowser, waitForFileCards } from "./harness.js";
+import { DIR_CARD, FILE_CARD, openBrowser, waitForFileCards } from "./harness.js";
 import { fetchedBand, installScrollProbe, trackThumbs, waitForThumbQuiet } from "./probe.js";
 import { folderSpec } from "./server.mjs";
 
@@ -316,13 +316,38 @@ test("restore ordering — the restore lands before the observer starts watching
   const postRestoreBand = await page.evaluate(() => window.__IB_PROBE__.band());
   const dump = await page.evaluate(() => window.__IB_PROBE__.dump());
   await waitForThumbQuiet(page, thumbs);
-  const fetched = fetchedBand(thumbs.since(cut));
+  const requested = fetchedBand(thumbs.since(cut));
   const names = thumbs.since(cut).map((r) => r.name);
+  // Which cards the observer actually LOADED, read off the DOM: the kit strips
+  // `data-src` from a thumb as it promotes it to `src`. This, not the network
+  // log, is the measurement. The restored band is the band priming parked on,
+  // so every one of its thumbnails was fetched once already — and Chromium
+  // (Playwright >= 1.64's build; 1.56's did not) reuses the decoded image for
+  // a same-document `src` it has seen before, `cache-control: no-store`
+  // notwithstanding. The re-entry then issues ZERO thumb requests while
+  // loading exactly the right cards, and a request-based band reads as null.
+  const fetched = await page.evaluate((sel) => {
+    const idx = [...document.querySelectorAll(sel)]
+      .filter((c) => {
+        const m = c.querySelector("img, video");
+        return m && !m.hasAttribute("data-src");
+      })
+      .map((c) => Number(c.dataset.idx));
+    return {
+      count: idx.length,
+      first: idx.length ? Math.min(...idx) : null,
+      last: idx.length ? Math.max(...idx) : null,
+    };
+  }, FILE_CARD);
 
   report("ordering — remembered", remembered);
   report("ordering — pre-restore band (scrollTop 0)", preRestoreBand);
   report("ordering — post-restore band", postRestoreBand);
-  report("ordering — thumbs actually fetched", { ...fetched, names: names.slice(0, 10) });
+  report("ordering — thumbs requested over the network", {
+    ...requested,
+    names: names.slice(0, 10),
+  });
+  report("ordering — thumbs actually loaded (data-src promoted)", fetched);
   report("ordering — first observe vs last restore write", {
     syncWrite: dump.sets[0] && { seq: dump.sets[0].seq, t: dump.sets[0].t, by: dump.sets[0].by },
     writeCount: dump.sets.length,
