@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.35](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.34...comfyui-image-browser-v0.1.35) (2026-11-16)
+
+
+### Bug Fixes
+
+* **ci:** clear ruff SIM102 and move Playwright to 1.65.0 for ubuntu-26.04 ([#136](https://github.com/laurigates/comfyui-image-browser/issues/136)) ([92b419c](https://github.com/laurigates/comfyui-image-browser/commit/92b419c755dd10c49683f19a1b6c04266523cd4a))
+* **types:** move @comfyorg/comfyui-frontend-types to ^1.60.0 ([#135](https://github.com/laurigates/comfyui-image-browser/issues/135)) ([3f728cb](https://github.com/laurigates/comfyui-image-browser/commit/3f728cbc5fd15bcaaa1b3c3f8f08d3dcc8e21d6f))
+
 ## [0.1.34](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.33...comfyui-image-browser-v0.1.34) (2026-10-23)
 
 
