@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.36](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.35...comfyui-image-browser-v0.1.36) (2026-11-21)
+
+
+### Miscellaneous
+
+* **deps:** update dependency @playwright/test to v1.64.1 ([#131](https://github.com/laurigates/comfyui-image-browser/issues/131)) ([754cd13](https://github.com/laurigates/comfyui-image-browser/commit/754cd13366db8a99cf6ed45ccf46b19054a4f9fd))
+
 ## [0.1.35](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.34...comfyui-image-browser-v0.1.35) (2026-11-16)
 
 
