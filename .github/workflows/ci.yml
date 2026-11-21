@@ -34,7 +34,7 @@ jobs:
         with:
           # Pin to the schema version declared in biome.json. Bump in lockstep
           # with a config migration via `biome migrate` when upgrading.
-          version: 2.4.15
+          version: 2.6.8
       - name: Biome check
         run: biome check .
 
