@@ -7,7 +7,6 @@
 // committing a value to a node widget.
 
 import type {
-  MetaRow,
   ModalShellController,
   RatingAddress,
   SafeViewConfig,
@@ -17,7 +16,6 @@ import type {
 import {
   applyStars,
   confirmInShell,
-  copyTextToClipboard,
   createScrollMemory,
   createViewStore,
   ensureStyleOnce,
@@ -32,8 +30,6 @@ import {
   joinAbs,
   makeRevealButton,
   makeRevealSet,
-  metaClipboardText,
-  metaRows,
   nextRating,
   notify,
   onSafeViewChange,
@@ -98,6 +94,7 @@ import {
 } from "./api.js";
 import { labelParts } from "./label.js";
 import { openLightbox } from "./lightbox.js";
+import { META_LOADING_HTML, renderMeta, wireMetaCopy } from "./meta-view.js";
 // The rest of the mark-sensitive control stays per-pack — `tagRequestBody`,
 // `markSensitiveHTML` and `hasSensitiveTag` have deliberately diverged from
 // comfyui-gallery-loader's copies (no `type: "path"` arm here per ADR-0002, and
@@ -1751,6 +1748,12 @@ export function openImageBrowser(): ModalShellController {
         renderGrid();
       },
       openInTab: (x) => openFull(x),
+      // Same gate as the card's ⓘ: only containers the backend has a reader
+      // for, so the panel never asks /metadata for a 400.
+      metadata: (x) =>
+        META_EXTS.has((x.ext || "").toLowerCase())
+          ? fetchMetadata(fileType(x), fileSub(x), x.name, state.absPath)
+          : null,
       onClose: (last) => {
         // Stars set in the viewer, onto the cards underneath. ratingOf reads
         // the value persistRating settled on, not the optimistic one.
@@ -1766,53 +1769,6 @@ export function openImageBrowser(): ModalShellController {
           applyFocus();
         }
       },
-    });
-  }
-
-  // Copy feedback lives on the button itself: label → "Copied ✓" → back.
-  // DELIBERATELY no notify() toast on success — the toast stack is a child of
-  // <body> above the dialog, so on the installed kit a toast raised over an open
-  // overlay parks its ✕ on top of the shell's, and tapping it dismisses the whole
-  // browser. The label flip is also the clearer confirmation: it names which
-  // field went to the clipboard. copyTextToClipboard (not navigator.clipboard
-  // directly) carries the non-secure-context fallback plain-http LAN ComfyUI needs.
-  //
-  // `restore` is PASSED IN, never read back off the button: reading
-  // btn.textContent at click time captures the TRANSIENT label whenever a second
-  // click lands inside the 1500 ms window, so the feedback latches permanently —
-  // and in the fail-then-succeed order the button settles on "Copy failed" after
-  // a copy that worked, i.e. it lies about whether the value is on the clipboard.
-  // One feedback slot per button (copyFeedback): a new click supersedes the
-  // previous click's pending restore AND its late-resolving promise (the `seq`
-  // check), so the label always shows the LAST copy's outcome and then `restore`.
-  const copyFeedback = new WeakMap<
-    HTMLButtonElement,
-    { seq: number; timer: ReturnType<typeof setTimeout> | null }
-  >();
-  function copyInto(btn: HTMLButtonElement, text: string, restore: string): void {
-    let fb = copyFeedback.get(btn);
-    if (!fb) {
-      fb = { seq: 0, timer: null };
-      copyFeedback.set(btn, fb);
-    }
-    const slot = fb;
-    const seq = ++slot.seq;
-    // Hold the current feedback until this copy answers — no flicker back to
-    // `restore` mid-flight — but drop the stale restore timer that would fire
-    // out of order once this click's own timer is armed.
-    if (slot.timer !== null) {
-      clearTimeout(slot.timer);
-      slot.timer = null;
-    }
-    void copyTextToClipboard(text).then((ok) => {
-      if (slot.seq !== seq) return; // a later click owns the label now
-      btn.textContent = ok ? "Copied ✓" : "Copy failed";
-      btn.classList.toggle("is-copied", ok);
-      slot.timer = setTimeout(() => {
-        slot.timer = null;
-        btn.textContent = restore;
-        btn.classList.remove("is-copied");
-      }, 1500);
     });
   }
 
@@ -1925,7 +1881,7 @@ export function openImageBrowser(): ModalShellController {
     // feel like a dead button on a big file / slow disk.
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
-      <div class="ib-meta-body"><div class="ib-meta-status">Reading metadata…</div></div>
+      <div class="ib-meta-body">${META_LOADING_HTML}</div>
       <div class="cmp-ov-actions">
         <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
       </div>`;
@@ -1943,76 +1899,16 @@ export function openImageBrowser(): ModalShellController {
     }
     if (!live) return;
 
-    const rows: MetaRow[] = metaRows(data.summary);
-    const rawKeys = Object.keys(data.raw);
-    const srcLabel =
-      data.source === "comfyui"
-        ? "ComfyUI"
-        : data.source === "a1111"
-          ? "A1111"
-          : "no generation data";
-    const rowsHTML = rows
-      .map(
-        (r, i) => `
-        <div class="ib-meta-row">
-          <div class="ib-meta-k">${escHTML(r.label)}</div>
-          <div class="ib-meta-v">${escHTML(r.value)}</div>
-          <button type="button" class="ib-meta-copy" data-copy-row="${i}">Copy</button>
-        </div>`,
-      )
-      .join("");
-    // Never invent a row. With nothing recognised the honest report is which of
-    // the two cases it is: no embedded text at all, or text we couldn't map (in
-    // which case the raw disclosure below is the whole answer).
-    const emptyHTML = rows.length
-      ? ""
-      : `<div class="ib-meta-empty">${
-          rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."
-        }</div>`;
-    const rawJSON = JSON.stringify(data.raw, null, 2);
-    const rawHTML = rawKeys.length
-      ? `
-        <details class="ib-meta-raw">
-          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
-          <pre>${escHTML(rawJSON)}</pre>
-          <button type="button" class="ib-meta-copy" data-copy-raw>Copy JSON</button>
-        </details>`
-      : "";
-    const noteHTML = data.truncated
-      ? `<div class="ib-meta-note">Some values were truncated by the server.</div>`
-      : "";
-    const copyAll = rows.length
-      ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>`
-      : "";
+    const meta = renderMeta(data);
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
-      <div class="ib-meta-body">
-        <div class="ib-meta-src">${escHTML(srcLabel)}${
-          data.format ? `<span class="ib-meta-fmt">${escHTML(data.format)}</span>` : ""
-        }</div>
-        ${emptyHTML}
-        ${rowsHTML}
-        ${noteHTML}
-        ${rawHTML}
-      </div>
+      <div class="ib-meta-body">${meta.html}</div>
       <div class="cmp-ov-actions">
-        ${copyAll}
+        ${meta.copyAllHTML}
         <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
       </div>`;
     ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
-    // Each restore label is read ONCE here, off the freshly painted markup —
-    // never inside the click handler, where a mid-feedback label would stick.
-    for (const btn of ov.card.querySelectorAll<HTMLButtonElement>("[data-copy-row]")) {
-      const row = rows[Number(btn.dataset.copyRow)];
-      const label = btn.textContent || "Copy";
-      if (row) btn.addEventListener("click", () => copyInto(btn, row.value, label));
-    }
-    const rawBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-raw]");
-    const rawLabel = rawBtn?.textContent || "Copy JSON";
-    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
-    const allBtn = ov.card.querySelector<HTMLButtonElement>("[data-copy-all]");
-    const allLabel = allBtn?.textContent || "Copy all";
-    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
+    wireMetaCopy(ov.card, meta);
   }
 
   /** Resolves true only when the file was deleted (the lightbox advances on it). */
@@ -3818,7 +3714,7 @@ export function openImageBrowser(): ModalShellController {
         <div class="ib-help-col">
           <div class="ib-help-h">Other</div>
           <dl>
-            <dt>Enter / o</dt><dd>open in lightbox (←/→ step, Del delete, Esc close)</dd>
+            <dt>Enter / o</dt><dd>open in lightbox (←/→ step, i metadata, Del delete, Esc close)</dd>
             <dt>i</dt><dd>metadata</dd>
             <dt>w</dt><dd>load workflow</dd>
             <dt>b</dt><dd>safe view on/off</dd>

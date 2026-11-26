@@ -21,6 +21,7 @@
 //   GET /image_browser/list                      → virtual tree (below)
 //   GET /image_browser/thumb                     → real PNG bytes
 //   GET /api/view                                → same bytes (full-size open)
+//   GET /image_browser/metadata                  → a fixed ComfyUI summary
 //   POST /image_browser/{delete,delete_many,rename} → stateless success
 //   GET /__fixture/health                        → readiness probe for webServer
 
@@ -353,6 +354,23 @@ function createFixtureServer() {
     }
     if (p === "/image_browser/list") {
       handleList(url, res);
+      return;
+    }
+    if (p === "/image_browser/metadata") {
+      // One fixed answer, with a long positive prompt so the info panel has
+      // something that wraps — its layout is what the browser suite measures.
+      sendJSON(res, 200, {
+        ok: true,
+        format: "png",
+        source: "comfyui",
+        summary: {
+          positive: `${url.searchParams.get("name") || ""}: ${"a lighthouse at dusk, ".repeat(12)}`,
+          seed: "42",
+          model: "sd15.safetensors",
+        },
+        raw: { prompt: "{}" },
+        truncated: false,
+      });
       return;
     }
     if (p === "/image_browser/thumb" || p === "/api/view") {

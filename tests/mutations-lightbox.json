@@ -70,6 +70,41 @@
       "before": "          if (i >= 0 && row) applyStars(row, ratingOf(x));",
       "after": "          if (false) applyStars(row!, ratingOf(x));",
       "expect": ["shows on the card after close"]
+    },
+    {
+      "label": "a late metadata answer paints onto whichever file is now on screen",
+      "file": "src/lightbox.ts",
+      "before": "      (data) => {\n        if (current !== f || !infoOpen || closed) return;",
+      "after": "      (data) => {\n        if (!infoOpen || closed) return;",
+      "expect": ["never paints a late answer onto the next file"]
+    },
+    {
+      "label": "a blurred Safe View match shows its prompt in the info panel",
+      "file": "src/lightbox.ts",
+      "before": "    if (deps.hidden(f)) {\n      info.innerHTML",
+      "after": "    if (false) {\n      info.innerHTML",
+      "expect": ["withholds a Safe View match's metadata"]
+    },
+    {
+      "label": "metadata is re-read on every step instead of cached per viewer",
+      "file": "src/lightbox.ts",
+      "before": "    let p = metaCache.get(f);",
+      "after": "    let p: Promise<ImageMetadata> | undefined;",
+      "expect": ["never paints a late answer onto the next file"]
+    },
+    {
+      "label": "the info panel ignores the saved choice",
+      "file": "src/lightbox.ts",
+      "before": "    if (raw === \"0\") return false;",
+      "after": "    if (raw === \"0\") return true;",
+      "expect": ["the choice survives reopening"]
+    },
+    {
+      "label": "the info panel opens by default on a phone",
+      "file": "src/lightbox.ts",
+      "before": "  return typeof window.matchMedia === \"function\" && window.matchMedia(INFO_WIDE_QUERY).matches;",
+      "after": "  return true;",
+      "expect": ["starts closed on a narrow viewport"]
     }
   ]
 }

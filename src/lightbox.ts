@@ -30,6 +30,13 @@
 // 3. NAVIGATION RE-READS THE LIST ON EVERY STEP and tracks the FILE, never an
 //    index. A delete re-renders the grid, which replaces `renderedFiles`; an
 //    index captured at open would then address a different file.
+//
+// The info panel (issue #112) shows the viewed file's embedded generation
+// metadata beside it, through the same renderer as the grid's ⓘ card
+// (meta-view.ts). It is read per item, cached for the viewer's lifetime, and
+// a late answer for a file already stepped past is dropped. A Safe View match
+// that arrives blurred has its metadata WITHHELD until it is revealed: the
+// prompt is exactly the text the blur is standing in for.
 
 import type { ModalShellController } from "@laurigates/comfy-modal-kit";
 import {
@@ -41,8 +48,37 @@ import {
   setBlurred,
   starsHTML,
 } from "@laurigates/comfy-modal-kit";
+import type { ImageMetadata } from "./api.js";
+import { META_LOADING_HTML, renderMeta, wireMetaCopy } from "./meta-view.js";
 
 const STYLE_ID = "ib-lightbox-style";
+
+/** Per-device memory of whether the info panel is open. */
+const INFO_STORAGE_KEY = "comfyui-image-browser:lightbox-info";
+
+/** Viewports at least this wide open the info panel by default. */
+const INFO_WIDE_QUERY = "(min-width: 900px)";
+
+/** Saved choice, else open on a wide viewport and closed on a phone. */
+function initialInfoOpen(): boolean {
+  try {
+    const raw = localStorage.getItem(INFO_STORAGE_KEY);
+    if (raw === "1") return true;
+    if (raw === "0") return false;
+  } catch {
+    /* private-mode / disabled storage — fall through to the default */
+  }
+  // jsdom and very old engines have no matchMedia; closed is the cheap default.
+  return typeof window.matchMedia === "function" && window.matchMedia(INFO_WIDE_QUERY).matches;
+}
+
+function saveInfoOpen(open: boolean): void {
+  try {
+    localStorage.setItem(INFO_STORAGE_KEY, open ? "1" : "0");
+  } catch {
+    /* non-fatal */
+  }
+}
 
 /** Minimum horizontal travel, in px, for a swipe to count as navigation. */
 export const SWIPE_MIN_PX = 50;
@@ -67,6 +103,11 @@ export interface LightboxDeps<F> {
   hidden: (f: F) => boolean;
   reveal: (f: F) => void;
   openInTab: (f: F) => void;
+  /**
+   * Embedded metadata for the info panel, or null when this file's container
+   * has no reader. Omit it and the viewer has no info panel at all.
+   */
+  metadata?: (f: F) => Promise<ImageMetadata> | null;
   /** Called once, with the file on screen when the viewer closed. */
   onClose: (last: F | null) => void;
 }
@@ -102,9 +143,11 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
     <button type="button" class="ib-lb-btn ib-lb-nav ib-lb-prev" data-lb="prev" aria-label="Previous">‹</button>
     <div class="ib-lb-stage"></div>
     <button type="button" class="ib-lb-btn ib-lb-nav ib-lb-next" data-lb="next" aria-label="Next">›</button>
+    <aside class="ib-lb-info" aria-label="Metadata"></aside>
     <div class="ib-lb-bar"></div>`;
   const stage = root.querySelector(".ib-lb-stage") as HTMLElement;
   const bar = root.querySelector(".ib-lb-bar") as HTMLElement;
+  const info = root.querySelector(".ib-lb-info") as HTMLElement;
   const prevBtn = root.querySelector(".ib-lb-prev") as HTMLButtonElement;
   const nextBtn = root.querySelector(".ib-lb-next") as HTMLButtonElement;
 
@@ -112,6 +155,61 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
   let closed = false;
   /** True while the delete question is up: every key belongs to it. */
   let busy = false;
+  const hasInfo = typeof deps.metadata === "function";
+  let infoOpen = hasInfo && initialInfoOpen();
+  /** One read per file per viewer session; stepping back reuses it. */
+  const metaCache = new Map<F, Promise<ImageMetadata>>();
+  root.classList.toggle("has-info", infoOpen);
+
+  function paintInfo(f: F): void {
+    if (!infoOpen || !deps.metadata) return;
+    if (deps.hidden(f)) {
+      info.innerHTML = `<div class="ib-meta-status">Hidden by Safe View. Reveal the image to show its metadata.</div>`;
+      return;
+    }
+    let p = metaCache.get(f);
+    if (!p) {
+      const read = deps.metadata(f);
+      if (!read) {
+        info.innerHTML = `<div class="ib-meta-status">No metadata reader for this file type.</div>`;
+        return;
+      }
+      p = read;
+      metaCache.set(f, p);
+    }
+    info.innerHTML = `<div class="ib-lb-info-head">Metadata</div>${META_LOADING_HTML}`;
+    p.then(
+      (data) => {
+        if (current !== f || !infoOpen || closed) return;
+        const meta = renderMeta(data);
+        info.innerHTML = `
+          <div class="ib-lb-info-head">Metadata ${
+            // Its own button class: the overlay's cmp-ov-btn styles are only
+            // injected once a kit overlay has opened, which may be never.
+            meta.rows.length
+              ? `<button type="button" class="ib-meta-copy" data-copy-all>Copy all</button>`
+              : ""
+          }</div>
+          <div class="ib-meta-body">${meta.html}</div>`;
+        wireMetaCopy(info, meta);
+      },
+      (e: unknown) => {
+        if (current !== f || !infoOpen || closed) return;
+        const msg = e instanceof Error ? e.message : String(e);
+        info.innerHTML = `<div class="ib-lb-info-head">Metadata</div><div class="ib-meta-status">Metadata read failed: ${escHTML(msg)}</div>`;
+      },
+    );
+  }
+
+  function toggleInfo(): void {
+    if (!hasInfo) return;
+    infoOpen = !infoOpen;
+    saveInfoOpen(infoOpen);
+    root.classList.toggle("has-info", infoOpen);
+    bar.querySelector('[data-lb="info"]')?.setAttribute("aria-pressed", String(infoOpen));
+    if (infoOpen && current) paintInfo(current);
+    else info.innerHTML = "";
+  }
 
   function indexOfCurrent(): number {
     return current ? deps.files().indexOf(current) : -1;
@@ -170,9 +268,11 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
     bar.innerHTML = `
       ${rating === null ? "" : starsHTML("ib", rating)}
       ${deps.canDelete(f) ? `<button type="button" class="ib-lb-btn" data-lb="delete" title="Delete…" aria-label="Delete">🗑</button>` : ""}
+      ${hasInfo ? `<button type="button" class="ib-lb-btn" data-lb="info" title="Metadata (i)" aria-label="Metadata" aria-pressed="${infoOpen}">ⓘ</button>` : ""}
       <button type="button" class="ib-lb-btn" data-lb="tab" title="Open in new tab" aria-label="Open in new tab">↗</button>
       <span class="ib-lb-name" title="${escHTML(deps.name(f))}">${escHTML(deps.name(f))}</span>
       <span class="ib-lb-pos">${pos}/${n}</span>`;
+    paintInfo(f);
   }
 
   function step(dir: -1 | 1): void {
@@ -237,6 +337,7 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
     else if (action === "next") step(1);
     else if (action === "delete") void onDelete();
     else if (action === "tab" && current) deps.openInTab(current);
+    else if (action === "info") toggleInfo();
     // A tap on the empty area around the media closes, like the stock viewer.
     else if (t === root || t === stage) close();
   });
@@ -249,7 +350,7 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
   let swiped = false;
   root.addEventListener("pointerdown", (e) => {
     swiped = false;
-    if ((e.target as HTMLElement).closest("button, video, .ib-lb-bar")) return;
+    if ((e.target as HTMLElement).closest("button, video, .ib-lb-bar, .ib-lb-info")) return;
     swiping = true;
     swipeX = e.clientX;
     swipeY = e.clientY;
@@ -274,6 +375,7 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
     else if (e.key === "ArrowLeft") step(-1);
     else if (e.key === "ArrowRight") step(1);
     else if (e.key === "Delete" && current && deps.canDelete(current)) void onDelete();
+    else if (e.key === "i" && hasInfo && !e.ctrlKey && !e.metaKey && !e.altKey) toggleInfo();
     else handled = false;
     if (handled) {
       e.preventDefault();
@@ -360,4 +462,43 @@ const CSS = `
 .ib-lb-bar .ib-star { font-size: 22px; padding: 8px 5px; min-width: 32px; min-height: 44px; }
 .ib-lb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 40%; }
 .ib-lb-pos { color: #8a8a96; font-variant-numeric: tabular-nums; }
+.ib-lb-btn[aria-pressed="true"] { border-color: #6ba6ff; color: #fff; }
+/* Info panel. Wide: a column beside the media, which shrinks to make room.
+   Narrow: a sheet over the lower half of the stage, so the image keeps the
+   full width a phone has. */
+.ib-lb-info {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 64px;
+    width: 360px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 64px 14px 14px;
+    box-sizing: border-box;
+    background: rgba(18, 18, 26, 0.96);
+    border-left: 1px solid #2a2a32;
+    color: #d8d8dc;
+    user-select: text;
+    z-index: 0;
+}
+.ib-lb.has-info .ib-lb-info { display: block; }
+.ib-lb.has-info .ib-lb-stage { right: 360px; }
+.ib-lb.has-info .ib-lb-next { right: 372px; }
+.ib-lb-info-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8a8a96;
+    margin-bottom: 8px; min-height: 36px;
+}
+.ib-lb-info .ib-meta-row { grid-template-columns: 72px 1fr auto; }
+.ib-lb-info .ib-meta-v { max-height: 16em; }
+@media (max-width: 899px) {
+    .ib-lb-info {
+        top: auto; left: 0; width: auto; max-height: 50%;
+        padding-top: 10px; border-left: 0; border-top: 1px solid #2a2a32;
+    }
+    .ib-lb.has-info .ib-lb-stage { right: 0; }
+    .ib-lb.has-info .ib-lb-next { right: 12px; }
+}
 `;
