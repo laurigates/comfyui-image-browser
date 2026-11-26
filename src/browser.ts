@@ -92,6 +92,7 @@ import {
   uploadFiles,
   videoSrcURL,
 } from "./api.js";
+import { DOCK_CSS, installDock } from "./dock.js";
 import { labelParts } from "./label.js";
 import { openLightbox } from "./lightbox.js";
 import { META_LOADING_HTML, renderMeta, wireMetaCopy } from "./meta-view.js";
@@ -514,7 +515,7 @@ interface ThumbDescriptor {
 // ============================================================
 
 export function openImageBrowser(): ModalShellController {
-  ensureStyleOnce(STYLE_ID, BROWSER_CSS);
+  ensureStyleOnce(STYLE_ID, BROWSER_CSS + DOCK_CSS);
   // /base carries `allow_path_reads`, which the user flips in the settings
   // panel — a different surface, with no channel back to this module. Drop the
   // cached answer on every open so the switch takes effect on the next open
@@ -579,6 +580,7 @@ export function openImageBrowser(): ModalShellController {
       // as the observer: nothing scheduled may outlive the modal).
       scroller.dispose();
       window.removeEventListener("keydown", onWindowKey, true);
+      dock.dispose();
       disposeBackGuard?.();
       disposeBackGuard = null;
       // Same rule as the observer and the restore loop: nothing scheduled or
@@ -598,6 +600,9 @@ export function openImageBrowser(): ModalShellController {
     },
   });
   modal.dialog.classList.add("ib-dialog");
+  // Side-panel mode (src/dock.ts). Installed straight after the shell so its
+  // key gate wraps the shell's handler before any overlay can capture it.
+  const dock = installDock(modal);
 
   // Root the smoke test asserts on; also the overlay host.
   const root = document.createElement("div");
@@ -1786,7 +1791,8 @@ export function openImageBrowser(): ModalShellController {
   //
   // The browser closes first: loadGraphData swaps the canvas underneath, and
   // leaving a full-viewport modal parked over the graph the user just asked to
-  // see is the wrong end state.
+  // see is the wrong end state. DOCKED it stays open: the graph is already
+  // visible beside it, and closing would undo the reason for docking.
   async function loadWorkflow(f: ListingFile): Promise<void> {
     const sub = fileSub(f);
     const type = fileType(f);
@@ -1825,7 +1831,7 @@ export function openImageBrowser(): ModalShellController {
         // showing. Strip it first and let the graph tab carry the bare name.
         const base = f.name.replace(/\.[^./]+$/, "");
         const file = new File([graphJSON], `${base}.json`, { type: "application/json" });
-        modal.close();
+        if (!dock.isDocked()) modal.close();
         await app.handleFile(file);
         return;
       }
@@ -1848,7 +1854,7 @@ export function openImageBrowser(): ModalShellController {
       // handleFile keys the workflow's tab name off file.name, so pass the real
       // filename rather than a synthesized one.
       const file = new File([blob], f.name, { type: blob.type });
-      modal.close();
+      if (!dock.isDocked()) modal.close();
       await app.handleFile(file);
     } catch (e) {
       notify({
@@ -3732,6 +3738,9 @@ export function openImageBrowser(): ModalShellController {
   }
 
   function onWindowKey(e: KeyboardEvent): void {
+    // Docked beside a live canvas, keys belong to whichever side the user last
+    // clicked — `d d` on the graph must not delete the focused card.
+    if (!dock.ownsKeys()) return;
     // Skip when any overlay is open (confirm / prompt / help / move-picker).
     if (modal.dialog.querySelector(".cmp-ov-backdrop")) return;
     const inInput = isInInput();

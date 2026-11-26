@@ -67,6 +67,12 @@ manage without leaving ComfyUI.
   each field with its own Copy; it opens by default on a wide screen and the
   choice is remembered per device. A Safe View match you step onto keeps its
   metadata hidden until you reveal it.
+- **Side panel** — on a desktop-width screen, **⇥** in the header docks the
+  browser to the right edge so the workflow stays visible and usable beside it.
+  Drag its left edge to resize; the width and the docked state are remembered per
+  device. Keys go to whichever side you last clicked, so Esc on the canvas does not
+  close the browser. Loading a workflow keeps the docked panel open. **⤢** returns
+  to full screen.
 - **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab
   (including `browse…`, once absolute-path reads are switched on). ComfyUI
   writes the workflow into every image *and video*

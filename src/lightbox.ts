@@ -56,11 +56,17 @@ const STYLE_ID = "ib-lightbox-style";
 /** Per-device memory of whether the info panel is open. */
 const INFO_STORAGE_KEY = "comfyui-image-browser:lightbox-info";
 
-/** Viewports at least this wide open the info panel by default. */
-const INFO_WIDE_QUERY = "(min-width: 900px)";
+/** Viewers at least this wide open the info panel by default, as a side column. */
+const INFO_WIDE_PX = 900;
+const INFO_WIDE_QUERY = `(min-width: ${INFO_WIDE_PX}px)`;
 
-/** Saved choice, else open on a wide viewport and closed on a phone. */
-function initialInfoOpen(): boolean {
+/**
+ * Saved choice, else open when the VIEWER is wide and closed on a phone. The
+ * viewer's own width, not the viewport's: docked (src/dock.ts) it lives in a
+ * ~480px panel on a wide screen. A zero width (jsdom, not yet laid out) falls
+ * back to the viewport query.
+ */
+function initialInfoOpen(host: HTMLElement): boolean {
   try {
     const raw = localStorage.getItem(INFO_STORAGE_KEY);
     if (raw === "1") return true;
@@ -68,6 +74,7 @@ function initialInfoOpen(): boolean {
   } catch {
     /* private-mode / disabled storage — fall through to the default */
   }
+  if (host.clientWidth > 0) return host.clientWidth >= INFO_WIDE_PX;
   // jsdom and very old engines have no matchMedia; closed is the cheap default.
   return typeof window.matchMedia === "function" && window.matchMedia(INFO_WIDE_QUERY).matches;
 }
@@ -156,7 +163,7 @@ export function openLightbox<F>(start: F, deps: LightboxDeps<F>): LightboxHandle
   /** True while the delete question is up: every key belongs to it. */
   let busy = false;
   const hasInfo = typeof deps.metadata === "function";
-  let infoOpen = hasInfo && initialInfoOpen();
+  let infoOpen = hasInfo && initialInfoOpen(shell.dialog);
   /** One read per file per viewer session; stepping back reuses it. */
   const metaCache = new Map<F, Promise<ImageMetadata>>();
   root.classList.toggle("has-info", infoOpen);
@@ -410,6 +417,7 @@ const CSS = `
     justify-content: center;
     touch-action: pan-y pinch-zoom;
     user-select: none;
+    container-type: inline-size;
 }
 .ib-lb-stage {
     position: absolute;
@@ -465,7 +473,8 @@ const CSS = `
 .ib-lb-btn[aria-pressed="true"] { border-color: #6ba6ff; color: #fff; }
 /* Info panel. Wide: a column beside the media, which shrinks to make room.
    Narrow: a sheet over the lower half of the stage, so the image keeps the
-   full width a phone has. */
+   full width a phone has. "Narrow" is a CONTAINER query on the viewer, not a
+   media query: docked, the viewer is a ~480px panel on a wide screen. */
 .ib-lb-info {
     display: none;
     position: absolute;
@@ -493,7 +502,7 @@ const CSS = `
 }
 .ib-lb-info .ib-meta-row { grid-template-columns: 72px 1fr auto; }
 .ib-lb-info .ib-meta-v { max-height: 16em; }
-@media (max-width: 899px) {
+@container (max-width: 899px) {
     .ib-lb-info {
         top: auto; left: 0; width: auto; max-height: 50%;
         padding-top: 10px; border-left: 0; border-top: 1px solid #2a2a32;
