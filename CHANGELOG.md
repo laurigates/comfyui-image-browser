@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.37](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.36...comfyui-image-browser-v0.1.37) (2026-11-26)
+
+
+### Bug Fixes
+
+* **deps:** update dependency playwright to v1.55.1 [security] ([#128](https://github.com/laurigates/comfyui-image-browser/issues/128)) ([862c302](https://github.com/laurigates/comfyui-image-browser/commit/862c3020a0d027df47ca657537604f0e4483ba6d))
+
+
+### Miscellaneous
+
+* **claude:** reconcile Claude Code config with the repo baseline ([#133](https://github.com/laurigates/comfyui-image-browser/issues/133)) ([767b406](https://github.com/laurigates/comfyui-image-browser/commit/767b406eb4507587d49bab470d5926761de1bec8))
+* **deps:** update dependency virtualenv to v21.14.10 [security] ([#139](https://github.com/laurigates/comfyui-image-browser/issues/139)) ([5799f91](https://github.com/laurigates/comfyui-image-browser/commit/5799f91fd6c780c178c207ceae977f78f895350b))
+
 ## [0.1.36](https://github.com/laurigates/comfyui-image-browser/compare/comfyui-image-browser-v0.1.35...comfyui-image-browser-v0.1.36) (2026-11-22)
 
 
