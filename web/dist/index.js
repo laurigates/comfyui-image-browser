@@ -2149,6 +2149,153 @@ function pinsToFiles(entries) {
   return out;
 }
 
+// src/dock.ts
+var DOCK_STORAGE_KEY = "comfyui-image-browser:dock";
+var DOCK_QUERY = "(min-width: 900px)";
+var DOCK_MIN_WIDTH = 360;
+var DOCK_DEFAULT_WIDTH = 480;
+var DOCK_CANVAS_RESERVE = 320;
+function clampDockWidth(px, viewport) {
+  if (!Number.isFinite(px))
+    return DOCK_MIN_WIDTH;
+  const max = Math.max(DOCK_MIN_WIDTH, viewport - DOCK_CANVAS_RESERVE);
+  return Math.round(Math.min(Math.max(px, DOCK_MIN_WIDTH), max));
+}
+function loadPref() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DOCK_STORAGE_KEY) || "null");
+    if (raw && typeof raw === "object") {
+      return {
+        docked: raw.docked === true,
+        width: typeof raw.width === "number" ? raw.width : DOCK_DEFAULT_WIDTH
+      };
+    }
+  } catch {}
+  return { docked: false, width: DOCK_DEFAULT_WIDTH };
+}
+function savePref(p) {
+  try {
+    localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify(p));
+  } catch {}
+}
+function wideEnough() {
+  return typeof window.matchMedia === "function" && window.matchMedia(DOCK_QUERY).matches;
+}
+function installDock(modal) {
+  const pref = loadPref();
+  const { dialog, backdrop } = modal;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ib-dock-toggle";
+  const handle = document.createElement("div");
+  handle.className = "ib-dock-handle";
+  handle.setAttribute("aria-hidden", "true");
+  dialog.appendChild(handle);
+  modal.headerEl.insertBefore(btn, modal.headerEl.querySelector(".cmp-close"));
+  function apply() {
+    dialog.classList.toggle("is-docked", pref.docked);
+    backdrop.classList.toggle("ib-dock-backdrop", pref.docked);
+    dialog.style.setProperty("--ib-dock-w", `${clampDockWidth(pref.width, window.innerWidth)}px`);
+    btn.textContent = pref.docked ? "⤢" : "⇥";
+    btn.title = pref.docked ? "Full screen" : "Dock to the side (keep the canvas usable)";
+    btn.setAttribute("aria-label", btn.title);
+    btn.setAttribute("aria-pressed", String(pref.docked));
+  }
+  apply();
+  btn.addEventListener("click", () => {
+    pref.docked = !pref.docked;
+    savePref(pref);
+    apply();
+  });
+  let dragFrom = null;
+  handle.addEventListener("pointerdown", (e) => {
+    dragFrom = { x: e.clientX, w: clampDockWidth(pref.width, window.innerWidth) };
+    handle.setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!dragFrom)
+      return;
+    pref.width = clampDockWidth(dragFrom.w + (dragFrom.x - e.clientX), window.innerWidth);
+    dialog.style.setProperty("--ib-dock-w", `${pref.width}px`);
+  });
+  const endDrag = () => {
+    if (!dragFrom)
+      return;
+    dragFrom = null;
+    savePref(pref);
+  };
+  handle.addEventListener("pointerup", endDrag);
+  handle.addEventListener("pointercancel", endDrag);
+  const isDocked = () => pref.docked && wideEnough();
+  let inside = true;
+  const onPointer = (e) => {
+    inside = dialog.contains(e.target);
+  };
+  document.addEventListener("pointerdown", onPointer, true);
+  const ownsKeys = () => !isDocked() || inside;
+  const active = getActiveModal();
+  const modalHandle = active && active.element === dialog ? active : null;
+  if (modalHandle) {
+    Object.defineProperty(modalHandle, "element", {
+      configurable: true,
+      enumerable: true,
+      get: () => isDocked() ? document.documentElement : dialog
+    });
+  }
+  const original = modal._onKey;
+  const gated = (e) => {
+    if (ownsKeys())
+      original(e);
+  };
+  document.removeEventListener("keydown", original, true);
+  modal._onKey = gated;
+  document.addEventListener("keydown", gated, true);
+  return {
+    isDocked,
+    ownsKeys,
+    dispose() {
+      if (modalHandle) {
+        Object.defineProperty(modalHandle, "element", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: dialog
+        });
+      }
+      document.removeEventListener("pointerdown", onPointer, true);
+      document.removeEventListener("keydown", gated, true);
+      document.removeEventListener("keydown", original, true);
+    }
+  };
+}
+var DOCK_CSS = `
+.ib-dock-toggle, .ib-dock-handle { display: none; }
+@media ${DOCK_QUERY} {
+    .ib-dock-toggle {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 44px; height: 44px; flex-shrink: 0; margin-right: 6px;
+        background: transparent; color: #aaa; border: 1px solid #3a3a44; border-radius: 4px;
+        font-size: 18px; line-height: 1; cursor: pointer; font-family: inherit;
+    }
+    .ib-dock-toggle:hover { background: #2a2a32; color: #fff; }
+    .ib-dock-toggle[aria-pressed="true"] { border-color: #6ba6ff; color: #fff; }
+    .ib-dialog.is-docked {
+        left: auto !important; right: 0 !important;
+        width: var(--ib-dock-w, 480px) !important;
+        box-sizing: border-box;
+        border-left: 1px solid #3a3a44;
+        box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
+    }
+    .cmp-backdrop.ib-dock-backdrop { display: none; }
+    .ib-dialog.is-docked .ib-dock-handle {
+        display: block; position: absolute; left: 0; top: 0; bottom: 0; width: 8px;
+        cursor: ew-resize; z-index: 7; touch-action: none;
+    }
+    .ib-dialog.is-docked .ib-dock-handle:hover { background: rgba(107, 166, 255, 0.35); }
+}
+`;
+
 // src/label.ts
 var COUNTER_RE = /_\d{2,6}_?$/;
 var TIME_PREFIX_RE = /^\d{6}_/;
@@ -2253,8 +2400,9 @@ function copyInto(btn, text, restore) {
 // src/lightbox.ts
 var STYLE_ID4 = "ib-lightbox-style";
 var INFO_STORAGE_KEY = "comfyui-image-browser:lightbox-info";
-var INFO_WIDE_QUERY = "(min-width: 900px)";
-function initialInfoOpen() {
+var INFO_WIDE_PX = 900;
+var INFO_WIDE_QUERY = `(min-width: ${INFO_WIDE_PX}px)`;
+function initialInfoOpen(host) {
   try {
     const raw = localStorage.getItem(INFO_STORAGE_KEY);
     if (raw === "1")
@@ -2262,6 +2410,8 @@ function initialInfoOpen() {
     if (raw === "0")
       return false;
   } catch {}
+  if (host.clientWidth > 0)
+    return host.clientWidth >= INFO_WIDE_PX;
   return typeof window.matchMedia === "function" && window.matchMedia(INFO_WIDE_QUERY).matches;
 }
 function saveInfoOpen(open) {
@@ -2302,7 +2452,7 @@ function openLightbox(start, deps) {
   let closed = false;
   let busy = false;
   const hasInfo = typeof deps.metadata === "function";
-  let infoOpen = hasInfo && initialInfoOpen();
+  let infoOpen = hasInfo && initialInfoOpen(shell.dialog);
   const metaCache = new Map;
   root.classList.toggle("has-info", infoOpen);
   function paintInfo(f) {
@@ -2551,6 +2701,7 @@ var CSS4 = `
     justify-content: center;
     touch-action: pan-y pinch-zoom;
     user-select: none;
+    container-type: inline-size;
 }
 .ib-lb-stage {
     position: absolute;
@@ -2606,7 +2757,8 @@ var CSS4 = `
 .ib-lb-btn[aria-pressed="true"] { border-color: #6ba6ff; color: #fff; }
 /* Info panel. Wide: a column beside the media, which shrinks to make room.
    Narrow: a sheet over the lower half of the stage, so the image keeps the
-   full width a phone has. */
+   full width a phone has. "Narrow" is a CONTAINER query on the viewer, not a
+   media query: docked, the viewer is a ~480px panel on a wide screen. */
 .ib-lb-info {
     display: none;
     position: absolute;
@@ -2634,7 +2786,7 @@ var CSS4 = `
 }
 .ib-lb-info .ib-meta-row { grid-template-columns: 72px 1fr auto; }
 .ib-lb-info .ib-meta-v { max-height: 16em; }
-@media (max-width: 899px) {
+@container (max-width: 899px) {
     .ib-lb-info {
         top: auto; left: 0; width: auto; max-height: 50%;
         padding-top: 10px; border-left: 0; border-top: 1px solid #2a2a32;
@@ -2840,7 +2992,7 @@ async function migrateLocalPins() {
   } catch {}
 }
 function openImageBrowser() {
-  ensureStyleOnce(STYLE_ID5, BROWSER_CSS);
+  ensureStyleOnce(STYLE_ID5, BROWSER_CSS + DOCK_CSS);
   invalidateBasePaths();
   const savedView = viewStore.load();
   const state = {
@@ -2876,6 +3028,7 @@ function openImageBrowser() {
       cancelChunkJob();
       scroller.dispose();
       window.removeEventListener("keydown", onWindowKey, true);
+      dock.dispose();
       disposeBackGuard?.();
       disposeBackGuard = null;
       disposeSafeView();
@@ -2885,6 +3038,7 @@ function openImageBrowser() {
     }
   });
   modal.dialog.classList.add("ib-dialog");
+  const dock = installDock(modal);
   const root = document.createElement("div");
   root.className = "image-browser-body";
   modal.bodyEl.appendChild(root);
@@ -3625,7 +3779,8 @@ function openImageBrowser() {
       if (META_VIDEO_EXTS.has((f.ext || "").toLowerCase())) {
         const base = f.name.replace(/\.[^./]+$/, "");
         const file = new File([graphJSON], `${base}.json`, { type: "application/json" });
-        modal.close();
+        if (!dock.isDocked())
+          modal.close();
         await app.handleFile(file);
         return;
       }
@@ -3642,7 +3797,8 @@ function openImageBrowser() {
         throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const file = new File([blob], f.name, { type: blob.type });
-      modal.close();
+      if (!dock.isDocked())
+        modal.close();
       await app.handleFile(file);
     } catch (e) {
       notify({
@@ -4934,6 +5090,8 @@ ${when}`;
     closeBtn?.addEventListener("click", () => ov.close());
   }
   function onWindowKey(e) {
+    if (!dock.ownsKeys())
+      return;
     if (modal.dialog.querySelector(".cmp-ov-backdrop"))
       return;
     const inInput = isInInput();

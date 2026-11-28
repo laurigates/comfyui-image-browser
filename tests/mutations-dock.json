@@ -1,0 +1,91 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/dock.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "CONTROL (must be MISSED): a comment reworded, which no test can see",
+      "file": "src/dock.ts",
+      "before": "// The one load-bearing behaviour is KEY OWNERSHIP.",
+      "after": "// The load-bearing behaviour is KEY OWNERSHIP.",
+      "control": true
+    },
+    {
+      "label": "the grid's window key handler ignores the dock, so `d d` on the canvas deletes",
+      "file": "src/browser.ts",
+      "before": "    if (!dock.ownsKeys()) return;",
+      "after": "    // (dropped)",
+      "expect": [
+        "`d d` on the canvas deletes nothing",
+        "keys after a canvas click belong to the canvas"
+      ]
+    },
+    {
+      "label": "the shell's Esc is not gated, so Esc on the canvas closes the docked browser",
+      "file": "src/dock.ts",
+      "before": "    if (ownsKeys()) original(e);",
+      "after": "    original(e);",
+      "expect": ["keys after a canvas click belong to the canvas"]
+    },
+    {
+      "label": "the kit's pointer guard is left alone, so a canvas click closes the docked browser",
+      "file": "src/dock.ts",
+      "before": "      get: () => (isDocked() ? document.documentElement : dialog),",
+      "after": "      get: () => dialog,",
+      "expect": ["does not close the docked browser"]
+    },
+    {
+      "label": "the pointer guard is bent even undocked, so outside clicks never close the browser",
+      "file": "src/dock.ts",
+      "before": "      get: () => (isDocked() ? document.documentElement : dialog),",
+      "after": "      get: () => document.documentElement,",
+      "expect": [
+        "still closes the full-screen browser",
+        "too narrow to dock"
+      ]
+    },
+    {
+      "label": "docking ignores the viewport width",
+      "file": "src/dock.ts",
+      "before": "  const isDocked = (): boolean => pref.docked && wideEnough();",
+      "after": "  const isDocked = (): boolean => pref.docked;",
+      "expect": [
+        "is inert on a narrow viewport",
+        "too narrow to dock"
+      ]
+    },
+    {
+      "label": "dispose leaves the gated key handler on document",
+      "file": "src/dock.ts",
+      "before": "      document.removeEventListener(\"keydown\", gated, true);",
+      "after": "      // (dropped)",
+      "expect": ["leaves no keydown listener behind"]
+    },
+    {
+      "label": "load workflow closes the docked browser",
+      "file": "src/browser.ts",
+      "before": "      if (!dock.isDocked()) modal.close();\n      await app.handleFile(file);",
+      "after": "      modal.close();\n      await app.handleFile(file);",
+      "expect": ["keeps the docked browser open"]
+    },
+    {
+      "label": "the dock preference is not read back on open",
+      "file": "src/dock.ts",
+      "before": "        docked: raw.docked === true,",
+      "after": "        docked: false,",
+      "expect": ["docks, remembers it, and undocks"]
+    },
+    {
+      "label": "the width clamp leaves no canvas strip",
+      "file": "src/dock.ts",
+      "before": "  const max = Math.max(DOCK_MIN_WIDTH, viewport - DOCK_CANVAS_RESERVE);",
+      "after": "  const max = Math.max(DOCK_MIN_WIDTH, viewport);",
+      "expect": ["keeps the panel usable"]
+    }
+  ]
+}
