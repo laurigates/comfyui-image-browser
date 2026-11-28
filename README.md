@@ -62,7 +62,11 @@ manage without leaving ComfyUI.
 - **Lightbox** — tap a card (or `Enter`/`o`) to view it full-size without
   leaving the browser. Swipe or ←/→ steps through the grid in its current sort
   and filter, and the bar at the bottom rates (★) and deletes (🗑) the file
-  on screen. ↗ opens the original in a new tab instead.
+  on screen. ↗ opens the original in a new tab instead. ⓘ (or `i`) shows the
+  file's generation metadata (prompt, model, seed, sampler…) beside the image,
+  each field with its own Copy; it opens by default on a wide screen and the
+  choice is remembered per device. A Safe View match you step onto keeps its
+  metadata hidden until you reveal it.
 - **⤓ Load workflow** (`w`) — reopen the graph embedded in a file, on any tab
   (including `browse…`, once absolute-path reads are switched on). ComfyUI
   writes the workflow into every image *and video*

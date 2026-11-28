@@ -52,3 +52,43 @@ test("a plain tap beside the image still closes the viewer", async ({ page }) =>
   await page.mouse.click(box.x + 4, box.y + 4);
   await expect(page.locator(LB)).toHaveCount(0);
 });
+
+// The info panel (issue #112). Which file it reads and when is the jsdom
+// suite's business; what only a layout engine can say is that on a desktop
+// viewport the panel sits BESIDE the media rather than over it, and that on a
+// phone it is out of the way until asked for.
+test.describe("info panel", () => {
+  test("on a desktop viewport it opens beside the image without covering it", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openFirst(page);
+    const panel = page.locator(".ib-lb-info");
+    await expect(panel).toBeVisible();
+    await expect(panel.locator(".ib-meta-row").first()).toBeVisible();
+    const p = await panel.boundingBox();
+    // The STAGE, not the <img>: the fixture image is small and centred, so its
+    // own box clears the panel even when the stage runs underneath it.
+    const stage = await page.locator(".ib-lb-stage").boundingBox();
+    const next = await page.locator(".ib-lb-next").boundingBox();
+    expect(stage.x + stage.width).toBeLessThanOrEqual(p.x + 0.5);
+    // The › control moved off the panel rather than sitting on top of it.
+    expect(next.x + next.width).toBeLessThanOrEqual(p.x + 0.5);
+    // Two-sided: toggled off, the image is free to use the panel's width.
+    await page.keyboard.press("i");
+    await expect(panel).toBeHidden();
+    const wide = await page.locator(".ib-lb-stage").boundingBox();
+    expect(wide.x + wide.width).toBeGreaterThan(p.x + 1);
+  });
+
+  test("on a phone it starts closed, and opens as a sheet below the image", async ({ page }) => {
+    await openFirst(page);
+    const panel = page.locator(".ib-lb-info");
+    await expect(panel).toBeHidden();
+    await page.locator('[data-lb="info"]').click();
+    await expect(panel.locator(".ib-meta-row").first()).toBeVisible();
+    const p = await panel.boundingBox();
+    const vw = page.viewportSize().width;
+    expect(Math.round(p.width)).toBe(vw);
+    const bar = await page.locator(".ib-lb-bar").boundingBox();
+    expect(p.y + p.height).toBeLessThanOrEqual(bar.y + 0.5);
+  });
+});

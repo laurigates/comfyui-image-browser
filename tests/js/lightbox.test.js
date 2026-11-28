@@ -41,9 +41,27 @@ const FILES = [
 
 /** Every POST, in order, as `{ url, body }`. */
 let posts;
+/** Every /metadata GET, in order, as the requested file name. */
+let metaReads;
+/** Answers a /metadata read for `name`; tests replace it to stall or fail one. */
+let metaResponder;
+
+const META = {
+  format: "png",
+  source: "comfyui",
+  summary: { positive: "a cat", seed: "42", model: "sd15.safetensors" },
+  raw: { prompt: '{"1": {}}' },
+  truncated: false,
+};
+
+function metaFor(name) {
+  return { ...META, summary: { ...META.summary, positive: `prompt of ${name}` } };
+}
 
 function stubFetch() {
   posts = [];
+  metaReads = [];
+  metaResponder = async (name) => ({ ok: true, ...metaFor(name) });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url, init) => {
@@ -53,6 +71,16 @@ function stubFetch() {
         posts.push({ url: s, body });
         const json = s.includes("/rating") ? { ok: true, rating: body.rating } : { ok: true };
         return { ok: true, status: 200, json: async () => json };
+      }
+      if (s.includes("/image_browser/metadata")) {
+        const name = new URL(s, "http://x").searchParams.get("name");
+        metaReads.push(name);
+        const json = await metaResponder(name);
+        return {
+          ok: json.ok !== false,
+          status: json.ok === false ? 400 : 200,
+          json: async () => json,
+        };
       }
       if (s.includes("/image_browser/pins")) {
         return { ok: true, status: 200, json: async () => ({ ok: true, max: 200, pins: [] }) };
@@ -326,5 +354,132 @@ describe("Safe View", () => {
     expect(shownName(again)).toBe("b-nsfw.png");
     expect(blurred(again)).toBe(false);
     again.close();
+  });
+});
+
+describe("metadata panel", () => {
+  const info = (modal) => lb(modal)?.querySelector(".ib-lb-info");
+  const infoOpen = (modal) => lb(modal)?.classList.contains("has-info");
+  const infoBtn = (modal) => lb(modal)?.querySelector('[data-lb="info"]');
+  const rowValue = (modal, label) =>
+    Array.from(info(modal).querySelectorAll(".ib-meta-row"))
+      .find((r) => r.querySelector(".ib-meta-k").textContent === label)
+      ?.querySelector(".ib-meta-v").textContent;
+
+  function stubWide(wide) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((q) => ({ matches: wide && q.includes("min-width"), media: q })),
+    );
+  }
+
+  async function painted(modal, name) {
+    await vi.waitFor(() => {
+      if (rowValue(modal, "Positive") !== `prompt of ${name}`) throw new Error("not painted");
+    });
+  }
+
+  it("opens by default on a wide viewport and shows the viewed file's fields", async () => {
+    stubWide(true);
+    const modal = await open();
+    tap(modal, "c.png");
+    expect(infoOpen(modal)).toBe(true);
+    await painted(modal, "c.png");
+    expect(rowValue(modal, "Seed")).toBe("42");
+    expect(rowValue(modal, "Model")).toBe("sd15.safetensors");
+    expect(info(modal).querySelector("[data-copy-all]")).not.toBeNull();
+    expect(metaReads).toEqual(["c.png"]);
+    modal.close();
+  });
+
+  it("starts closed on a narrow viewport and reads nothing until asked", async () => {
+    stubWide(false);
+    const modal = await open();
+    tap(modal, "c.png");
+    expect(infoOpen(modal)).toBe(false);
+    expect(metaReads).toEqual([]);
+    infoBtn(modal).click();
+    expect(infoOpen(modal)).toBe(true);
+    expect(infoBtn(modal).getAttribute("aria-pressed")).toBe("true");
+    await painted(modal, "c.png");
+    modal.close();
+  });
+
+  it("`i` toggles the panel and the choice survives reopening", async () => {
+    stubWide(true);
+    const modal = await open();
+    tap(modal, "c.png");
+    key(lb(modal), "i");
+    expect(infoOpen(modal)).toBe(false);
+    key(lb(modal), "Escape");
+    tap(modal, "c.png");
+    expect(infoOpen(modal)).toBe(false);
+    key(lb(modal), "i");
+    expect(infoOpen(modal)).toBe(true);
+    key(lb(modal), "Escape");
+    tap(modal, "c.png");
+    expect(infoOpen(modal)).toBe(true);
+    modal.close();
+  });
+
+  it("re-reads per item and never paints a late answer onto the next file", async () => {
+    stubWide(true);
+    const modal = await open();
+    // b-nsfw.png sits between these two and is blurred by the default
+    // keywords, so its metadata is withheld (asserted below) — step over it.
+    const [first, last] = ["c.png", "a.mp4"];
+    let release;
+    metaResponder = (name) =>
+      name === first
+        ? new Promise((r) => {
+            release = () => r({ ok: true, ...metaFor(name) });
+          })
+        : Promise.resolve({ ok: true, ...metaFor(name) });
+    tap(modal, first);
+    expect(info(modal).textContent).toContain("Reading metadata");
+    while (shownName(modal) !== last) key(lb(modal), "ArrowRight");
+    await painted(modal, last);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    // Two-sided: the stalled read DID resolve, and it did not overwrite.
+    expect(metaReads).toContain(first);
+    expect(rowValue(modal, "Positive")).toBe(`prompt of ${last}`);
+    // Stepping back uses the settled read rather than asking again.
+    while (shownName(modal) !== first) key(lb(modal), "ArrowLeft");
+    await painted(modal, first);
+    expect(metaReads.filter((n) => n === first)).toHaveLength(1);
+    modal.close();
+  });
+
+  it("reports a failed read inside the panel, not as a toast over the viewer", async () => {
+    stubWide(true);
+    document.getElementById("cmn-notify-container")?.remove();
+    metaResponder = async () => ({ ok: false, error: "unsupported file type" });
+    const modal = await open();
+    tap(modal, "c.png");
+    await vi.waitFor(() => {
+      if (!info(modal).textContent.includes("unsupported file type")) throw new Error("no error");
+    });
+    expect(document.querySelectorAll("#cmn-notify-container .cmn-toast")).toHaveLength(0);
+    modal.close();
+  });
+
+  it("withholds a Safe View match's metadata until it is revealed", async () => {
+    stubWide(true);
+    stubSettings({ [SAFE_VIEW_SETTINGS.keywords]: "nsfw" });
+    const modal = await open();
+    const order = gridNames(modal);
+    const i = order.indexOf("b-nsfw.png");
+    tap(modal, order[i - 1]);
+    key(lb(modal), "ArrowRight");
+    expect(shownName(modal)).toBe("b-nsfw.png");
+    // Stepping onto a match is not a decision to look at it — and its prompt
+    // is exactly the text the blur is hiding.
+    expect(info(modal).querySelector(".ib-meta-row")).toBeNull();
+    expect(info(modal).textContent).toContain("Safe View");
+    expect(metaReads).not.toContain("b-nsfw.png");
+    lb(modal).querySelector(".ib-lb-reveal").click();
+    await painted(modal, "b-nsfw.png");
+    modal.close();
   });
 });

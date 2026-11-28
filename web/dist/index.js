@@ -2180,8 +2180,95 @@ function labelParts(name, verbatim) {
   return splitTail(stripCounter(name));
 }
 
+// src/meta-view.ts
+var META_LOADING_HTML = `<div class="ib-meta-status">Reading metadata…</div>`;
+function renderMeta(data) {
+  const rows = metaRows(data.summary);
+  const rawKeys = Object.keys(data.raw);
+  const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
+  const rowsHTML = rows.map((r, i) => `
+        <div class="ib-meta-row">
+          <div class="ib-meta-k">${escapeHTML(r.label)}</div>
+          <div class="ib-meta-v">${escapeHTML(r.value)}</div>
+          <button type="button" class="ib-meta-copy" data-copy-row="${i}">Copy</button>
+        </div>`).join("");
+  const emptyHTML = rows.length ? "" : `<div class="ib-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
+  const rawJSON = JSON.stringify(data.raw, null, 2);
+  const rawHTML = rawKeys.length ? `
+        <details class="ib-meta-raw">
+          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
+          <pre>${escapeHTML(rawJSON)}</pre>
+          <button type="button" class="ib-meta-copy" data-copy-raw>Copy JSON</button>
+        </details>` : "";
+  const noteHTML = data.truncated ? `<div class="ib-meta-note">Some values were truncated by the server.</div>` : "";
+  const html = `
+        <div class="ib-meta-src">${escapeHTML(srcLabel)}${data.format ? `<span class="ib-meta-fmt">${escapeHTML(data.format)}</span>` : ""}</div>
+        ${emptyHTML}
+        ${rowsHTML}
+        ${noteHTML}
+        ${rawHTML}`;
+  const copyAllHTML = rows.length ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>` : "";
+  return { html, copyAllHTML, rows, rawJSON };
+}
+function wireMetaCopy(root, meta) {
+  for (const btn of root.querySelectorAll("[data-copy-row]")) {
+    const row = meta.rows[Number(btn.dataset.copyRow)];
+    const label = btn.textContent || "Copy";
+    if (row)
+      btn.addEventListener("click", () => copyInto(btn, row.value, label));
+  }
+  const rawBtn = root.querySelector("[data-copy-raw]");
+  const rawLabel = rawBtn?.textContent || "Copy JSON";
+  rawBtn?.addEventListener("click", () => copyInto(rawBtn, meta.rawJSON, rawLabel));
+  const allBtn = root.querySelector("[data-copy-all]");
+  const allLabel = allBtn?.textContent || "Copy all";
+  allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(meta.rows), allLabel));
+}
+var copyFeedback = new WeakMap;
+function copyInto(btn, text, restore) {
+  let fb = copyFeedback.get(btn);
+  if (!fb) {
+    fb = { seq: 0, timer: null };
+    copyFeedback.set(btn, fb);
+  }
+  const slot = fb;
+  const seq = ++slot.seq;
+  if (slot.timer !== null) {
+    clearTimeout(slot.timer);
+    slot.timer = null;
+  }
+  copyTextToClipboard(text).then((ok) => {
+    if (slot.seq !== seq)
+      return;
+    btn.textContent = ok ? "Copied ✓" : "Copy failed";
+    btn.classList.toggle("is-copied", ok);
+    slot.timer = setTimeout(() => {
+      slot.timer = null;
+      btn.textContent = restore;
+      btn.classList.remove("is-copied");
+    }, 1500);
+  });
+}
+
 // src/lightbox.ts
 var STYLE_ID4 = "ib-lightbox-style";
+var INFO_STORAGE_KEY = "comfyui-image-browser:lightbox-info";
+var INFO_WIDE_QUERY = "(min-width: 900px)";
+function initialInfoOpen() {
+  try {
+    const raw = localStorage.getItem(INFO_STORAGE_KEY);
+    if (raw === "1")
+      return true;
+    if (raw === "0")
+      return false;
+  } catch {}
+  return typeof window.matchMedia === "function" && window.matchMedia(INFO_WIDE_QUERY).matches;
+}
+function saveInfoOpen(open) {
+  try {
+    localStorage.setItem(INFO_STORAGE_KEY, open ? "1" : "0");
+  } catch {}
+}
 var SWIPE_MIN_PX = 50;
 function neighbour(list, from, dir) {
   for (let i = from + dir;i >= 0 && i < list.length; i += dir) {
@@ -2204,14 +2291,65 @@ function openLightbox(start, deps) {
     <button type="button" class="ib-lb-btn ib-lb-nav ib-lb-prev" data-lb="prev" aria-label="Previous">‹</button>
     <div class="ib-lb-stage"></div>
     <button type="button" class="ib-lb-btn ib-lb-nav ib-lb-next" data-lb="next" aria-label="Next">›</button>
+    <aside class="ib-lb-info" aria-label="Metadata"></aside>
     <div class="ib-lb-bar"></div>`;
   const stage = root.querySelector(".ib-lb-stage");
   const bar = root.querySelector(".ib-lb-bar");
+  const info = root.querySelector(".ib-lb-info");
   const prevBtn = root.querySelector(".ib-lb-prev");
   const nextBtn = root.querySelector(".ib-lb-next");
   let current = null;
   let closed = false;
   let busy = false;
+  const hasInfo = typeof deps.metadata === "function";
+  let infoOpen = hasInfo && initialInfoOpen();
+  const metaCache = new Map;
+  root.classList.toggle("has-info", infoOpen);
+  function paintInfo(f) {
+    if (!infoOpen || !deps.metadata)
+      return;
+    if (deps.hidden(f)) {
+      info.innerHTML = `<div class="ib-meta-status">Hidden by Safe View. Reveal the image to show its metadata.</div>`;
+      return;
+    }
+    let p = metaCache.get(f);
+    if (!p) {
+      const read = deps.metadata(f);
+      if (!read) {
+        info.innerHTML = `<div class="ib-meta-status">No metadata reader for this file type.</div>`;
+        return;
+      }
+      p = read;
+      metaCache.set(f, p);
+    }
+    info.innerHTML = `<div class="ib-lb-info-head">Metadata</div>${META_LOADING_HTML}`;
+    p.then((data) => {
+      if (current !== f || !infoOpen || closed)
+        return;
+      const meta = renderMeta(data);
+      info.innerHTML = `
+          <div class="ib-lb-info-head">Metadata ${meta.rows.length ? `<button type="button" class="ib-meta-copy" data-copy-all>Copy all</button>` : ""}</div>
+          <div class="ib-meta-body">${meta.html}</div>`;
+      wireMetaCopy(info, meta);
+    }, (e) => {
+      if (current !== f || !infoOpen || closed)
+        return;
+      const msg = e instanceof Error ? e.message : String(e);
+      info.innerHTML = `<div class="ib-lb-info-head">Metadata</div><div class="ib-meta-status">Metadata read failed: ${escapeHTML(msg)}</div>`;
+    });
+  }
+  function toggleInfo() {
+    if (!hasInfo)
+      return;
+    infoOpen = !infoOpen;
+    saveInfoOpen(infoOpen);
+    root.classList.toggle("has-info", infoOpen);
+    bar.querySelector('[data-lb="info"]')?.setAttribute("aria-pressed", String(infoOpen));
+    if (infoOpen && current)
+      paintInfo(current);
+    else
+      info.innerHTML = "";
+  }
   function indexOfCurrent() {
     return current ? deps.files().indexOf(current) : -1;
   }
@@ -2264,9 +2402,11 @@ function openLightbox(start, deps) {
     bar.innerHTML = `
       ${rating === null ? "" : starsHTML("ib", rating)}
       ${deps.canDelete(f) ? `<button type="button" class="ib-lb-btn" data-lb="delete" title="Delete…" aria-label="Delete">\uD83D\uDDD1</button>` : ""}
+      ${hasInfo ? `<button type="button" class="ib-lb-btn" data-lb="info" title="Metadata (i)" aria-label="Metadata" aria-pressed="${infoOpen}">ⓘ</button>` : ""}
       <button type="button" class="ib-lb-btn" data-lb="tab" title="Open in new tab" aria-label="Open in new tab">↗</button>
       <span class="ib-lb-name" title="${escapeHTML(deps.name(f))}">${escapeHTML(deps.name(f))}</span>
       <span class="ib-lb-pos">${pos}/${n}</span>`;
+    paintInfo(f);
   }
   function step(dir) {
     const next = neighbour(deps.files(), indexOfCurrent(), dir);
@@ -2333,6 +2473,8 @@ function openLightbox(start, deps) {
       onDelete();
     else if (action === "tab" && current)
       deps.openInTab(current);
+    else if (action === "info")
+      toggleInfo();
     else if (t === root || t === stage)
       close();
   });
@@ -2342,7 +2484,7 @@ function openLightbox(start, deps) {
   let swiped = false;
   root.addEventListener("pointerdown", (e) => {
     swiped = false;
-    if (e.target.closest("button, video, .ib-lb-bar"))
+    if (e.target.closest("button, video, .ib-lb-bar, .ib-lb-info"))
       return;
     swiping = true;
     swipeX = e.clientX;
@@ -2374,6 +2516,8 @@ function openLightbox(start, deps) {
       step(1);
     else if (e.key === "Delete" && current && deps.canDelete(current))
       onDelete();
+    else if (e.key === "i" && hasInfo && !e.ctrlKey && !e.metaKey && !e.altKey)
+      toggleInfo();
     else
       handled = false;
     if (handled) {
@@ -2459,6 +2603,45 @@ var CSS4 = `
 .ib-lb-bar .ib-star { font-size: 22px; padding: 8px 5px; min-width: 32px; min-height: 44px; }
 .ib-lb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 40%; }
 .ib-lb-pos { color: #8a8a96; font-variant-numeric: tabular-nums; }
+.ib-lb-btn[aria-pressed="true"] { border-color: #6ba6ff; color: #fff; }
+/* Info panel. Wide: a column beside the media, which shrinks to make room.
+   Narrow: a sheet over the lower half of the stage, so the image keeps the
+   full width a phone has. */
+.ib-lb-info {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 64px;
+    width: 360px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 64px 14px 14px;
+    box-sizing: border-box;
+    background: rgba(18, 18, 26, 0.96);
+    border-left: 1px solid #2a2a32;
+    color: #d8d8dc;
+    user-select: text;
+    z-index: 0;
+}
+.ib-lb.has-info .ib-lb-info { display: block; }
+.ib-lb.has-info .ib-lb-stage { right: 360px; }
+.ib-lb.has-info .ib-lb-next { right: 372px; }
+.ib-lb-info-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8a8a96;
+    margin-bottom: 8px; min-height: 36px;
+}
+.ib-lb-info .ib-meta-row { grid-template-columns: 72px 1fr auto; }
+.ib-lb-info .ib-meta-v { max-height: 16em; }
+@media (max-width: 899px) {
+    .ib-lb-info {
+        top: auto; left: 0; width: auto; max-height: 50%;
+        padding-top: 10px; border-left: 0; border-top: 1px solid #2a2a32;
+    }
+    .ib-lb.has-info .ib-lb-stage { right: 0; }
+    .ib-lb.has-info .ib-lb-next { right: 12px; }
+}
 `;
 
 // src/safe-tag.ts
@@ -3409,6 +3592,7 @@ function openImageBrowser() {
         renderGrid();
       },
       openInTab: (x) => openFull(x),
+      metadata: (x) => META_EXTS.has((x.ext || "").toLowerCase()) ? fetchMetadata(fileType(x), fileSub(x), x.name, state.absPath) : null,
       onClose: (last) => {
         for (const x of rated) {
           const i = renderedFiles.indexOf(x);
@@ -3422,31 +3606,6 @@ function openImageBrowser() {
           applyFocus();
         }
       }
-    });
-  }
-  const copyFeedback = new WeakMap;
-  function copyInto(btn, text, restore) {
-    let fb = copyFeedback.get(btn);
-    if (!fb) {
-      fb = { seq: 0, timer: null };
-      copyFeedback.set(btn, fb);
-    }
-    const slot = fb;
-    const seq = ++slot.seq;
-    if (slot.timer !== null) {
-      clearTimeout(slot.timer);
-      slot.timer = null;
-    }
-    copyTextToClipboard(text).then((ok) => {
-      if (slot.seq !== seq)
-        return;
-      btn.textContent = ok ? "Copied ✓" : "Copy failed";
-      btn.classList.toggle("is-copied", ok);
-      slot.timer = setTimeout(() => {
-        slot.timer = null;
-        btn.textContent = restore;
-        btn.classList.remove("is-copied");
-      }, 1500);
     });
   }
   async function loadWorkflow(f) {
@@ -3508,7 +3667,7 @@ function openImageBrowser() {
     const title = `Metadata — ${escapeHTML(f.name)}`;
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
-      <div class="ib-meta-body"><div class="ib-meta-status">Reading metadata…</div></div>
+      <div class="ib-meta-body">${META_LOADING_HTML}</div>
       <div class="cmp-ov-actions">
         <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
       </div>`;
@@ -3523,51 +3682,16 @@ function openImageBrowser() {
     }
     if (!live)
       return;
-    const rows = metaRows(data.summary);
-    const rawKeys = Object.keys(data.raw);
-    const srcLabel = data.source === "comfyui" ? "ComfyUI" : data.source === "a1111" ? "A1111" : "no generation data";
-    const rowsHTML = rows.map((r, i) => `
-        <div class="ib-meta-row">
-          <div class="ib-meta-k">${escapeHTML(r.label)}</div>
-          <div class="ib-meta-v">${escapeHTML(r.value)}</div>
-          <button type="button" class="ib-meta-copy" data-copy-row="${i}">Copy</button>
-        </div>`).join("");
-    const emptyHTML = rows.length ? "" : `<div class="ib-meta-empty">${rawKeys.length ? "No recognised generation parameters." : "No generation metadata found."}</div>`;
-    const rawJSON = JSON.stringify(data.raw, null, 2);
-    const rawHTML = rawKeys.length ? `
-        <details class="ib-meta-raw">
-          <summary>Raw metadata (${rawKeys.length} key${rawKeys.length === 1 ? "" : "s"})</summary>
-          <pre>${escapeHTML(rawJSON)}</pre>
-          <button type="button" class="ib-meta-copy" data-copy-raw>Copy JSON</button>
-        </details>` : "";
-    const noteHTML = data.truncated ? `<div class="ib-meta-note">Some values were truncated by the server.</div>` : "";
-    const copyAll = rows.length ? `<button type="button" class="cmp-ov-btn cmp-ov-primary" data-copy-all>Copy all</button>` : "";
+    const meta = renderMeta(data);
     ov.card.innerHTML = `
       <div class="cmp-ov-title">${title}</div>
-      <div class="ib-meta-body">
-        <div class="ib-meta-src">${escapeHTML(srcLabel)}${data.format ? `<span class="ib-meta-fmt">${escapeHTML(data.format)}</span>` : ""}</div>
-        ${emptyHTML}
-        ${rowsHTML}
-        ${noteHTML}
-        ${rawHTML}
-      </div>
+      <div class="ib-meta-body">${meta.html}</div>
       <div class="cmp-ov-actions">
-        ${copyAll}
+        ${meta.copyAllHTML}
         <button type="button" class="cmp-ov-btn" data-meta-close>Close</button>
       </div>`;
     ov.card.querySelector("[data-meta-close]")?.addEventListener("click", close);
-    for (const btn of ov.card.querySelectorAll("[data-copy-row]")) {
-      const row = rows[Number(btn.dataset.copyRow)];
-      const label = btn.textContent || "Copy";
-      if (row)
-        btn.addEventListener("click", () => copyInto(btn, row.value, label));
-    }
-    const rawBtn = ov.card.querySelector("[data-copy-raw]");
-    const rawLabel = rawBtn?.textContent || "Copy JSON";
-    rawBtn?.addEventListener("click", () => copyInto(rawBtn, rawJSON, rawLabel));
-    const allBtn = ov.card.querySelector("[data-copy-all]");
-    const allLabel = allBtn?.textContent || "Copy all";
-    allBtn?.addEventListener("click", () => copyInto(allBtn, metaClipboardText(rows), allLabel));
+    wireMetaCopy(ov.card, meta);
   }
   async function onDelete(f) {
     const ok = await confirmInShell(modal, {
@@ -4793,7 +4917,7 @@ ${when}`;
         <div class="ib-help-col">
           <div class="ib-help-h">Other</div>
           <dl>
-            <dt>Enter / o</dt><dd>open in lightbox (←/→ step, Del delete, Esc close)</dd>
+            <dt>Enter / o</dt><dd>open in lightbox (←/→ step, i metadata, Del delete, Esc close)</dd>
             <dt>i</dt><dd>metadata</dd>
             <dt>w</dt><dd>load workflow</dd>
             <dt>b</dt><dd>safe view on/off</dd>
